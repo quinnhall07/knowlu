@@ -891,7 +891,9 @@ fn commitment_passes(
     let mut asks = 0;
     if !read_failed && !cm::asks_wait_for_registrar(&file, today) {
         let ask_budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
-        let (_, n, ask_warnings) = cm::emit_asks(vault, &proposals, today, ask_budget, ctx, journal);
+        // Replan §6.5 (RQ9): the no-time set comes from the file read above, never a second read.
+        let no_time = cm::no_time_courses(&file, today);
+        let (_, n, ask_warnings) = cm::emit_asks(vault, &proposals, &no_time, today, ask_budget, ctx, journal);
         asks = n;
         warnings.extend(ask_warnings);
     }
@@ -1059,7 +1061,7 @@ pub fn commitments_report_with(
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
-    let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
+    let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes, &cm::no_time_courses(&file, today));
     let registrar_changes = cm::registrar_changes_json(vault, &file, &set, today);
     CommitmentsReport { proposals, uncovered, registrar_changes, warnings }
 }

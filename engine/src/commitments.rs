@@ -886,9 +886,16 @@ fn active_courses(vault: &Path) -> Vec<(String, String)> {
 /// class proposal in `proposals` and no confirmed `class` note. Courses are compared the way the
 /// §3.5 signature compares them, by slug or code (`course_key`). A class note with no `course:`
 /// covers the course whose code leads its title (Plan ruling Q2-c). A lab or office hours covers
-/// nothing.
-pub fn uncovered_courses(vault: &Path, set: &Commitments, proposals: &[Proposal], codes: &Codes) -> Vec<UncoveredCourse> {
+/// nothing. A course in `no_time` ([`no_time_courses`], replan §6.5) counts as covered.
+pub fn uncovered_courses(
+    vault: &Path,
+    set: &Commitments,
+    proposals: &[Proposal],
+    codes: &Codes,
+    no_time: &BTreeSet<String>,
+) -> Vec<UncoveredCourse> {
     let mut covered = covered_course_keys(set, codes);
+    covered.extend(no_time.iter().map(|course| course_key(course, codes)));
     for p in proposals.iter().filter(|p| p.kind == "class") {
         if let Some(course) = p.course.as_deref() {
             covered.insert(course_key(course, codes));
@@ -897,6 +904,16 @@ pub fn uncovered_courses(vault: &Path, set: &Commitments, proposals: &[Proposal]
     active_courses(vault)
         .into_iter()
         .filter(|(slug, _)| !covered.contains(&course_key(slug, codes)))
+        .map(|(slug, title)| UncoveredCourse { slug, title })
+        .collect()
+}
+
+/// The active courses (`active_courses`, slug order) whose `course_key` is one of `keys`'.
+fn listed_courses(vault: &Path, keys: &BTreeSet<String>, codes: &Codes) -> Vec<UncoveredCourse> {
+    let keys: BTreeSet<String> = keys.iter().map(|course| course_key(course, codes)).collect();
+    active_courses(vault)
+        .into_iter()
+        .filter(|(slug, _)| keys.contains(&course_key(slug, codes)))
         .map(|(slug, title)| UncoveredCourse { slug, title })
         .collect()
 }
@@ -1430,6 +1447,11 @@ pub struct SeriesFile {
     /// Phase-3 spec A2 item 13: the registrar block, per term calendar key. Absent from the file
     /// (and empty here) until a registrar fetch writes one.
     pub registrar: BTreeMap<String, RegistrarTerm>,
+    /// Replan §6.5, RQ9: the no-time block, `classsearch:<school>:<term>` -> the course keys that
+    /// term's class search listed with no meeting time; course keys only, never a section, CRN, time
+    /// or room. Absent from the file (and empty here) until written. Not tied to `calendars`: a
+    /// `Rows` purge removes that entry while the block stays ([`purge_class_search`]).
+    pub class_search: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// One term's registrar block (phase-3 spec A2 item 13). `applied` and `ended` accumulate over the
@@ -2046,6 +2068,13 @@ pub(crate) fn file_bytes(file: &SeriesFile) -> String {
             .collect();
         value["registrar"] = serde_json::Value::Object(terms);
     }
+    // Replan §6.5: the no-time block, beside `registrar` and omitted the same way; each list is a
+    // set, so it is written sorted.
+    if !file.class_search.is_empty() {
+        let blocks: serde_json::Map<String, serde_json::Value> =
+            file.class_search.iter().map(|(key, courses)| (key.clone(), serde_json::json!({ "no_time": courses }))).collect();
+        value["class_search"] = serde_json::Value::Object(blocks);
+    }
     format!("{}\n", crate::ledger::dumps_value(&value))
 }
 
@@ -2176,6 +2205,16 @@ fn parse_file(text: &str) -> Parsed<SeriesFile> {
             file.registrar.insert(key.clone(), entry);
         }
     }
+    // Replan §6.5: the no-time block reads the registrar block's way: absent is empty, a wrong
+    // shape is a malformed file.
+    if let Some(block) = object.get("class_search") {
+        let bad = || "bad class_search".to_string();
+        for (key, entry) in block.as_object().ok_or_else(bad)? {
+            let list = entry.get("no_time").and_then(|v| v.as_array()).ok_or_else(bad)?;
+            let courses = list.iter().map(|c| c.as_str().map(str::to_string).ok_or_else(bad)).collect::<Parsed<BTreeSet<String>>>()?;
+            file.class_search.insert(key.clone(), courses);
+        }
+    }
     file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
     Ok(file)
 }
@@ -2231,10 +2270,25 @@ pub const SERIES_LOCK_FILE: &str = "state/calendar-series.lock";
 /// An exclusive hold on [`SERIES_LOCK_FILE`], blocking until it is free (std's `File::lock`,
 /// stable since 1.89). Released when the returned handle drops, or by the OS if the process dies.
 fn lock_series_file(vault: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::create_dir_all(vault.join("state"))?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(SERIES_LOCK_FILE))?;
+    let file = open_series_lock(vault)?;
     file.lock()?;
     Ok(file)
+}
+
+/// [`lock_series_file`] without the wait (std's `File::try_lock`): `None` at once when the lock is
+/// held elsewhere (replan §6.12, the launch sweep).
+fn try_lock_series_file(vault: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let file = open_series_lock(vault)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
+    }
+}
+
+fn open_series_lock(vault: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(vault.join("state"))?;
+    std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(SERIES_LOCK_FILE))
 }
 
 /// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
@@ -2277,15 +2331,22 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 ///   open; a row its own fresh read omits stays while its `until` is open and then goes, and no
 ///   class-search row ever moves to `ended`.
 ///
-/// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
-/// then rename). With `fresh` non-empty, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
-/// exclusively, so two processes refreshing at once each keep their calendars (final review I2);
-/// a lock that cannot be taken is one warning and the run goes on unguarded. A file that could not be *read* (an I/O error, not a parse failure) is left
+/// The file is written only when the bytes differ, whole (temp file, then rename), and only when
+/// `fresh` is non-empty or a passed no-time block was dropped under the lock (below). With `fresh`
+/// non-empty, or with such a drop due, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
+/// exclusively, so two processes refreshing at once each keep their calendars (final review I2).
+/// With `fresh` non-empty, a lock that cannot be taken is one warning and the run goes on
+/// unguarded; for a drop alone it is one warning and nothing is stored. A file that could not be *read* (an I/O error, not a parse failure) is left
 /// alone and not rewritten this run, with one warning; the returned data then holds only this
 /// run's fresh calendars. Warnings: the old file's, and a failed write's.
 ///
 /// The registrar block (phase-3 spec A2 item 13, "Every writer keeps it") is carried unchanged;
 /// a term's entry goes when its calendar leaves `calendars`.
+///
+/// The no-time block (replan §6.5) is carried, not tied to `calendars`, less any block whose term
+/// has passed. That drop happens only under the lock: with nothing `fresh`, an unlocked first read
+/// that finds a passed block takes the lock, and the file is re-read under it and stored for the
+/// drop alone. With no passed block and nothing `fresh`, no lock is taken and nothing is written.
 pub fn refresh_series(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
@@ -2306,11 +2367,182 @@ pub fn registrar_in_play(file: &SeriesFile, today: Date) -> BTreeSet<String> {
         .collect()
 }
 
+/// A no-time block's school and term, from its key `classsearch:<school>:<term>`.
+fn block_school_term(key: &str) -> Option<(&str, &str)> {
+    key.strip_prefix(CLASS_SEARCH_PREFIX)?.split_once(':')
+}
+
+/// `term` (`<year><suffix>`) placed among `school`'s terms: `(year, place in School::terms)`.
+fn term_place(school: &str, term: &str) -> Option<(i32, usize)> {
+    let year = term.get(..4).filter(|y| y.bytes().all(|b| b.is_ascii_digit()))?.parse().ok()?;
+    let at = crate::registrar::school(school)?.terms.iter().position(|(_, suffix)| Some(*suffix) == term.get(4..))?;
+    Some((year, at))
+}
+
+/// Replan §6.5, "A block's term has passed", the one test every drop uses: the block's term sorts
+/// strictly before `registrar::term_for(school, today)`, by year and then by place in
+/// `School::terms`. With no `term_for`, or a term that cannot be placed, it has not passed, and a
+/// future block has not passed either.
+fn block_passed(key: &str, today: Date) -> bool {
+    let Some((school, term)) = block_school_term(key) else { return false };
+    let now = crate::registrar::term_for(school, today).and_then(|now| term_place(school, &now));
+    matches!((term_place(school, term), now), (Some(block), Some(now)) if block < now)
+}
+
+/// Replan §6.5 (RQ9): the course keys the no-time block lists for the current term. A block whose
+/// term is not `registrar::term_for(school, today)` is ignored, so a new term asks again.
+pub fn no_time_courses(file: &SeriesFile, today: Date) -> BTreeSet<String> {
+    let current = |key: &str| {
+        block_school_term(key).is_some_and(|(school, term)| crate::registrar::term_for(school, today).as_deref() == Some(term))
+    };
+    file.class_search.iter().filter(|(key, _)| current(key)).flat_map(|(_, courses)| courses.iter().cloned()).collect()
+}
+
+/// Whether a series file's bytes can hold class-search data at all (`classsearch:` keys or the
+/// no-time block). A file without either is clean whatever its shape, and is never parsed for it.
+fn mentions_class_search(bytes: &[u8]) -> bool {
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    has(b"classsearch") || has(b"class_search")
+}
+
+/// Removes from `file` what `scope` names (replan §6.12), directly and never through `aged_out`:
+/// every `classsearch:` series (by key or calendar), `calendars` entry and `ended` entry, a block
+/// whose term has passed, and with `All` every block. Whether anything went.
+fn purge_file(file: &mut SeriesFile, scope: PurgeScope, today: Date) -> bool {
+    let size = |f: &SeriesFile| (f.series.len(), f.calendars.len(), f.ended.len(), f.class_search.len());
+    let before = size(file);
+    file.series.retain(|s| !is_class_search(&s.source_uid) && !is_class_search(&s.calendar));
+    file.calendars.retain(|calendar, _| !is_class_search(calendar));
+    file.ended.retain(|key, e| !is_class_search(key) && !is_class_search(&e.calendar));
+    match scope {
+        PurgeScope::Rows => file.class_search.retain(|key, _| !block_passed(key, today)),
+        PurgeScope::All => file.class_search.clear(),
+    }
+    size(file) != before
+}
+
+/// What [`purge_class_search`] removes (replan §6.12): `Rows` the unconfirmed `classsearch:` rows,
+/// `All` those and the no-time block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeScope {
+    Rows,
+    All,
+}
+
+/// What a purge did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purged {
+    /// Nothing to remove, and nothing written. Either the first read found nothing (no lock
+    /// taken), or it did and the re-read under the lock found it already gone (the lock was taken).
+    Clean,
+    /// Something was removed: the series file rewritten without the entries, a leftover
+    /// `calendar-series.json.tmp*` copy deleted, or both.
+    Changed,
+    /// [`try_purge_class_search`] found the series lock held elsewhere and changed nothing.
+    Busy,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// C2b tests only: called on this thread after a purge's first read and just before it takes
+    /// [`SERIES_LOCK_FILE`], so a test can store a change in the gap by a signal, not a clock.
+    pub(crate) static BEFORE_PURGE_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    /// C2b tests only: the same, for a `rank`'s drop of a passed no-time block in
+    /// [`refresh_series_with`].
+    pub(crate) static BEFORE_DROP_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Replan §6.12 (RQ11, RQ12): deletes the unconfirmed class-search rows (`Rows`), or those and the
+/// no-time block (`All`), from `state/calendar-series.json`; either also drops a block whose term
+/// has passed. The first read takes no lock and only decides whether to lock: a missing or clean
+/// file, with no leftover `calendar-series.json.tmp*` copy that mentions class search, takes no
+/// lock, creates no `state/` folder and writes nothing. A dirty one takes [`SERIES_LOCK_FILE`],
+/// blocking, re-reads under it and removes the entries from that fresh copy, so nothing another
+/// writer stored in between is lost; still holding the lock, it deletes every leftover copy. It
+/// writes only the series file, through [`file_bytes`], and only when something changed; it touches no note, marker or journal and needs
+/// no sign-in, entitlement or network. `today` comes from the caller, so no clock is read here. An
+/// error is a named line with fixed words, never a key, and nothing written.
+pub fn purge_class_search(vault: &Path, scope: PurgeScope, today: Date) -> Result<Purged, String> {
+    purge_with(vault, scope, today, true)
+}
+
+/// [`purge_class_search`] with a try-lock (the launch sweep): `Ok(Purged::Busy)` at once, with
+/// nothing changed, when the series lock is held elsewhere.
+pub fn try_purge_class_search(vault: &Path, scope: PurgeScope, today: Date) -> Result<Purged, String> {
+    purge_with(vault, scope, today, false)
+}
+
+fn purge_with(vault: &Path, scope: PurgeScope, today: Date, wait: bool) -> Result<Purged, String> {
+    let not_purged = |why: String| format!("series file: {SERIES_FILE} {why}; class-search data not purged");
+    let parsed = |loaded: Loaded| match loaded {
+        Loaded::Read(file) => Ok(file),
+        Loaded::Malformed(why) => Err(not_purged(format!("malformed ({why})"))),
+        Loaded::Unreadable(kind) => Err(not_purged(format!("unreadable ({kind})"))),
+    };
+    let file_dirty = match std::fs::read(series_path(vault)) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(not_purged(format!("unreadable ({})", err.kind()))),
+        Ok(bytes) if !mentions_class_search(&bytes) => false,
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => purge_file(&mut parse_file(&text).map_err(|why| not_purged(format!("malformed ({why})")))?, scope, today),
+            Err(_) => return Err(not_purged("malformed (not UTF-8)".into())),
+        },
+    };
+    // A copy a crashed `write_state_file` left can hold class-search data the file no longer does.
+    let temps_dirty = leftover_series_temps(vault).iter().any(|tmp| std::fs::read(tmp).is_ok_and(|b| mentions_class_search(&b)));
+    if !file_dirty && !temps_dirty {
+        return Ok(Purged::Clean);
+    }
+    #[cfg(test)]
+    BEFORE_PURGE_LOCK.with(|hook| {
+        if let Some(signal) = hook.borrow().as_ref() {
+            signal();
+        }
+    });
+    let could_not_lock = |err: std::io::Error| not_purged(format!("could not lock {SERIES_LOCK_FILE} ({})", err.kind()));
+    let _lock = match wait {
+        true => lock_series_file(vault).map_err(could_not_lock)?,
+        false => match try_lock_series_file(vault).map_err(could_not_lock)? {
+            Some(lock) => lock,
+            None => return Ok(Purged::Busy),
+        },
+    };
+    let mut file = parsed(load_series_file(vault))?;
+    let rewritten = purge_file(&mut file, scope, today);
+    if rewritten {
+        write_series_file(vault, &file_bytes(&file)).map_err(|err| not_purged(format!("could not be written ({})", err.kind())))?;
+    }
+    // Under the lock, every leftover copy goes, whatever it holds: no writer that holds the lock
+    // has one open, and the backup never copies one (§6.12).
+    let mut removed = false;
+    for tmp in leftover_series_temps(vault) {
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => removed = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(not_purged(format!("left a copy it could not remove ({})", err.kind()))),
+        }
+    }
+    Ok(if rewritten || removed { Purged::Changed } else { Purged::Clean })
+}
+
+/// Every `state/calendar-series.json.tmp*` beside the file ([`write_state_file`]'s
+/// `<name>.tmp<pid>`, left by a crash before its rename), sorted. No `state/` folder, none.
+fn leftover_series_temps(vault: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(vault.join("state")) else { return Vec::new() };
+    let leftover = |path: &PathBuf| {
+        path.is_file() && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("calendar-series.json.tmp"))
+    };
+    let mut out: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(leftover).collect();
+    out.sort();
+    out
+}
+
 /// [`refresh_series`], plus a registrar fetch's lists (A2 item 13, "When it is written"): they go
 /// into the term's block in this same write, under the same lock. `applied` and `ended` are
 /// appended, `status` and `unread` replaced, `last_fetch` set (and `first_fetch` on a new block).
 /// The third value says whether the file on disk now holds the returned bytes (written, or
-/// already identical): false with `fresh` empty, an unreadable file or a failed write.
+/// already identical): false with `fresh` empty and no passed no-time block dropped under the lock,
+/// an unreadable file or a failed write.
 pub fn refresh_series_with(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
@@ -2319,11 +2551,34 @@ pub fn refresh_series_with(
 ) -> (SeriesFile, Vec<String>, bool) {
     // Phase 3 final review I2: a run that may write holds the series lock from the read to the
     // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
+    // Replan §6.5: with nothing fresh, the lock is taken only for a passed no-time block that the
+    // unlocked read below finds; `refresh_series_held` re-reads under it.
     let held = match fresh.is_empty() {
+        true if passed_block_on_disk(vault, today) => {
+            #[cfg(test)]
+            BEFORE_DROP_LOCK.with(|hook| {
+                if let Some(signal) = hook.borrow().as_ref() {
+                    signal();
+                }
+            });
+            hold_series_lock(vault)
+        }
         true => SeriesLock(None, None),
         false => hold_series_lock(vault),
     };
     refresh_series_held(vault, held, fresh, today, news)
+}
+
+/// The unlocked first read of [`refresh_series_with`]: whether the file on disk holds a no-time
+/// block whose term has passed. A file that cannot be read or parsed holds none.
+fn passed_block_on_disk(vault: &Path, today: Date) -> bool {
+    match std::fs::read(series_path(vault)) {
+        Ok(bytes) if mentions_class_search(&bytes) => std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| parse_file(text).ok())
+            .is_some_and(|file| file.class_search.keys().any(|key| block_passed(key, today))),
+        _ => false,
+    }
 }
 
 /// A hold on [`SERIES_LOCK_FILE`] ([`hold_series_lock`]), or the warning that it could not be
@@ -2341,7 +2596,8 @@ pub fn hold_series_lock(vault: &Path) -> SeriesLock {
 }
 
 /// [`refresh_series_with`] under a lock the caller already holds (the lock is not re-entrant);
-/// it is released when this returns.
+/// it is released when this returns. A passed no-time block is dropped, and stored for alone, only
+/// when `held` holds the lock (replan §6.5); with none it is carried and waits for the next `rank`.
 pub fn refresh_series_held(
     vault: &Path,
     held: SeriesLock,
@@ -2349,7 +2605,7 @@ pub fn refresh_series_held(
     today: Date,
     news: Option<&RegistrarFetch>,
 ) -> (SeriesFile, Vec<String>, bool) {
-    let SeriesLock(_lock, lock_warning) = held;
+    let SeriesLock(lock, lock_warning) = held;
     let (old, mut warnings, writable) = match load_series_file(vault) {
         Loaded::Read(file) => (file, Vec::new(), true),
         Loaded::Malformed(why) => (
@@ -2479,8 +2735,15 @@ pub fn refresh_series_held(
         ended.insert(gone.source_uid, entry);
     }
 
-    let file = SeriesFile { calendars, ended, series, registrar: block };
-    let mut stored = !fresh.is_empty() && writable;
+    let mut class_search = old.class_search;
+    let blocks = class_search.len();
+    if lock.is_some() {
+        class_search.retain(|key, _| !block_passed(key, today));
+    }
+    let dropped = class_search.len() != blocks;
+
+    let file = SeriesFile { calendars, ended, series, registrar: block, class_search };
+    let mut stored = (!fresh.is_empty() || dropped) && writable;
     if stored {
         let bytes = file_bytes(&file);
         if std::fs::read(series_path(vault)).ok().as_deref() != Some(bytes.as_bytes()) {
@@ -3514,10 +3777,13 @@ fn asked_courses(vault: &Path, today: Date) -> (BTreeSet<String>, i64) {
 /// `min(budget, ASKS_PER_DAY − asks first proposed today)`. A course is skipped when its
 /// `card:<slug>` marker exists or an ask card already covers it ([`asked_courses`]). Every card
 /// goes through [`file_card`]. A card that cannot be filed is one warning, and ends this run's
-/// asks. Returns `(paths, count, warnings)`.
+/// asks. Returns `(paths, count, warnings)`. A course in `no_time` (the caller's
+/// [`no_time_courses`] of the file it already read and checked, replan §6.5) gets no ask; this
+/// never re-reads the series file, so a failed second read cannot file one (RQ9).
 pub fn emit_asks(
     vault: &Path,
     proposals: &[Proposal],
+    no_time: &BTreeSet<String>,
     today: Date,
     budget: i64,
     ctx: &crate::write::WriteContext,
@@ -3535,7 +3801,7 @@ pub fn emit_asks(
     }
     let set = load(vault);
     let (codes, _) = Codes::load(vault);
-    for course in uncovered_courses(vault, &set, proposals, &codes) {
+    for course in uncovered_courses(vault, &set, proposals, &codes, no_time) {
         if filed.len() >= allowance {
             break;
         }
@@ -5267,6 +5533,11 @@ pub struct Overview {
     /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
     pub window: Vec<serde_json::Value>,
     pub uncovered_courses: Vec<UncoveredCourse>,
+    /// Replan §6.5: the active courses [`no_time_courses`] lists, as `{slug, title}`, matched by
+    /// `course_key`, in slug order; step 10's "No set meeting time listed". A listed key no active
+    /// course has is dropped, and none of these is in `uncovered_courses`. The block on disk stays
+    /// course keys only.
+    pub no_time_courses: Vec<UncoveredCourse>,
     /// Phase 3 (Plan ruling R3-d): [`crate::registrar::status`], or `null`.
     pub registrar: serde_json::Value,
     /// The current registrar proposals (key `registrar:`), as [`proposal_value`].
@@ -5310,6 +5581,7 @@ impl Overview {
             "office_hours": self.office_hours,
             "window": self.window,
             "uncovered_courses": self.uncovered_courses,
+            "no_time_courses": self.no_time_courses,
             "registrar": self.registrar,
             "registrar_proposals": self.registrar_proposals,
             "registrar_changes": self.registrar_changes,
@@ -5354,7 +5626,8 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
             serde_json::json!({ "day": day, "start": hm(start), "end": hm(end), "source": source })
         })
         .collect();
-    let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes);
+    let no_time = no_time_courses(&stored.file, today);
+    let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes, &no_time);
     let setup = vault_day(vault, today) == 1 && stored.set.planning_day.is_none();
     let registrar = crate::registrar::status(&stored.file, today);
     let registrar_proposals = stored
@@ -5369,6 +5642,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         office_hours,
         window,
         uncovered_courses,
+        no_time_courses: listed_courses(vault, &no_time, &stored.codes),
         registrar,
         registrar_proposals,
         registrar_changes,
@@ -7850,7 +8124,7 @@ mod series_tests {
         g.last_seen = Some(d0);
         p.last_seen = Some(plus(d0, 3));
         day.last_seen = Some(plus(d0, 3));
-        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day], registrar: BTreeMap::new() };
+        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day], registrar: BTreeMap::new(), class_search: BTreeMap::new() };
         let map = file.instances_map();
         assert_eq!(
             map["gcal-series:k"],
@@ -8343,6 +8617,7 @@ mod proposal_tests {
             ended: BTreeMap::new(),
             series,
             registrar: BTreeMap::new(),
+            class_search: BTreeMap::new(),
         };
         let first = run(&file, &Commitments::default());
         assert_eq!(
@@ -10837,7 +11112,7 @@ mod phase2_tests {
     fn every_active_course_with_no_class_is_uncovered_in_slug_order() {
         let v = three_courses("uncovered");
         let (codes, _) = Codes::load(&v);
-        let got = uncovered_courses(&v, &Commitments::default(), &[], &codes);
+        let got = uncovered_courses(&v, &Commitments::default(), &[], &codes, &BTreeSet::new());
         assert_eq!(slugs(&got), ["ant-101", "bui-100", "cs-100"]);
         assert_eq!(got[1], UncoveredCourse { slug: "bui-100".into(), title: "BUI 100".into() });
     }
@@ -10851,7 +11126,7 @@ mod phase2_tests {
             ..Commitments::default()
         };
         let proposals = [proposal_of("class", "CS 100", Some("cs-100"), "gcal-series:cs100")];
-        assert!(uncovered_courses(&v, &set, &proposals, &codes).is_empty());
+        assert!(uncovered_courses(&v, &set, &proposals, &codes, &BTreeSet::new()).is_empty());
     }
 
     #[test]
@@ -10861,7 +11136,7 @@ mod phase2_tests {
         let (codes, _) = Codes::load(&v);
         let set = Commitments { confirmed: vec![note_of("lab", "CS 100 Lab", Some("cs-100"))], ..Commitments::default() };
         let proposals = [proposal_of("office-hours", "CS 100 Office Hours", Some("cs-100"), "gcal-series:oh")];
-        assert_eq!(slugs(&uncovered_courses(&v, &set, &proposals, &codes)), ["ant-101", "bui-100", "cs-100"]);
+        assert_eq!(slugs(&uncovered_courses(&v, &set, &proposals, &codes, &BTreeSet::new())), ["ant-101", "bui-100", "cs-100"]);
     }
 
     #[test]
@@ -11184,7 +11459,7 @@ mod phase2_tests {
 
     fn file_asks(vault: &Path, today: Date, budget: i64) -> (Vec<PathBuf>, usize, Vec<String>) {
         let ctx = WriteContext::new("agent:rank", "cli");
-        emit_asks(vault, &[], today, budget, &ctx, &mut Journal::new(vault))
+        emit_asks(vault, &[], &BTreeSet::new(), today, budget, &ctx, &mut Journal::new(vault))
     }
 
     fn front_of(path: &Path) -> Mapping {
@@ -12298,5 +12573,684 @@ mod class_search_tests {
         let old = refresh("past-old", vec![row(CS_KEY, past)], OLD, google_read());
         assert!(!uids(&old).contains(&CS_KEY), "{:?}", uids(&old));
         no_class_search_ended(&old);
+    }
+}
+
+#[cfg(test)]
+mod class_search_purge_tests {
+    //! C2b (onboarding replan §6.5, §6.12, RQ9, RQ11, RQ12): `purge_class_search`, the no-time
+    //! block and `uncovered_courses`' new input. Every setup writes the series file through
+    //! `put`, which builds the no-time block by hand, so the block's bytes are pinned here and not
+    //! borrowed from the code under test. Every title, key, course and date is invented.
+
+    use super::*;
+    use crate::journal::{make_record, Journal, NewRecord};
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    const TODAY: Date = Date::constant(2026, 9, 10);
+    const CS_CAL: &str = "classsearch:ua:202640";
+    const CS_KEY: &str = "classsearch:ua:202640-40001";
+    const CS_KEY_B: &str = "classsearch:ua:202640-40002";
+    const REG_CAL: &str = "registrar:ua:202640";
+    const REG_KEY: &str = "registrar:ua:202640-40003";
+    const GOOGLE_CAL: &str = "google:invented";
+    const GCAL_KEY: &str = "gcal-series:cs100";
+    /// The no-time block of the term `TODAY` is in (`term_for("ua", TODAY)`).
+    const NOW: &str = "classsearch:ua:202640";
+    /// Spring, and last year's fall: both sort strictly before `NOW`.
+    const SPRING: &str = "classsearch:ua:202610";
+    const LAST_FALL: &str = "classsearch:ua:202540";
+    /// Next spring: not passed.
+    const FUTURE: &str = "classsearch:ua:202710";
+    /// A school `term_for` gives `None` for, and a term `School::terms` has no place for.
+    const NO_SCHOOL: &str = "classsearch:xx:202610";
+    const NO_PLACE: &str = "classsearch:ua:202699";
+
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A vault whose one course is `cs-100`, with a `state/` folder.
+    fn vault(name: &str) -> Scratch {
+        let v = bare(name);
+        std::fs::create_dir_all(v.join("state")).unwrap();
+        v
+    }
+
+    /// A vault with a course and no `state/` folder at all.
+    fn bare(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-c2b-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("courses")).unwrap();
+        std::fs::write(dir.join("courses").join("cs-100.md"), "---\ntitle: \"CS 100\"\nslug: cs-100\n---\n\nInvented.\n")
+            .unwrap();
+        Scratch(dir)
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn row(uid: &str, cal: &str, title: &str) -> Series {
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances: Vec::new(),
+            meets: vec![Meet { days: vec!["mon", "wed", "fri"], start: t(12, 0), end: t(12, 50) }],
+            first: Some(date(2026, 8, 24)),
+            until: None,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    fn google_row() -> Series {
+        let mut s = row(GCAL_KEY, GOOGLE_CAL, "CS 100");
+        s.event_type = Some("default".into());
+        s.instances = [date(2026, 9, 7), date(2026, 9, 9)]
+            .into_iter()
+            .map(|d| Instance { date: d, start: Some(t(12, 0)), end: Some(t(12, 50)) })
+            .collect();
+        s
+    }
+
+    fn applied(note: &str) -> RegistrarTerm {
+        RegistrarTerm {
+            first_fetch: TODAY,
+            last_fetch: TODAY,
+            applied: vec![serde_json::json!({"day": "2026-09-10", "field": "meets", "note": note})],
+            ended: Vec::new(),
+            kept: Vec::new(),
+            status: Vec::new(),
+            unread: Vec::new(),
+        }
+    }
+
+    fn ended(cal: &str) -> Ended {
+        Ended { calendar: cal.to_string(), dropped: TODAY, last_instance: None, until: None }
+    }
+
+    /// A file holding `series`, each calendar read today, and no no-time block.
+    fn file_of(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file
+    }
+
+    /// The bytes of `file` with the no-time `blocks` spliced in by hand, in the shape the plan
+    /// gives: `"class_search": {"<key>": {"no_time": ["<course>", ...]}}`, through `dumps_value`.
+    /// A block's list is written exactly as given, so a test can hand in an unsorted one.
+    fn bytes_with(file: &SeriesFile, blocks: &[(&str, &[&str])]) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(&file_bytes(file)).unwrap();
+        value.as_object_mut().unwrap().remove("class_search");
+        if !blocks.is_empty() {
+            let map: serde_json::Map<String, serde_json::Value> =
+                blocks.iter().map(|(k, c)| (k.to_string(), serde_json::json!({ "no_time": c }))).collect();
+            value["class_search"] = serde_json::Value::Object(map);
+        }
+        format!("{}\n", crate::ledger::dumps_value(&value))
+    }
+
+    fn put(v: &Path, file: &SeriesFile, blocks: &[(&str, &[&str])]) {
+        write_series_file(v, &bytes_with(file, blocks)).unwrap();
+    }
+
+    fn on_disk(v: &Path) -> String {
+        std::fs::read_to_string(v.join(SERIES_FILE)).unwrap()
+    }
+
+    fn keys_of_blocks(v: &Path) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(&on_disk(v)).unwrap();
+        value.get("class_search").and_then(|b| b.as_object()).map(|b| b.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    fn lock_exists(v: &Path) -> bool {
+        v.join(SERIES_LOCK_FILE).exists()
+    }
+
+    /// Every file under `v` but the series file and its lock, by relative path.
+    fn tree(v: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    if rel != SERIES_FILE && rel != SERIES_LOCK_FILE {
+                        out.insert(rel, std::fs::read(&path).unwrap());
+                    }
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(v, v, &mut out);
+        out
+    }
+
+    fn journal_on(v: &Path, day: &str) {
+        let mut spec = NewRecord::new("create", "archive/_seed.md", "system:migration", "cli");
+        spec.ts = Some(format!("{day}T12:00:00.000Z"));
+        let mut rec = make_record(spec).unwrap();
+        Journal::new(v).append(&mut rec).unwrap();
+    }
+
+    /// Every kind of entry a purge has to sort: two class-search rows and their calendar, an
+    /// `ended` key under the prefix, and a registrar row, a Google row, a registrar block and an
+    /// unrelated `ended` key that all stay.
+    fn mixed() -> SeriesFile {
+        let mut file = file_of(vec![
+            row(CS_KEY, CS_CAL, "CS 100"),
+            row(CS_KEY_B, CS_CAL, "CS 100 Lab"),
+            row(REG_KEY, REG_CAL, "CS 100"),
+            google_row(),
+        ]);
+        file.ended.insert("classsearch:ua:202640-40009".into(), ended(CS_CAL));
+        file.ended.insert("gcal-series:old".into(), ended(GOOGLE_CAL));
+        file.registrar.insert(REG_CAL.into(), applied("commitments/cs-100.md"));
+        file
+    }
+
+    /// `mixed()` with every class-search row, calendar and `ended` key gone.
+    fn mixed_kept() -> SeriesFile {
+        let mut file = mixed();
+        file.series.retain(|s| !is_class_search(&s.source_uid));
+        file.calendars.remove(CS_CAL);
+        file.ended.remove("classsearch:ua:202640-40009");
+        file
+    }
+
+    // ---- the purge ----
+
+    /// `Rows` removes every `classsearch:` series, its `calendars` entry and any `ended` key under
+    /// the prefix, keeps the registrar and Google data and a current no-time block, and the bytes
+    /// are the canonical ones. The one `classsearch:` text left is the block's key. Red now: the
+    /// stub removes nothing.
+    #[test]
+    fn rows_removes_every_class_search_row_calendar_and_ended_key_and_keeps_the_block() {
+        let v = vault("rows");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        assert_eq!(purge_class_search(&v, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert_eq!(on_disk(&v), bytes_with(&mixed_kept(), &[(NOW, &["cs-100"])]));
+        assert_eq!(on_disk(&v).matches("classsearch:").count(), 1, "only the block's key: {}", on_disk(&v));
+    }
+
+    /// `All` removes the block too, and the file then holds no `classsearch:` text and no
+    /// `class_search` key. Red now.
+    #[test]
+    fn all_also_removes_the_no_time_block() {
+        let v = vault("all");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        assert_eq!(purge_class_search(&v, PurgeScope::All, TODAY), Ok(Purged::Changed));
+        assert_eq!(on_disk(&v), bytes_with(&mixed_kept(), &[]));
+        assert!(!on_disk(&v).contains("classsearch:") && !on_disk(&v).contains("class_search"), "{}", on_disk(&v));
+    }
+
+    /// A block whose term has passed goes under either scope, with no row to purge at all; a
+    /// current one, a future one, one whose school has no `term_for` and one whose term has no
+    /// place in `School::terms` are not passed: `Rows` keeps them and `All` removes them.
+    /// Red now: nothing is dropped.
+    #[test]
+    fn either_scope_drops_a_passed_block_and_only_all_drops_one_that_is_not_passed() {
+        let all = [
+            (SPRING, &["cs-100"][..]),
+            (LAST_FALL, &["cs-100"][..]),
+            (NOW, &["cs-100"][..]),
+            (FUTURE, &["cs-100"][..]),
+            (NO_SCHOOL, &["cs-100"][..]),
+            (NO_PLACE, &["cs-100"][..]),
+        ];
+        let rows = vault("passed-rows");
+        put(&rows, &file_of(vec![google_row()]), &all);
+        assert_eq!(purge_class_search(&rows, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert_eq!(keys_of_blocks(&rows), [NOW, NO_PLACE, FUTURE, NO_SCHOOL]);
+        let every = vault("passed-all");
+        put(&every, &file_of(vec![google_row()]), &all);
+        assert_eq!(purge_class_search(&every, PurgeScope::All, TODAY), Ok(Purged::Changed));
+        assert_eq!(on_disk(&every), bytes_with(&file_of(vec![google_row()]), &[]));
+    }
+
+    /// A confirmed `classsearch:` note, a decline marker and the journal are byte-identical
+    /// afterwards, and no record is appended: the whole tree but the series file is unchanged.
+    /// Both are made through the real write path. Red now: the purge never runs, so the series
+    /// file keeps its rows.
+    #[test]
+    fn a_purge_never_touches_a_confirmed_note_a_decline_marker_or_the_journal() {
+        let v = vault("untouched");
+        let ctx = WriteContext::new("agent:test", "test");
+        let mut journal = Journal::new(v.as_path());
+        let map = crate::yaml::mapping_of(
+            "kind: class\nlevel: hard\ntitle: CS 100\ncourse: cs-100\nmeets: [{days: [mon], start: '12:00', end: '12:50'}]\n",
+        );
+        let note = create_confirmed(&v, &map, CS_KEY, TODAY, &ctx, &mut journal).unwrap();
+        let marker = create_marker(&v, GCAL_KEY, &ctx, &mut journal).unwrap().unwrap();
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        let before = tree(&v);
+        assert_eq!(purge_class_search(&v, PurgeScope::All, TODAY), Ok(Purged::Changed));
+        assert_eq!(tree(&v), before);
+        assert!(note.exists() && marker.exists());
+        assert!(!on_disk(&v).contains("classsearch:"), "the purge itself ran: {}", on_disk(&v));
+    }
+
+    /// Deterministic and idempotent: two vaults given the same data end on the same bytes, and a
+    /// second run is `Clean` and rewrites nothing. Red now: the first run does nothing.
+    #[test]
+    fn a_purge_is_deterministic_and_a_second_run_writes_nothing() {
+        let (a, b) = (vault("det-a"), vault("det-b"));
+        let mut reversed = mixed();
+        reversed.series.reverse();
+        put(&a, &mixed(), &[(NOW, &["cs-100"])]);
+        put(&b, &reversed, &[(NOW, &["cs-100"])]);
+        assert_eq!(purge_class_search(&a, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert_eq!(purge_class_search(&b, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert_eq!(on_disk(&a), on_disk(&b));
+        let (bytes, stamp) = (on_disk(&a), std::fs::metadata(a.join(SERIES_FILE)).unwrap().modified().unwrap());
+        assert_eq!(purge_class_search(&a, PurgeScope::Rows, TODAY), Ok(Purged::Clean));
+        assert_eq!(on_disk(&a), bytes);
+        assert_eq!(std::fs::metadata(a.join(SERIES_FILE)).unwrap().modified().unwrap(), stamp, "no write");
+    }
+
+    /// On a clean vault a purge takes no lock, creates no `state/` folder and writes nothing; a
+    /// file with no class-search data, hand-written and not canonical, is left byte for byte.
+    /// Green now (the stub does nothing): it pins what the real purge must not start doing.
+    #[test]
+    fn a_clean_vault_takes_no_lock_creates_no_state_folder_and_writes_nothing() {
+        let none = bare("clean-none");
+        for scope in [PurgeScope::Rows, PurgeScope::All] {
+            assert_eq!(purge_class_search(&none, scope, TODAY), Ok(Purged::Clean));
+            assert_eq!(try_purge_class_search(&none, scope, TODAY), Ok(Purged::Clean));
+        }
+        assert!(!none.join("state").exists(), "no state/ folder");
+        let odd = vault("clean-odd");
+        let text = "{ \"calendars\": {},   \"ended\": {}, \"series\": [], \"extra\": 1 }\n";
+        std::fs::write(odd.join(SERIES_FILE), text).unwrap();
+        for scope in [PurgeScope::Rows, PurgeScope::All] {
+            assert_eq!(purge_class_search(&odd, scope, TODAY), Ok(Purged::Clean));
+        }
+        assert_eq!(on_disk(&odd), text);
+        assert!(!lock_exists(&odd), "no lock file made");
+    }
+
+    /// With the lock held elsewhere the try form returns `Busy` at once and changes nothing; once
+    /// the hold is gone it purges. Red now: the stub never says `Busy`.
+    #[test]
+    fn the_try_form_returns_busy_at_once_while_the_lock_is_held_and_changes_nothing() {
+        let v = vault("busy");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        let before = on_disk(&v);
+        let held = hold_series_lock(&v);
+        assert_eq!(try_purge_class_search(&v, PurgeScope::All, TODAY), Ok(Purged::Busy));
+        assert_eq!(on_disk(&v), before);
+        drop(held);
+        assert_eq!(try_purge_class_search(&v, PurgeScope::All, TODAY), Ok(Purged::Changed));
+        assert!(!on_disk(&v).contains("classsearch:"));
+    }
+
+    /// A change stored between the purge's first read and its lock is kept: a registrar `applied`
+    /// entry stored in that gap survives, and the class-search rows still go. Red now: the rows stay.
+    #[test]
+    fn a_change_stored_between_the_first_read_and_the_lock_survives() {
+        let v = vault("gap");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        let mut later = mixed();
+        later.registrar.insert(REG_CAL.into(), applied("commitments/gap.md"));
+        let (path, bytes) = (v.to_path_buf(), bytes_with(&later, &[(NOW, &["cs-100"])]));
+        BEFORE_PURGE_LOCK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_series_file(&path, &bytes).unwrap())));
+        let outcome = purge_class_search(&v, PurgeScope::Rows, TODAY);
+        BEFORE_PURGE_LOCK.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(outcome, Ok(Purged::Changed));
+        let mut expected = mixed_kept();
+        expected.registrar.insert(REG_CAL.into(), applied("commitments/gap.md"));
+        assert_eq!(on_disk(&v), bytes_with(&expected, &[(NOW, &["cs-100"])]));
+    }
+
+    // ---- the no-time block: it stops the later ask (RQ9) ----
+
+    fn course_file(name: &str) -> Scratch {
+        let v = vault(name);
+        std::fs::write(v.join("courses").join("ant-101.md"), "---\ntitle: \"ANT 101\"\nslug: ant-101\n---\n\nInvented.\n")
+            .unwrap();
+        v
+    }
+
+    fn slugs(got: &[UncoveredCourse]) -> Vec<&str> {
+        got.iter().map(|c| c.slug.as_str()).collect()
+    }
+
+    /// `uncovered_courses` treats a listed no-time course as covered, and only that course.
+    /// Red now: the new input is ignored.
+    #[test]
+    fn uncovered_courses_treats_a_no_time_course_as_covered() {
+        let v = course_file("uncovered");
+        let (codes, _) = Codes::load(&v);
+        let none = BTreeSet::new();
+        let listed: BTreeSet<String> = ["cs-100".to_string()].into_iter().collect();
+        assert_eq!(slugs(&uncovered_courses(&v, &Commitments::default(), &[], &codes, &none)), ["ant-101", "cs-100"]);
+        assert_eq!(slugs(&uncovered_courses(&v, &Commitments::default(), &[], &codes, &listed)), ["ant-101"]);
+    }
+
+    /// `no_time_courses` reads the current term's block and nothing else: a passed block, a
+    /// future one and one it cannot place are ignored (RQ12's "the new term asks again"). Red now.
+    #[test]
+    fn no_time_courses_reads_only_the_current_terms_block() {
+        let v = vault("reads");
+        let blocks: [(&str, &[&str]); 5] = [
+            (NOW, &["cs-100"]),
+            (SPRING, &["ant-101"]),
+            (FUTURE, &["ant-102"]),
+            (NO_SCHOOL, &["ant-103"]),
+            (NO_PLACE, &["ant-104"]),
+        ];
+        put(&v, &file_of(vec![google_row()]), &blocks);
+        let (file, _) = read_series_file(&v);
+        let got: Vec<String> = no_time_courses(&file, TODAY).into_iter().collect();
+        assert_eq!(got, ["cs-100"]);
+        // C2b integrator: 2027-02-01 is in `FUTURE`'s own term (`202710`), so §6.5 reads that block
+        // then and no other; 2027-07-01 (`202740`) is a term no block here names.
+        let spring: Vec<String> = no_time_courses(&file, date(2027, 2, 1)).into_iter().collect();
+        assert_eq!(spring, ["ant-102"], "spring 2027: only the block of that term");
+        assert!(no_time_courses(&file, date(2027, 7, 1)).is_empty(), "fall 2027: every block here is another term's");
+    }
+
+    fn set_up_for_asks(name: &str, blocks: &[(&str, &[&str])]) -> Scratch {
+        let v = vault(name);
+        journal_on(&v, "2026-08-20");
+        put(&v, &file_of(vec![google_row()]), blocks);
+        v
+    }
+
+    fn file_asks(v: &Path) -> usize {
+        let ctx = WriteContext::new("agent:rank", "cli");
+        emit_asks(v, &[], &no_time_courses(&read_series_file(v).0, TODAY), TODAY, 15, &ctx, &mut Journal::new(v)).1
+    }
+
+    /// With the block listing `cs-100`, `emit_asks` files nothing for it; with no block, or a
+    /// block of a term that is not this one, the ask is filed as today. Red now (first assertion).
+    #[test]
+    fn emit_asks_files_no_ask_for_a_no_time_course() {
+        let v = set_up_for_asks("asks-block", &[(NOW, &["cs-100"])]);
+        assert_eq!(file_asks(&v), 0);
+        assert_eq!(file_asks(&set_up_for_asks("asks-none", &[])), 1, "the control: no block, one ask");
+        assert_eq!(file_asks(&set_up_for_asks("asks-passed", &[(SPRING, &["cs-100"])])), 1, "a passed block is ignored");
+        assert_eq!(file_asks(&set_up_for_asks("asks-future", &[(FUTURE, &["cs-100"])])), 1, "a future block is ignored");
+    }
+
+    /// An ask filed before the block was written still stands after it (§6.5's accepted limit),
+    /// and a later run files no second one. Green now: it pins the limit `approvals.rs` keeps.
+    #[test]
+    fn an_ask_filed_before_the_block_stands() {
+        let v = set_up_for_asks("asks-limit", &[]);
+        assert_eq!(file_asks(&v), 1);
+        let cards = tree(&v).keys().filter(|k| k.starts_with("approvals/")).cloned().collect::<Vec<_>>();
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        put(&v, &file_of(vec![google_row()]), &[(NOW, &["cs-100"])]);
+        assert_eq!(file_asks(&v), 0);
+        assert!(v.join(&cards[0]).exists(), "the filed ask stays until the student answers it");
+    }
+
+    /// `overview` lists the courses of `no_time_courses` as `{slug, title}` from the active
+    /// courses, matched by `course_key` (a key written as a code matches its slug) and in slug
+    /// order, in the struct and the JSON; a key no active course has is dropped, and none is
+    /// listed as uncovered (fix round: widened from course keys, for step 10's titles).
+    #[test]
+    fn overview_lists_no_time_courses_and_does_not_call_them_uncovered() {
+        let v = course_file("overview");
+        std::fs::write(v.join("courses").join("zoo-100.md"), "---\ntitle: \"ZOO 100\"\nslug: zoo-100\n---\n\nInvented.\n")
+            .unwrap();
+        put(&v, &file_of(Vec::new()), &[(NOW, &["ZOO 100", "cs-100", "gone-101"])]);
+        let o = overview(&v, TODAY);
+        let course = |slug: &str, title: &str| UncoveredCourse { slug: slug.into(), title: title.into() };
+        assert_eq!(o.no_time_courses, [course("cs-100", "CS 100"), course("zoo-100", "ZOO 100")]);
+        assert_eq!(
+            o.to_json()["no_time_courses"],
+            serde_json::json!([{"slug": "cs-100", "title": "CS 100"}, {"slug": "zoo-100", "title": "ZOO 100"}])
+        );
+        assert_eq!(slugs(&o.uncovered_courses), ["ant-101"]);
+    }
+
+    fn asks_in(v: &Path) -> usize {
+        tree(v)
+            .iter()
+            .filter(|(k, bytes)| k.starts_with("approvals/") && String::from_utf8_lossy(bytes).contains("commitment-ask"))
+            .count()
+    }
+
+    /// Fix round, RQ9 robustness: `rank` hands `emit_asks` the no-time set from the file
+    /// `refresh_series` returned, so a second read that fails (the file turns malformed at the
+    /// filer's lock, after `refresh_series` and before `emit_asks`) cannot file an ask for a no-time
+    /// course. The control, with no block, files one, so the rank does reach `emit_asks`.
+    #[test]
+    fn a_failed_second_read_files_no_ask_for_a_no_time_course() {
+        let rank = |name: &str, blocks: &[(&str, &[&str])]| -> usize {
+            let v = vault(name);
+            std::fs::create_dir_all(v.join("config")).unwrap();
+            std::fs::write(v.join("config").join("actor.yaml"), "human_actor: student\n").unwrap();
+            journal_on(&v, "2026-08-20");
+            // A registrar calendar, so the filer takes its lock and the hook runs.
+            let mut file = file_of(Vec::new());
+            file.calendars.insert(REG_CAL.into(), TODAY);
+            put(&v, &file, blocks);
+            let path = v.to_path_buf();
+            AT_FILER_LOCK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_series_file(&path, "not JSON\n").unwrap())));
+            let outcome = crate::cli::run_with(&v, Some("2026-09-10"), "manual", None, crate::cli::Fetchers::default());
+            AT_FILER_LOCK.with(|hook| *hook.borrow_mut() = None);
+            outcome.unwrap();
+            assert_eq!(on_disk(&v), "not JSON\n", "the hook ran");
+            asks_in(&v)
+        };
+        assert_eq!(rank("reread-control", &[]), 1, "the control: no block, one ask");
+        assert_eq!(rank("reread-block", &[(NOW, &["cs-100"])]), 0);
+    }
+
+    /// Fix round: under the lock a purge also deletes every `calendar-series.json.tmp*` that a
+    /// crashed `write_state_file` left. A leftover that mentions class search makes a clean file
+    /// dirty; one that does not, beside a clean file, is left alone with no lock taken.
+    #[test]
+    fn a_purge_deletes_leftover_temp_files_under_the_lock() {
+        let v = vault("tmp-dirty");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        let (a, b) = (v.join("state").join("calendar-series.json.tmp4242"), v.join("state").join("calendar-series.json.tmp-x"));
+        std::fs::write(&a, on_disk(&v)).unwrap();
+        std::fs::write(&b, "partial").unwrap();
+        assert_eq!(purge_class_search(&v, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert!(!a.exists() && !b.exists());
+        assert_eq!(on_disk(&v), bytes_with(&mixed_kept(), &[(NOW, &["cs-100"])]));
+
+        let only = vault("tmp-only");
+        put(&only, &file_of(vec![google_row()]), &[]);
+        let before = on_disk(&only);
+        let left = only.join("state").join("calendar-series.json.tmp4242");
+        std::fs::write(&left, bytes_with(&mixed(), &[])).unwrap();
+        assert_eq!(try_purge_class_search(&only, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert!(!left.exists());
+        assert_eq!(on_disk(&only), before, "the file itself was clean");
+
+        let clean = vault("tmp-clean");
+        put(&clean, &file_of(vec![google_row()]), &[]);
+        let other = clean.join("state").join("calendar-series.json.tmp4242");
+        std::fs::write(&other, "{}").unwrap();
+        assert_eq!(purge_class_search(&clean, PurgeScope::All, TODAY), Ok(Purged::Clean));
+        assert!(other.exists() && !lock_exists(&clean));
+    }
+
+    /// `commitments_report_with` (the CLI's report) reads the block too. Red now.
+    #[test]
+    fn the_commitments_report_does_not_list_a_no_time_course_as_uncovered() {
+        let v = course_file("report");
+        put(&v, &file_of(Vec::new()), &[(NOW, &["cs-100"])]);
+        let report = crate::cli::commitments_report_with(&v, Some("2026-09-10"), crate::cli::Fetchers::default());
+        assert_eq!(slugs(&report.uncovered), ["ant-101"]);
+    }
+
+    // ---- the block survives every other writer ----
+
+    fn assert_block_kept(v: &Path, file: &SeriesFile, blocks: &[(&str, &[&str])]) {
+        assert_eq!(on_disk(v), bytes_with(file, blocks));
+    }
+
+    /// A refresh that stores (something `fresh`) carries the block, even when no `classsearch:`
+    /// calendar remains, and writes it sorted: an unsorted list on disk comes back sorted, and the
+    /// blocks go by key. Red now: the rebuilt `SeriesFile` has no block.
+    #[test]
+    fn a_refresh_carries_the_block_sorted_and_not_tied_to_a_calendar() {
+        let v = vault("carry");
+        let base = file_of(vec![google_row()]);
+        put(&v, &base, &[(NOW, &["cs-100", "ant-101"]), (FUTURE, &["ant-102"])]);
+        let fresh = vec![(GOOGLE_CAL.to_string(), vec![google_row()])];
+        let (file, _, stored) = refresh_series_with(&v, &fresh, TODAY, None);
+        assert!(stored);
+        assert_eq!(file.class_search.keys().cloned().collect::<Vec<_>>(), [NOW, FUTURE]);
+        assert_block_kept(&v, &base, &[(NOW, &["ant-101", "cs-100"]), (FUTURE, &["ant-102"])]);
+    }
+
+    /// A registrar read of the same term leaves the block alone (the registrar may list no time
+    /// either). Red now.
+    #[test]
+    fn a_registrar_read_of_that_term_leaves_the_block() {
+        let v = vault("registrar");
+        let base = file_of(vec![row(REG_KEY, REG_CAL, "CS 100")]);
+        put(&v, &base, &[(NOW, &["cs-100"])]);
+        let news = RegistrarFetch { calendar: REG_CAL.to_string(), ..RegistrarFetch::default() };
+        let fresh = vec![(REG_CAL.to_string(), vec![row(REG_KEY, REG_CAL, "CS 100")])];
+        let (_, _, stored) = refresh_series_with(&v, &fresh, TODAY, Some(&news));
+        assert!(stored);
+        assert!(keys_of_blocks(&v) == [NOW], "{}", on_disk(&v));
+    }
+
+    /// `Rows` keeps a current block whose `calendars` entry is already gone (setup's own purge ran
+    /// first), and a later refresh keeps it too. Red now: nothing reads the block.
+    #[test]
+    fn the_block_survives_rows_with_its_calendar_entry_gone_and_a_refresh_after() {
+        let v = vault("survive");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        assert_eq!(purge_class_search(&v, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        let fresh = vec![(GOOGLE_CAL.to_string(), vec![google_row()])];
+        refresh_series_with(&v, &fresh, TODAY, None);
+        assert_eq!(keys_of_blocks(&v), [NOW]);
+        assert_eq!(on_disk(&v).matches("classsearch:").count(), 1, "only the block's key: {}", on_disk(&v));
+    }
+
+    // ---- the term changes: the first `rank` of a later term drops a passed block ----
+
+    /// With nothing `fresh` and no `fresh` series at all, `rank`'s refresh drops a passed block
+    /// and writes the file, keeping the others. Red now: nothing is written without a `fresh`.
+    #[test]
+    fn the_next_rank_drops_a_passed_block_with_nothing_fresh_and_keeps_the_rest() {
+        let v = vault("rank-drop");
+        let base = file_of(vec![google_row()]);
+        put(&v, &base, &[(SPRING, &["cs-100"]), (NOW, &["cs-100"]), (FUTURE, &["cs-100"]), (NO_SCHOOL, &["cs-100"]), (NO_PLACE, &["cs-100"])]);
+        let (file, _) = refresh_series(&v, &[], TODAY);
+        assert_eq!(file.class_search.keys().cloned().collect::<Vec<_>>(), [NOW, NO_PLACE, FUTURE, NO_SCHOOL]);
+        assert_block_kept(
+            &v,
+            &base,
+            &[(NOW, &["cs-100"]), (NO_PLACE, &["cs-100"]), (FUTURE, &["cs-100"]), (NO_SCHOOL, &["cs-100"])],
+        );
+    }
+
+    /// With something `fresh`, the same write drops the passed block. Red now.
+    #[test]
+    fn a_rank_with_a_fresh_read_drops_a_passed_block_in_the_same_write() {
+        let v = vault("fresh-drop");
+        let base = file_of(vec![google_row()]);
+        put(&v, &base, &[(LAST_FALL, &["cs-100"]), (NOW, &["cs-100"])]);
+        refresh_series(&v, &[(GOOGLE_CAL.to_string(), vec![google_row()])], TODAY);
+        assert_block_kept(&v, &base, &[(NOW, &["cs-100"])]);
+    }
+
+    /// A vault with no such block and nothing `fresh` takes no lock and writes nothing, as today;
+    /// the same for one holding only blocks that are not passed. Green now, so it pins today.
+    #[test]
+    fn with_nothing_to_drop_and_nothing_fresh_a_rank_takes_no_lock_and_writes_nothing() {
+        let v = vault("rank-clean");
+        let text = "{ \"calendars\": {},   \"ended\": {}, \"series\": [], \"extra\": 1 }\n";
+        std::fs::write(v.join(SERIES_FILE), text).unwrap();
+        refresh_series(&v, &[], TODAY);
+        assert_eq!(on_disk(&v), text);
+        assert!(!lock_exists(&v));
+        let kept = vault("rank-kept");
+        put(&kept, &file_of(vec![google_row()]), &[(FUTURE, &["cs-100"]), (NO_SCHOOL, &["cs-100"]), (NO_PLACE, &["cs-100"])]);
+        let before = on_disk(&kept);
+        refresh_series(&kept, &[], TODAY);
+        assert_eq!(on_disk(&kept), before);
+        assert!(!lock_exists(&kept));
+    }
+
+    /// With nothing `fresh`, the drop takes the series lock before it writes: an `applied` entry a
+    /// registrar run stored between the unlocked read and the lock survives it. Red now: the block
+    /// is not dropped.
+    #[test]
+    fn the_drop_holds_the_lock_so_a_registrar_entry_stored_in_the_gap_survives() {
+        let v = vault("drop-gap");
+        let base = file_of(vec![google_row()]);
+        put(&v, &base, &[(SPRING, &["cs-100"])]);
+        let mut later = file_of(vec![google_row()]);
+        later.registrar.insert(REG_CAL.into(), applied("commitments/gap.md"));
+        later.calendars.insert(REG_CAL.into(), TODAY);
+        let (path, bytes) = (v.to_path_buf(), bytes_with(&later, &[(SPRING, &["cs-100"])]));
+        BEFORE_DROP_LOCK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_series_file(&path, &bytes).unwrap())));
+        refresh_series(&v, &[], TODAY);
+        BEFORE_DROP_LOCK.with(|hook| *hook.borrow_mut() = None);
+        assert_block_kept(&v, &later, &[]);
+        assert!(lock_exists(&v), "the lock was taken");
+    }
+
+    /// **Accepted (fix round, contract review):** a store made only for the drop also saves that
+    /// run's ageing, as any store does: an `ended` entry past 28 days and a calendar unread for 14
+    /// days with no feed go in the same write. With nothing to drop they stay on disk, as today
+    /// (the no-lock test above). This pins the behaviour as it is; the spec records it.
+    #[test]
+    fn a_store_made_for_the_drop_also_saves_that_runs_ageing() {
+        let v = vault("drop-ageing");
+        let mut file = file_of(vec![google_row()]);
+        let mut old = ended(GOOGLE_CAL);
+        old.dropped = add_days(TODAY, -(ENDED_DAYS + 2));
+        file.ended.insert("gcal-series:long-gone".into(), old);
+        file.calendars.insert("old-feed".into(), add_days(TODAY, -(UNSEEN_DAYS + 6)));
+        put(&v, &file, &[(SPRING, &["cs-100"]), (NOW, &["cs-100"])]);
+        refresh_series(&v, &[], TODAY);
+        let mut aged = file_of(vec![google_row()]);
+        aged.ended.clear();
+        assert_block_kept(&v, &aged, &[(NOW, &["cs-100"])]);
+    }
+
+    /// A failed lock, or a drop with no lock held: nothing is stored, the warning names the lock,
+    /// and the next `rank` that gets the lock drops the block. The first part is green now.
+    #[test]
+    fn a_drop_without_the_lock_stores_nothing_and_the_next_rank_drops_the_block() {
+        let v = vault("no-lock");
+        let base = file_of(vec![google_row()]);
+        put(&v, &base, &[(SPRING, &["cs-100"])]);
+        let before = on_disk(&v);
+        let failed = SeriesLock(None, Some(format!("series file: could not lock {SERIES_LOCK_FILE} (PermissionDenied)")));
+        let (_, warnings, stored) = refresh_series_held(&v, failed, &[], TODAY, None);
+        assert!(!stored);
+        assert!(warnings.iter().any(|w| w.contains(SERIES_LOCK_FILE)), "{warnings:?}");
+        let (_, _, stored) = refresh_series_held(&v, SeriesLock(None, None), &[], TODAY, None);
+        assert!(!stored);
+        assert_eq!(on_disk(&v), before, "no lock, no write");
+        refresh_series(&v, &[], TODAY);
+        assert_block_kept(&v, &base, &[]);
     }
 }
