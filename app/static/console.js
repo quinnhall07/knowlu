@@ -1433,11 +1433,11 @@
       var shared = !!(s && s.label), has = !!(s && s.folder);
       SCHOOL.uses = (s && s.uses) || [];
       EL("set-school").hidden = !shared;
-      EL("set-grades").hidden = shared;
+      EL("set-grades-key").hidden = shared; EL("set-grades-forget").hidden = shared;
       EL("set-school-state").textContent = has ? schoolWords(SCHOOL.uses) : "School sign-in: not connected";
       EL("set-school-connect").hidden = has;
       EL("set-school-forget").hidden = !has;
-    }).catch(function () { EL("set-school").hidden = true; EL("set-grades").hidden = false; });
+    }).catch(function () { EL("set-school").hidden = true; EL("set-grades-key").hidden = false; EL("set-grades-forget").hidden = false; });
   }
   EL("set-school-connect").addEventListener("click", function () {
     invoke("grades_connect", {}).then(function (r) {
