@@ -1315,6 +1315,14 @@ because the student set its `source_uid`, and whose times differ from the regist
 row as a live proposal. A later `rank` files a `commitment-check` card for it. If the student approves
 that card, the section has two notes. The student chose this, and the card names it.
 
+**Behaviour change, accepted (C2c re-review, 2026-11-08).** A `registrar:` note whose `until` is before today
+no longer closes, by signature, any row of its own term's registrar calendar; it still closes every other
+row (Google, ICS, class search, other terms). So a vault with no `classsearch:` note does change in one
+case: a student who swaps sections at the same times gets the new section's note from R24, where before
+they got none. This departs from the letter of the 2026-11-04 bonus ruling ("keeps working as it does") and
+is kept because the old result was wrong — the student's real section had no note. The proposal,
+withdrawal, settle and `confirm` sites share one predicate so they cannot drift.
+
 Tests, through `run_parsed` with invented rows:
 - A confirmed `classsearch:` note of the fetched term becomes `registrar:` with one journal record, actor
   `agent:knowlu.registrar`, written before the surgery, through `write::to_literal`.
