@@ -99,6 +99,12 @@ pub trait SchoolMarks {
     /// `sync_all` on the in-flight mark's file.
     fn flush_in_flight(&self) -> Result<(), String>;
     fn clear_in_flight(&self) -> Result<(), String>;
+    /// The rejected mark set by a move's carry, at a new id whose folder may not exist yet: unlike
+    /// [`SchoolMarks::set_rejected`] it may make that folder. Only [`retarget_with`] calls it, under the
+    /// old id's lock, so a move refused as `BUSY` makes nothing (re-review, Minor 2).
+    fn carry_rejected(&self) -> Result<(), String> {
+        self.set_rejected()
+    }
 }
 
 /// The saved password, read inside the process. `Debug` is written by hand and prints neither field.
@@ -212,6 +218,11 @@ impl SchoolMarks for FileMarks {
     }
     fn clear_in_flight(&self) -> Result<(), String> {
         self.clear(IN_FLIGHT_MARK)
+    }
+    /// Makes the new id's folder, as `profiles::register` would, then sets the mark in it.
+    fn carry_rejected(&self) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("the new profile's folder could not be made: {e}"))?;
+        self.set_rejected()
     }
 }
 
@@ -366,7 +377,7 @@ pub fn retarget_with(
     let old = target(from_id);
     if rejected || from_marks.in_flight() {
         // A marked password's delete is always tried, never skipped on `exists`: a false one is no proof.
-        let carried = if rejected { to_marks.set_rejected() } else { Ok(()) };
+        let carried = if rejected { to_marks.carry_rejected() } else { Ok(()) };
         return both(carried, removed(store, &old)).map(|()| 0);
     }
     if !store.exists(&old) {
@@ -380,22 +391,21 @@ pub fn retarget_with(
 }
 
 /// `retarget_credentials`' school step over an app-data `root`: the old id's marks are in its profile
-/// folder, a carried mark goes to the new id's. With neither a saved password nor a rejected mark at the
-/// old id it returns at once, having written and made nothing; it reads the mark without the lock only
-/// to decide that, and with no password no fill can be setting one. The new id's folder is made only
-/// to carry a rejected mark (`FileMarks` never makes one); a folder that cannot be made fails the carry,
-/// by name.
+/// folder, a carried mark goes to the new id's. With no saved password and neither mark at the old id
+/// it returns at once, having written and made nothing. That look runs before the lock, so it reads
+/// `exists` first and the marks second (re-review of 807ed978..a74cbe7b, Minor 1): a rejection marks
+/// before it deletes, so once `exists` answers false any rejection's mark is already visible. Either
+/// mark alone goes on to the move, which always tries a marked password's delete, since a false
+/// `exists` is no proof (Minor 3). The new id's folder is made only by the carry, under the lock
+/// ([`SchoolMarks::carry_rejected`]), so a move refused as `BUSY` makes nothing (Minor 2).
 pub fn retarget_with_root(store: &dyn SchoolStore, root: &Path, from_id: &str, to_id: &str) -> Result<usize, String> {
     let from_marks = FileMarks::new(&crate::profiles::profile_dir(root, from_id));
-    let rejected = from_marks.rejected();
-    if !rejected && !store.exists(&target(from_id)) {
+    let saved = store.exists(&target(from_id));
+    if !saved && !from_marks.rejected() && !from_marks.in_flight() {
         return Ok(0);
     }
-    let to_dir = crate::profiles::profile_dir(root, to_id);
-    if rejected && from_id != to_id {
-        let _ = std::fs::create_dir_all(&to_dir);
-    }
-    retarget_with(store, &from_marks, &FileMarks::new(&to_dir), from_id, to_id)
+    let to_marks = FileMarks::new(&crate::profiles::profile_dir(root, to_id));
+    retarget_with(store, &from_marks, &to_marks, from_id, to_id)
 }
 
 /// The one Tauri command here: saves the password typed at step 3 or in Settings, and its reply is
