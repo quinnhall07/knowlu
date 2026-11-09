@@ -8,14 +8,16 @@
 // 2. Outward-facing git and GitHub actions ask Quinn even in bypassPermissions mode: tag pushes,
 //    force pushes in any spelling, gh release/variable/secret/ruleset changes (a v* tag ships a
 //    release to every installed tester; CI_SELF_HOSTED would run public PRs on the laptop).
-// 3. reviewer may write one thing: its own report, a .md file directly under docs/reports/. Every
-//    other Edit or Write from reviewer is denied (it reviews; it never edits).
+// 3. reviewer may write one thing with the file tools: its own report, a new dated .md file directly
+//    under docs/reports/. Every other Edit or Write from reviewer is denied. Its Bash is not guarded
+//    here; its prompt limits that to git diff, log and show.
 // 4. researcher may run read-only git and gh only (it also reads untrusted web pages).
 // 5. Cargo output trim: an inert cargo build/check/clippy/test/nextest command (optionally behind
 //    `cd <plain path> &&` or slot.sh) is rewritten to pipe through trim-cargo-output.js.
 //    Prefix KNOWLU_RAW_OUTPUT=1 to skip.
 // An internal error exits 0 with no output, so a hook bug never blocks a call.
 'use strict';
+const fs = require('fs');
 const path = require('path');
 
 const FROZEN = [
@@ -135,17 +137,36 @@ function guardOutward(input) {
   }
 }
 
-// reviewer's one writable place. Any `..` segment is refused outright rather than resolved.
-const REVIEWER_REPORT = /(^|\/)docs\/reports\/[^/]+\.md$/;
+// reviewer's one writable place: a new, dated report directly under docs/reports/ of this project or
+// of one of its worktrees.
+// - The folder is tied to CLAUDE_PROJECT_DIR, so a matching path elsewhere (~/.claude/rules/docs/reports/)
+//   does not count.
+// - The name must look like a report (2026-11-09-lane-review.md), so CLAUDE.md and anything else
+//   Claude Code loads as instructions cannot be planted there.
+// - An existing file is never overwritten: a new round is a new file, and an earlier verdict stays.
+// - Any `..` segment is refused outright rather than resolved.
+const REPORT_NAME = /^\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.md$/;
+const WORKTREES = '/.claude/worktrees/';
+
+function reviewerMayWrite(filePath) {
+  const p = norm(filePath);
+  if (!p || p.split('/').includes('..')) return false;
+  const m = /^(.+)\/docs\/reports\/([^/]+)$/.exec(p);
+  if (!m || !REPORT_NAME.test(m[2])) return false;
+  const base = m[1];
+  const ours = projectRoots().some((r) => base === r ||
+    (base.startsWith(r + WORKTREES) && !base.slice((r + WORKTREES).length).includes('/')));
+  return ours && !fs.existsSync(String(filePath));
+}
 
 function guardReviewer(input) {
   if (subagentOf(input) !== 'reviewer') return;
   if (!['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(input.tool_name)) return;
   const ti = input.tool_input || {};
-  const p = norm(ti.file_path || ti.notebook_path || '');
-  if (p.split('/').includes('..') || !REVIEWER_REPORT.test(p)) {
-    deny('reviewer writes only its own report, a .md file directly under docs/reports/. It never edits anything else; ' +
-      'put findings in the report or the final message.');
+  if (!reviewerMayWrite(ti.file_path || ti.notebook_path || '')) {
+    deny('reviewer writes only its own report: a new file named YYYY-MM-DD-<name>.md directly under docs/reports/ ' +
+      'of this project or one of its worktrees. It never overwrites a report or edits anything else. If this was ' +
+      'your report, put it in the final message instead.');
   }
 }
 
@@ -226,9 +247,14 @@ process.stdin.on('end', () => {
     guardOutward(input);
     trim(input);
   } catch (_) {
-    // A hook bug never blocks a call, except a file edit under the fixtures: fail closed there.
-    if (/"tool_name"\s*:\s*"(Edit|Write|MultiEdit|NotebookEdit)"/.test(raw) && isFixture(raw)) {
+    // A hook bug never blocks a call, except a file edit under the fixtures or one from reviewer:
+    // fail closed there.
+    const fileTool = /"tool_name"\s*:\s*"(Edit|Write|MultiEdit|NotebookEdit)"/.test(raw);
+    if (fileTool && isFixture(raw)) {
       deny('the guard hit an internal error on a fixture edit, so it refuses rather than allow it.');
+    }
+    if (fileTool && /"agent_type"\s*:\s*"reviewer"/.test(raw)) {
+      deny('the guard hit an internal error on a reviewer write, so it refuses rather than allow it.');
     }
   }
   process.exit(0);

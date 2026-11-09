@@ -133,7 +133,7 @@ is cheaper or safer; each agent's `description:` says when. Rationale: `docs/not
 | `researcher` / `docs-keeper` | Opus, high / Sonnet, medium | read-only gap research / HANDOFF, docs/reference, ledgers |
 | `explorer` / `mechanical` | Sonnet, medium | read-only search, before editing / specified edits |
 
-**The contract list** — cheaper agents never edit it:
+**The contract list** — no agent but `contract-engineer` edits it:
 `engine/src/{write,journal,yamlemit,yaml,pystr,ledger,ids,provenance,approvals,sync,entitle,wincred,reconcile}.rs`,
 `app/src/{credentials,account,updates}.rs`, the oracle/sync/entitlement tests, `engine/tests/fixtures/**`.
 

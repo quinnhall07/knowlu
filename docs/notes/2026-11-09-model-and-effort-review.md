@@ -48,7 +48,8 @@ re-check before quoting. Usage figures come from this repository's own Claude Co
   benchmarks: FrontierSWE v2 69.9 against 62.3, Remote Labor Index 41.3 against 21.3, WANDR 82.1 against
   72.3. The plan-review failures above are misses in reasoning about what the code already does, which
   is that kind of work. Anthropic's guidance for Fable is to start at `high`: gains above it are uneven,
-  and at `xhigh` or `max` it starts subagents to review its own work.
+  and at `xhigh` or `max` it starts subagents to review its own work. So `xhigh` is the step after two
+  failed attempts, never the default.
 - **Opus for specified code, tests, UI and research.** The evidence is mixed and this is a judgment.
   For: FrontierCode 1.1 has Opus at 54.4 to 54.6 across efforts and Sonnet at 52.1 (`xhigh`) falling to
   46.2 (`max`); CursorBench 4.0 has 57.8 against 55.5; and one implementer run in seven here ended on
@@ -79,7 +80,10 @@ Checked against the Claude Code documentation for v2.1.321 on 2026-11-09.
 - `switchModelsOnFlag: false`: when a safety classifier flags a request the session pauses and asks,
   instead of carrying on with an older fallback model for the rest of the session.
 - `reviewer` has Write so it can file its own report. `.claude/hooks/pretool-bash.js` refuses every
-  reviewer Edit or Write except one `.md` file directly under `docs/reports/`.
+  reviewer Edit or Write except a new file named `YYYY-MM-DD-<name>.md` directly under `docs/reports/`
+  of the project or one of its worktrees; it cannot overwrite an earlier report or plant a `CLAUDE.md`.
+  The hook does not guard reviewer's Bash, which only its prompt limits to `git diff`, `log` and `show`.
+  That gap is older than this change.
 - The eight `Write(...)` deny rules for the frozen references are gone because they never matched:
   file permission checks read `Edit(path)` rules for every file-writing tool. The `Edit(...)` rules
   stay, and the hook still refuses the frozen references by every route.

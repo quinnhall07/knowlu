@@ -7,10 +7,10 @@ const path = require('path');
 const HOOK = path.join(__dirname, 'pretool-bash.js');
 const B = String.fromCharCode(92);
 
-function decision(input) {
+function decision(input, projectDir) {
   const out = execFileSync('node', [HOOK], {
     input: typeof input === 'string' ? input : JSON.stringify(input),
-    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: 'C:/proj' }),
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: projectDir || 'C:/proj' }),
   }).toString();
   if (!out) return 'pass';
   return JSON.parse(out).hookSpecificOutput.permissionDecision;
@@ -67,22 +67,33 @@ const CASES = [
   ['ask', bash('gh workflow run release.yml'), 'gh workflow run'],
   ['pass', bash('gh api repos/x/y'), 'gh api read'],
   // reviewer
-  ['pass', file('Write', 'C:/r/docs/reports/2026-11-09-lane-review-r1.md', 'reviewer'), 'reviewer writes its report'],
-  ['pass', file('Write', 'C:/r/.claude/worktrees/lane/docs/reports/2026-11-09-lane-review.md', 'reviewer'), 'reviewer report in a worktree'],
-  ['pass', file('Write', 'docs/reports/2026-11-09-lane-review.md', 'reviewer'), 'reviewer report by relative path'],
-  ['pass', file('Write', 'C:' + B + 'r' + B + 'docs' + B + 'reports' + B + 'x-review.md', 'reviewer'), 'reviewer report by backslash path'],
-  ['deny', file('Write', 'C:/r/engine/src/rank.rs', 'reviewer'), 'reviewer Write to source'],
-  ['deny', file('Edit', 'C:/r/app/src/commands.rs', 'reviewer'), 'reviewer Edit'],
-  ['deny', file('Write', 'C:/r/docs/plans/2026-11-09-lane-plan.md', 'reviewer'), 'reviewer Write to a plan'],
-  ['deny', file('Write', 'C:/r/CLAUDE.md', 'reviewer'), 'reviewer Write to CLAUDE.md'],
-  ['deny', file('Write', 'C:/r/docs/reports/../../CLAUDE.md', 'reviewer'), 'reviewer .. escape'],
-  ['deny', file('Write', 'C:/r/x/../docs/reports/y.md', 'reviewer'), 'reviewer .. segment before the folder'],
-  ['deny', file('Write', 'C:/r/docs/reports/shots/x.md', 'reviewer'), 'reviewer below docs/reports'],
-  ['deny', file('Write', 'C:/r/docs/reports/run.ps1', 'reviewer'), 'reviewer non-Markdown under reports'],
-  ['deny', file('Write', 'C:/r/mydocs/reports/x.md', 'reviewer'), 'a folder that only ends in docs'],
+  ['pass', file('Write', 'C:/proj/docs/reports/2026-11-09-lane-review-r1.md', 'reviewer'), 'reviewer writes its report'],
+  ['pass', file('Write', 'C:/proj/.claude/worktrees/lane/docs/reports/2026-11-09-lane-review.md', 'reviewer'), 'reviewer report in a worktree'],
+  ['pass', file('Write', '/c/proj/docs/reports/2026-11-09-lane-review.md', 'reviewer'), 'reviewer report by Git Bash path'],
+  ['pass', file('Write', 'C:' + B + 'proj' + B + 'docs' + B + 'reports' + B + '2026-11-09-x-review.md', 'reviewer'), 'reviewer report by backslash path'],
+  ['pass', file('Write', 'c:/PROJ/Docs/Reports/2026-11-09-Lane-Review.md', 'reviewer'), 'reviewer report in another letter case'],
+  ['deny', file('Write', 'C:/proj/docs/reports/CLAUDE.md', 'reviewer'), 'reviewer plants a CLAUDE.md among the reports'],
+  ['deny', file('Write', 'C:/proj/docs/reports/notes.md', 'reviewer'), 'reviewer file without a report name'],
+  ['deny', file('Write', 'C:/Users/u/.claude/rules/docs/reports/2026-11-09-x.md', 'reviewer'), 'a docs/reports folder outside the project'],
+  ['deny', file('Write', 'C:/proj/.claude/commands/docs/reports/2026-11-09-x.md', 'reviewer'), 'a docs/reports folder under .claude/commands'],
+  ['deny', file('Write', 'C:/proj/.claude/worktrees/lane/sub/docs/reports/2026-11-09-x.md', 'reviewer'), 'a docs/reports folder below a worktree root'],
+  ['deny', file('Write', 'C:/project/docs/reports/2026-11-09-x.md', 'reviewer'), 'a root that only starts like the project'],
+  ['deny', file('Write', 'docs/reports/2026-11-09-lane-review.md', 'reviewer'), 'reviewer report by relative path'],
+  ['deny', file('Write', 'C:/proj/engine/src/rank.rs', 'reviewer'), 'reviewer Write to source'],
+  ['deny', file('Edit', 'C:/proj/app/src/commands.rs', 'reviewer'), 'reviewer Edit'],
+  ['deny', file('Write', 'C:/proj/docs/plans/2026-11-09-lane-plan.md', 'reviewer'), 'reviewer Write to a plan'],
+  ['deny', file('Write', 'C:/proj/CLAUDE.md', 'reviewer'), 'reviewer Write to CLAUDE.md'],
+  ['deny', file('Write', 'C:/proj/docs/reports/../../CLAUDE.md', 'reviewer'), 'reviewer .. escape'],
+  ['deny', file('Write', 'C:/proj/x/../docs/reports/2026-11-09-y.md', 'reviewer'), 'reviewer .. segment before the folder'],
+  ['deny', file('Write', 'C:/proj/docs/reports/shots/2026-11-09-x.md', 'reviewer'), 'reviewer below docs/reports'],
+  ['deny', file('Write', 'C:/proj/docs/reports/2026-11-09-run.ps1', 'reviewer'), 'reviewer non-Markdown under reports'],
+  ['deny', file('Write', 'C:/proj/docs/reports/2026-11-09-x.md.', 'reviewer'), 'reviewer trailing dot'],
+  ['deny', file('Write', 'C:/proj/docs/reports/2026-11-09-x.md::$DATA', 'reviewer'), 'reviewer stream suffix'],
+  ['deny', file('Write', 'C:/proj/mydocs/reports/2026-11-09-x.md', 'reviewer'), 'a folder that only ends in docs'],
   ['deny', { tool_name: 'Write', tool_input: {}, agent_type: 'reviewer' }, 'reviewer Write with no path'],
-  ['pass', file('Write', 'C:/r/docs/plans/2026-11-09-lane-plan.md', 'planner'), 'another agent is not held to the reviewer rule'],
-  ['pass', file('Write', 'C:/r/docs/reports/x.md'), 'main session writes a report'],
+  ['deny', '{"tool_name":"Write","agent_type":"reviewer","tool_input":{"file_path":"C:/proj/docs/reports/2026-11-09-x.md"', 'broken input on a reviewer write fails closed'],
+  ['pass', file('Write', 'C:/proj/docs/plans/2026-11-09-lane-plan.md', 'planner'), 'another agent is not held to the reviewer rule'],
+  ['pass', file('Write', 'C:/proj/docs/reports/x.md'), 'main session writes a report'],
   ['pass', bash('git diff origin/main...HEAD --stat', 'reviewer'), 'reviewer git diff'],
   // researcher
   ['pass', bash('git log --oneline -20', 'researcher'), 'researcher git log'],
@@ -123,9 +134,30 @@ const CASES = [
 ];
 
 let failed = 0;
-for (const [want, input, name] of CASES) {
-  const got = decision(input);
+let total = 0;
+function check(want, input, name, projectDir) {
+  total++;
+  const got = decision(input, projectDir);
   if (got !== want) { failed++; console.log(`FAIL ${name}: want ${want}, got ${got}`); }
 }
-console.log(`${CASES.length - failed} passed, ${failed} failed`);
+for (const [want, input, name] of CASES) check(want, input, name);
+
+// reviewer never overwrites a report. That needs a real file, so these two run against a temporary
+// project root, removed afterwards.
+{
+  const fs = require('fs');
+  const os = require('os');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'knowlu-hook-'));
+  try {
+    const dir = path.join(root, 'docs', 'reports');
+    fs.mkdirSync(dir, { recursive: true });
+    const earlier = path.join(dir, '2026-01-01-earlier-review.md');
+    fs.writeFileSync(earlier, 'FAIL\n');
+    check('deny', file('Write', earlier, 'reviewer'), 'reviewer overwriting an existing report', root);
+    check('pass', file('Write', path.join(dir, '2026-01-02-next-review.md'), 'reviewer'), 'reviewer new report beside an existing one', root);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+console.log(`${total - failed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
