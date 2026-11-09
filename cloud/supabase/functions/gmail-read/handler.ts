@@ -268,11 +268,13 @@ export interface ReadDeps {
 }
 
 export function query(excluded: string[]): string {
-  // A label with a space OR a double quote is quoted the way Gmail's own search does it, and an
-  // embedded quote is escaped so it cannot close the term early.
+  // A label with a space, a double quote or a backslash is quoted the way Gmail's own search does
+  // it. A backslash is escaped first, then an embedded quote, so neither can close the term early:
+  // a label ending in a backslash would otherwise escape the closing quote.
   const terms = excluded.map((l) => {
-    const escaped = l.replace(/"/g, '\\"');
-    return `-label:${l.includes(" ") || l.includes('"') ? `"${escaped}"` : l}`;
+    const escaped = l.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const quoted = l.includes(" ") || l.includes('"') || l.includes("\\");
+    return `-label:${quoted ? `"${escaped}"` : l}`;
   });
   return [WINDOW, ...terms].join(" ");
 }
