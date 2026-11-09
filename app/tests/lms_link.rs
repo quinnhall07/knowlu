@@ -508,15 +508,20 @@ fn the_course_list_is_read_from_the_endpoint_the_spike_recorded_and_never_by_nav
         Some("ualearn.blackboard.com"),
         "the path above is built onto this school's own host"
     );
-    let at = src.find("pub fn capture_courses").expect("capture_courses");
+    let at = src.find("pub fn read_courses_with").expect("read_courses_with");
     let tail = &src[at..];
     let body = &tail[..tail.find("\n}\n").map(|e| e + 2).unwrap_or(tail.len())];
+    // S4b: the command's jar read and requests are `read_courses_with`'s, which is what this scans.
+    let cmd_at = src.find("pub fn capture_courses").expect("capture_courses");
+    let cmd = &src[cmd_at..cmd_at + src[cmd_at..].find("\n}\n").expect("end of capture_courses")];
+    assert!(cmd.contains("read_courses_with(") && !cmd.contains("navigate"), "capture_courses reads through the seam:\n{cmd}");
     assert!(!body.contains("navigate"), "the course capture must never navigate the sign-in window:\n{body}");
     assert!(body.contains("cookie_url("), "the jar rule is Task 14's, not a second one:\n{body}");
     // The cookies live on this function's stack: never written, never logged, never formatted into
     // anything that leaves it. The envelope carries courses and a flag, and nothing else.
     for leak in ["println!", "eprintln!", "log::", "write_text", "store_source"] {
         assert!(!body.contains(leak), "{leak} in the course capture:\n{body}");
+        assert!(!cmd.contains(leak), "{leak} in the course capture command:\n{cmd}");
     }
 }
 
@@ -712,7 +717,7 @@ fn a_mixed_list_keeps_exactly_the_current_classes_in_order() {
 #[test]
 fn the_capture_filters_to_current_courses_and_fetches_each_term_through_the_same_session() {
     let src = std::fs::read_to_string("src/lms_link.rs").expect("src/lms_link.rs");
-    let at = src.find("pub fn capture_courses").expect("capture_courses");
+    let at = src.find("pub fn read_courses_with").expect("read_courses_with");
     let tail = &src[at..];
     let body = &tail[..tail.find("\n}\n").map(|e| e + 2).unwrap_or(tail.len())];
     assert!(body.contains("current_courses_from_json("), "{body}");
