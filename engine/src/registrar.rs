@@ -905,6 +905,132 @@ pub fn fetch_term(vault: &Path, school_key: &str, today: Date) -> Option<String>
     }
 }
 
+/// How one class-search query ended (replan §6.4's vocabulary, per query: counts are per course).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryState {
+    Found,
+    NoTime,
+    PartRead,
+    NotFound,
+    Ambiguous,
+    Closed,
+    Paused,
+    FetchFailed,
+}
+
+impl QueryState {
+    /// Every state, in the report's order.
+    pub const ALL: [QueryState; 8] = [
+        QueryState::Found,
+        QueryState::NoTime,
+        QueryState::PartRead,
+        QueryState::NotFound,
+        QueryState::Ambiguous,
+        QueryState::Closed,
+        QueryState::Paused,
+        QueryState::FetchFailed,
+    ];
+
+    /// The fixed word: the report's and the preview's key for this state.
+    pub fn word(self) -> &'static str {
+        match self {
+            QueryState::Found => "found",
+            QueryState::NoTime => "no_time",
+            QueryState::PartRead => "part_read",
+            QueryState::NotFound => "not_found",
+            QueryState::Ambiguous => "ambiguous",
+            QueryState::Closed => "closed",
+            QueryState::Paused => "paused",
+            QueryState::FetchFailed => "fetch_failed",
+        }
+    }
+}
+
+/// One query of the app's bundle, read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryRead {
+    pub subject: String,
+    pub number: String,
+    pub state: QueryState,
+    /// The `found` sections' series (`classsearch:<school>:<term>-<crn>`), sorted by key.
+    pub series: Vec<Series>,
+    /// Fixed words only (no class, CRN, room or time), each once.
+    pub warnings: BTreeSet<&'static str>,
+}
+
+/// The app's class-search bundle (`{school, term, queries: [{subject, number, sections, status,
+/// body}]}`), each query read on `today` (`YYYY-MM-DD`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassSearchBundle {
+    pub school: String,
+    pub term: String,
+    pub queries: Vec<QueryRead>,
+}
+
+const WARN_MIDNIGHT: &str = "class search: a section meets across midnight; not read";
+const WARN_PARTIAL: &str = "class search: a section was only partly read";
+
+/// Reads a bundle (replan §6.4, §6.5, §6.8; C3). `None` when the text is not one: not a JSON object,
+/// no `school` or six-digit `term`, no `queries` list, or a query without a `subject` and `number`.
+///
+/// A query's state: `paused` and `fetch_failed` pass through, as does `closed`; an `answered` query
+/// whose body is not JSON, or has no `data` list, is `closed` (§6.8). An unknown `status` is
+/// `fetch_failed`. An answered query is each wanted section run through [`parse_class_search`], and
+/// the query ends in the first state its sections reached of `found`, `part_read`, `ambiguous`,
+/// `no_time`, `not_found`: a course with one section read is read, and one a student may be able to
+/// fix by hand outranks one that simply is not listed. A query that wanted no section is `not_found`.
+pub fn read_class_search_bundle(text: &str, today: &str) -> Option<ClassSearchBundle> {
+    let json: Value = serde_json::from_str(text).ok()?;
+    let school = json.get("school")?.as_str()?.to_string();
+    let term = json.get("term")?.as_str().filter(|t| t.len() == 6 && t.bytes().all(|b| b.is_ascii_digit()))?.to_string();
+    let mut queries = Vec::new();
+    for q in json.get("queries")?.as_array()? {
+        let field = |k: &str| q.get(k).and_then(Value::as_str);
+        let (subject, number) = (field("subject")?.to_string(), field("number")?.to_string());
+        let mut read = QueryRead { subject, number, state: QueryState::FetchFailed, series: Vec::new(), warnings: BTreeSet::new() };
+        read.state = match field("status") {
+            Some("answered") => read_answered(q, &school, &term, today, &mut read),
+            Some("closed") => QueryState::Closed,
+            Some("paused") => QueryState::Paused,
+            _ => QueryState::FetchFailed,
+        };
+        read.series.sort_by(|a, b| a.source_uid.cmp(&b.source_uid));
+        queries.push(read);
+    }
+    Some(ClassSearchBundle { school, term, queries })
+}
+
+/// An `answered` query's state, its sections read into `out`.
+fn read_answered(q: &Value, school: &str, term: &str, today: &str, out: &mut QueryRead) -> QueryState {
+    let body = q.get("body").and_then(Value::as_str).unwrap_or("");
+    let Ok(answer) = serde_json::from_str::<Value>(body.trim()) else { return QueryState::Closed };
+    if !answer.get("data").is_some_and(Value::is_array) {
+        return QueryState::Closed;
+    }
+    let sections = q.get("sections").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+    let mut states = Vec::new();
+    for section in sections {
+        let want = SectionRef { term: term.to_string(), subject: out.subject.clone(), number: out.number.clone(), section: section.to_string() };
+        let Ok(read) = parse_class_search(&answer, school, &want, today) else { return QueryState::Closed };
+        if read.midnight > 0 {
+            out.warnings.insert(WARN_MIDNIGHT);
+        } else if read.state == SectionState::PartRead {
+            out.warnings.insert(WARN_PARTIAL);
+        }
+        out.series.extend(read.series);
+        states.push(read.state);
+    }
+    [
+        (SectionState::Found, QueryState::Found),
+        (SectionState::PartRead, QueryState::PartRead),
+        (SectionState::Ambiguous, QueryState::Ambiguous),
+        (SectionState::NoTime, QueryState::NoTime),
+    ]
+    .into_iter()
+    .find(|(section, _)| states.contains(section))
+    .map_or(QueryState::NotFound, |(_, query)| query)
+}
+
 #[cfg(test)]
 mod tests {
     //! Phase 3 (spec `docs/specs/2026-09-26-commitment-model-phase3-design.md` §3). The fixture is

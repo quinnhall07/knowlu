@@ -345,6 +345,21 @@ fn a_found_row_naming_no_vault_course_makes_no_series() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// Controller ruling 4: a no-time section for a course the vault lacks is not written to the block
+/// (no vault course, nothing written), while the control's is; and ruling 5: it still counts.
+#[test]
+fn a_no_time_section_naming_no_vault_course_is_not_in_the_block_but_counts() {
+    let v = scratch("no-time-no-course");
+    let queries = vec![answered("QQQ", "500", vec![row("QQQ", "500", "90009", Vec::new())]), answered("ABC", "200", vec![row("ABC", "200", "90002", Vec::new())])];
+    let out = run_cs(&v, &bundle_of("202640", queries), FALL_DAY, &["--school", "ua"]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["no_time"], json!(2), "{report}");
+    let file = series_file(&v);
+    let listed: Vec<String> = file["class_search"]["classsearch:ua:202640"]["no_time"].as_array().unwrap().iter().map(|c| compact(c.as_str().unwrap())).collect();
+    assert_eq!(listed, ["abc200"], "{file}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 // ---- the term gap (C2b's binding note) ----
 
 fn uncovered(v: &Path, today: &str) -> Vec<String> {

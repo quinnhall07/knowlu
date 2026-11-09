@@ -145,6 +145,29 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   status}, warnings, applied, ended, kept, status, unread}` and **exits 0, or 2 on an unknown school,
   a file that is unreadable or not JSON, a bad `config/actor.yaml`, or an answer with no usable row,
   having written nothing**. It is never gated and calls no model.
+- `commitments --vault <v> --class-search <bundle> --school <key> [--today YYYY-MM-DD]` — the
+  school's public class search (onboarding replan §6.5, C3). Conflicts with `--confirm` and
+  `--registrar` (clap, exit 2). **No network:** the app fetches and writes the bundle
+  `{school, term, queries: [{subject, number, sections, status, body}]}`. **Always exits 0 and writes
+  only `state/calendar-series.json`** (no note, no card, no journal record; the series lock is held,
+  `state/calendar-series.lock` may appear): the `found` sections that name an active vault course
+  become series under `classsearch:<school>:<term>-<crn>` in the calendar `classsearch:<school>:<term>`,
+  and the courses whose section lists no day or time go in the file's `class_search` block (course
+  keys only), under that term and, when it is still ahead of `registrar::term_for`'s, under
+  `term_for`'s too, so `uncovered_courses` stops the ask in both halves of the gap between terms. A
+  course the vault lacks is counted and written nowhere. Prints `{term, found, no_time, part_read,
+  not_found, ambiguous, closed, paused, fetch_failed, warnings}`: counts per query (per course, not
+  per section; a query's state is its sections' first of found, part_read, ambiguous, no_time,
+  not_found), and `warnings` are fixed words. An `answered` query whose body is not JSON, or has no
+  `data` list, is `closed`. A missing or unknown `--school`, a bundle for another school, a bundle that
+  is missing or not one, or a bad `--today` is one named line, **exit 0, nothing written**. Never
+  gated; no model.
+- `onboarding --vault <v> --preview … [--class-search <bundle> --school <key>]` — with the bundle,
+  `class_times` also counts each `found` query naming a course in `--courses` (each course once,
+  across `--registrar` too) and `class_search` is `{found, no_time, part_read, not_found, ambiguous,
+  closed, paused, fetch_failed}`, one count per query; without the flag `class_search` is `null`. An
+  unreadable bundle (no or unknown `--school`, not a bundle, another school's) is `null` for
+  `class_search`, a `class search:` line in `errors`, and no effect on `class_times`. Writes nothing.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
