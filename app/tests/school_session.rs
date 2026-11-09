@@ -301,3 +301,258 @@ fn every_curated_row_passes_its_own_rules_and_ships_the_wrong_password_text_empt
         assert_eq!(c.wrong_password_text, "", "{}: ships empty unless cited by date (replan S2)", c.unitid);
     }
 }
+
+// ---- S6t: Settings' one school sign-in row (`school_status`, `school_forget`) ----------------------
+//
+// The two Tauri commands are thin wrappers over `status_with` and `school_forget_with`, which take the
+// row, the credential store, the marks and the window close as inputs. Fakes only: no window, no
+// Credential Manager. Each Forget test uses its own profile id, because the lock is one process-wide set.
+use knowlu::account::SCHOOL_WINDOWS;
+use knowlu::school_password::{gate_with, target, Gate};
+use knowlu::school_session::{school_forget_with, status_with};
+use serde_json::Value;
+
+#[path = "support/school_fakes.rs"]
+mod school_fakes;
+use school_fakes::{at, Fake};
+
+fn named_row() -> Curated {
+    Curated { label: "Example State University", ..row() }
+}
+
+#[test]
+fn school_status_reports_the_uses_the_folder_and_the_schools_label() {
+    let d = temp("status-full");
+    make_folder(&d);
+    add_use(&d, Use::Grades).unwrap();
+    add_use(&d, Use::CourseList).unwrap();
+    let r = named_row();
+    let s = status_with(&d, Some(&r));
+    assert_eq!(s["uses"], serde_json::json!(["grades", "course_list"]), "the uses, in the order written: {s}");
+    assert_eq!(s["folder"], serde_json::json!(true), "the folder exists: {s}");
+    assert_eq!(s["label"], serde_json::json!("Example State University"), "the school label: {s}");
+}
+
+#[test]
+fn school_status_with_no_folder_no_uses_and_no_row_says_so() {
+    let d = temp("status-empty");
+    let s = status_with(&d, None);
+    assert_eq!(s["uses"], serde_json::json!([]), "{s}");
+    assert_eq!(s["folder"], serde_json::json!(false), "{s}");
+    assert_eq!(s["label"], Value::Null, "no curated row, no label: {s}");
+}
+
+#[test]
+fn school_status_never_carries_a_path_a_cookie_or_a_host() {
+    let d = temp("status-private");
+    make_folder(&d);
+    add_use(&d, Use::Grades).unwrap();
+    let r = named_row();
+    let text = status_with(&d, Some(&r)).to_string();
+    assert!(text.contains("grades"), "the check must be reading a real answer: {text}");
+    let dir = d.to_string_lossy().to_string();
+    for needle in [dir.as_str(), "school-session", "school.json", r.lms_host, "Cookies", "cookie", "synthetic", "://"] {
+        assert!(!text.contains(needle), "status must not carry {needle:?}: {text}");
+    }
+    assert!(!text.contains('\\') && !text.contains('/'), "no path separator at all: {text}");
+}
+
+/// A scratch profile with the folder, both uses, a saved password and both marks set.
+fn forget_setup(tag: &str, profile: &str) -> (PathBuf, Fake) {
+    let d = temp(tag);
+    make_folder(&d);
+    add_use(&d, Use::Grades).unwrap();
+    add_use(&d, Use::CourseList).unwrap();
+    let fake = Fake::new(profile).with_entry(&target(profile), "student-one", "hunter2-synthetic-pw");
+    fake.rejected.set(true);
+    fake.in_flight.set(true);
+    (d, fake)
+}
+
+#[test]
+fn school_forget_closes_both_school_windows_by_label_before_it_deletes_anything() {
+    let profile = "profile_s6forget1";
+    let (d, fake) = forget_setup("forget-close", profile);
+    let mut closed: Vec<String> = Vec::new();
+    let log = fake.log.clone();
+    let reply = school_forget_with(&d, profile, &fake, &fake, &mut |label| {
+        closed.push(label.to_string());
+        log.borrow_mut().push(format!("close:{label}"));
+    });
+    assert_eq!(reply["ok"], serde_json::json!(true), "{reply}");
+    closed.sort();
+    assert_eq!(closed, vec!["lms-grades".to_string(), "lms-signin".to_string()], "both windows on the school folders");
+    assert_eq!(SCHOOL_WINDOWS.len(), 2, "and they are sign-out's two");
+    let last_close = log.borrow().iter().rposition(|e| e.starts_with("close:")).expect("a close");
+    let first_delete = at(&log, "delete:").expect("the password delete");
+    assert!(last_close < first_delete, "windows close before the password is deleted: {:?}", log.borrow());
+    assert!(!session_dir(&d).exists(), "the folder is gone");
+}
+
+#[test]
+fn school_forget_deletes_the_password_and_the_rejected_mark_and_clears_every_use() {
+    let profile = "profile_s6forget2";
+    let (d, fake) = forget_setup("forget-all", profile);
+    let reply = school_forget_with(&d, profile, &fake, &fake, &mut |_| {});
+    // Answering ok, and not Busy, proves P1's `forget_with` ran before this call took its own guard.
+    assert_eq!(reply["ok"], serde_json::json!(true), "forget_with takes the profile lock itself: {reply}");
+    assert!(fake.entries.borrow().is_empty(), "the saved password is deleted");
+    assert!(!fake.rejected.get(), "the rejected mark is cleared by a delete that succeeded");
+    assert_eq!(uses(&d), Ok(vec![]), "every use is cleared");
+    assert!(!session_dir(&d).exists(), "the folder is deleted");
+    assert!(!d.join("school.json").exists(), "and the record of uses");
+    assert!(try_take(profile).is_some(), "no guard is left held");
+}
+
+#[test]
+fn school_forget_while_the_profile_is_busy_answers_not_ok_and_touches_nothing() {
+    let profile = "profile_s6forget3";
+    let (d, fake) = forget_setup("forget-busy", profile);
+    let _other = try_take(profile).expect("free");
+    let busy = school_forget_with(&d, profile, &fake, &fake, &mut |_| {});
+    assert_eq!(busy["ok"], serde_json::json!(false), "{busy}");
+    assert!(fake.entries.borrow().contains_key(&target(profile)), "the password is untouched");
+    assert!(session_dir(&d).exists(), "the folder is untouched");
+}
+
+#[test]
+fn school_forget_reports_a_failed_password_delete_without_the_secret() {
+    let profile = "profile_s6forget4";
+    let (d, fake) = forget_setup("forget-pwfail", profile);
+    let fake = fake.failing(&["delete"]);
+    let reply = school_forget_with(&d, profile, &fake, &fake, &mut |_| {});
+    assert_eq!(reply["ok"], serde_json::json!(false), "a failed delete is reported: {reply}");
+    assert!(!reply.to_string().contains("hunter2-synthetic-pw"), "never the secret: {reply}");
+    assert!(fake.entries.borrow().contains_key(&target(profile)), "the password is still there, and the reply says so");
+    assert!(fake.rejected.get(), "a failed delete clears no mark");
+}
+
+#[test]
+fn school_forget_reports_a_failed_folder_delete_and_has_already_deleted_the_password() {
+    let profile = "profile_s6forget5";
+    let fake = Fake::new(profile).with_entry(&target(profile), "student-one", "hunter2-synthetic-pw");
+    // A relative data_dir is refused by `is_session_dir`, so the folder delete fails at once and the
+    // same way every time, with nothing to wait on.
+    let rel = PathBuf::from("s6t-relative-profile-dir");
+    assert!(!rel.is_absolute());
+    let reply = school_forget_with(&rel, profile, &fake, &fake, &mut |_| {});
+    assert_eq!(reply["ok"], serde_json::json!(false), "a failed folder delete is reported: {reply}");
+    assert!(fake.entries.borrow().is_empty(), "the password goes first, so a stuck folder never leaves one that signs back in");
+}
+
+#[test]
+fn after_forget_the_next_grades_slot_finds_no_saved_password_and_fills_nothing() {
+    let profile = "profile_s6forget6";
+    let (d, fake) = forget_setup("forget-gate", profile);
+    // Before: a saved password and no marks is a fill.
+    fake.rejected.set(false);
+    fake.in_flight.set(false);
+    {
+        let guard = try_take(profile).unwrap();
+        match gate_with(&fake, &fake, profile, &guard).unwrap() {
+            Gate::Fill(s) => assert_eq!(s.password(), "hunter2-synthetic-pw"),
+            other => panic!("before Forget the gate fills: {other:?}"),
+        }
+    }
+    let reply = school_forget_with(&d, profile, &fake, &fake, &mut |_| {});
+    assert_eq!(reply["ok"], serde_json::json!(true), "{reply}");
+    let guard = try_take(profile).expect("the slot's own lock is free again");
+    match gate_with(&fake, &fake, profile, &guard).unwrap() {
+        Gate::NoPassword => {}
+        other => panic!("after Forget the slot finds no password and fills nothing, got {other:?}"),
+    }
+}
+
+// ---- S6a rulings (coordinator, 2026-11-08): the legacy folder counts, and Forget clears the mark -----
+
+#[test]
+fn school_status_counts_the_legacy_lms_session_folder_as_a_kept_sign_in() {
+    let d = temp("status-legacy");
+    std::fs::create_dir_all(d.join("lms-session").join("Default")).unwrap();
+    let s = status_with(&d, None);
+    assert_eq!(s["folder"], serde_json::json!(true), "an old install signed in through lms-session is offered Forget: {s}");
+    assert_eq!(s["uses"], serde_json::json!([]), "{s}");
+    let text = s.to_string();
+    assert!(!text.contains("lms-session") && !text.contains('\\') && !text.contains('/'), "still no path: {text}");
+}
+
+#[test]
+fn school_forget_deletes_the_legacy_folder_and_clears_grades_signed_out_mark() {
+    let profile = "profile_s6forget7";
+    let (d, fake) = forget_setup("forget-legacy-mark", profile);
+    std::fs::create_dir_all(d.join("lms-session").join("Default")).unwrap();
+    knowlu::grades::set_signed_out(&d, true);
+    assert!(d.join("grades-signed-out").is_file(), "the mark is set before Forget");
+    let reply = school_forget_with(&d, profile, &fake, &fake, &mut |_| {});
+    assert_eq!(reply["ok"], serde_json::json!(true), "{reply}");
+    assert!(!d.join("lms-session").exists(), "the legacy folder is gone");
+    assert!(!d.join("grades-signed-out").exists(), "grades' signed-out mark is cleared, as grades' own Forget does");
+    assert_eq!(status_with(&d, None)["folder"], serde_json::json!(false), "nothing kept afterwards");
+}
+
+// ---- review of 2ea88a20..36114ae5: Forget waits a bounded time for a window's lock (Important 2, Minor 3) ----
+//
+// The course-list window holds the profile lock until its Destroyed event runs on the event loop, so a
+// Forget that has just destroyed the windows retries Busy every 250 ms, eight times (two seconds). The
+// wait is injected, so no test sleeps.
+use knowlu::school_session::{school_forget_retrying, FORGET_RETRIES};
+use std::cell::Cell;
+
+#[test]
+fn school_forget_retries_a_busy_lock_until_the_window_lets_go() {
+    let profile = "profile_s6retry1";
+    let (d, fake) = forget_setup("forget-retry", profile);
+    let held = std::cell::RefCell::new(Some(try_take(profile).expect("free")));
+    let pauses = Cell::new(0u32);
+    let mut closed = 0;
+    let reply = school_forget_retrying(
+        &d,
+        profile,
+        &fake,
+        &fake,
+        &mut |_| closed += 1,
+        &mut || {
+            pauses.set(pauses.get() + 1);
+            if pauses.get() == 3 {
+                held.borrow_mut().take(); // the Destroyed event ran: the window's guard drops
+            }
+        },
+        &mut |id| try_take(id),
+    );
+    assert_eq!(reply["ok"], serde_json::json!(true), "the fourth call, after the third pause, finds the lock free: {reply}");
+    assert_eq!(pauses.get(), 3, "it waited only as long as it had to");
+    assert_eq!(closed, 2, "the windows were closed once, not again on each try");
+    assert!(fake.entries.borrow().is_empty() && !session_dir(&d).exists(), "everything was forgotten");
+}
+
+#[test]
+fn school_forget_gives_up_after_two_seconds_of_busy_with_nothing_deleted() {
+    let profile = "profile_s6retry2";
+    let (d, fake) = forget_setup("forget-giveup", profile);
+    let _held = try_take(profile).expect("free");
+    let pauses = Cell::new(0u32);
+    let reply = school_forget_retrying(&d, profile, &fake, &fake, &mut |_| {}, &mut || pauses.set(pauses.get() + 1), &mut |id| try_take(id));
+    assert_eq!(reply["ok"], serde_json::json!(false), "{reply}");
+    assert_eq!(reply["error"], serde_json::json!(knowlu::school_password::BUSY), "plainly Busy: {reply}");
+    assert_eq!(pauses.get(), FORGET_RETRIES, "a bounded wait");
+    assert_eq!(FORGET_RETRIES, 8, "eight pauses of 250 ms is two seconds");
+    assert!(fake.entries.borrow().contains_key(&target(profile)), "the password is untouched");
+    assert!(session_dir(&d).exists(), "the folder is untouched");
+}
+
+#[test]
+fn school_forget_says_the_password_is_forgotten_when_only_the_folders_lock_stays_busy() {
+    let profile = "profile_s6retry3";
+    let (d, fake) = forget_setup("forget-second-busy", profile);
+    let pauses = Cell::new(0u32);
+    // P1's forget_with takes its own lock and succeeds; the guard for the folder is then never free.
+    let reply = school_forget_retrying(&d, profile, &fake, &fake, &mut |_| {}, &mut || pauses.set(pauses.get() + 1), &mut |_| None);
+    assert_eq!(reply["ok"], serde_json::json!(false), "{reply}");
+    let error = reply["error"].as_str().expect("an error line").to_lowercase();
+    assert!(error.contains("password") && error.contains("forgot"), "it says the password was forgotten: {reply}");
+    assert!(error.contains("in use"), "and that the sign-in is in use right now: {reply}");
+    assert_ne!(reply["error"], serde_json::json!(knowlu::school_password::BUSY), "not a plain Busy: {reply}");
+    assert_eq!(pauses.get(), FORGET_RETRIES, "the same bounded wait");
+    assert!(fake.entries.borrow().is_empty(), "the password really is gone");
+    assert!(session_dir(&d).exists(), "the folder is still there");
+}

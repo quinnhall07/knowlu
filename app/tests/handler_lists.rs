@@ -148,7 +148,7 @@ fn the_console_list_names_the_three_onboarding_commands_f5c_adds_and_the_wizard_
         assert!(wizard.iter().any(|n| n == name), "the wizard list keeps {name}");
         assert!(!console.iter().any(|n| n == name), "the console list must not name the path-taking {name}");
     }
-    assert_eq!(console.len(), 89, "the console list's count; recount it when a command is added");
+    assert_eq!(console.len(), 92, "the console list's count; recount it when a command is added");
 }
 
 /// Plan §14.63: the main page's `onboarding_handover` is on the console's list once and not on the wizard's,
@@ -239,5 +239,20 @@ fn f5b_moves_three_retires_seven_and_keeps_the_path_taking_two_on_the_wizard() {
     for name in ["onboarding::store_credentials", "onboarding::discover_coursework"] {
         assert!(wizard.iter().any(|n| n == name), "the wizard list keeps {name}");
         assert!(!console.iter().any(|n| n == name), "the console list must not name {name}");
+    }
+}
+
+/// S6r (onboarding plan S6t): the school sign-in row's two commands and P1's save command are in the
+/// console's list and not the wizard's (the wizard has no profile folder and no `ConsoleState`).
+#[test]
+fn the_console_list_names_the_school_row_commands_and_p1s_save_command() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    for name in ["school_session::school_status", "school_session::school_forget", "school_password::school_password_save"] {
+        assert_eq!(console.iter().filter(|n| *n == name).count(), 1, "the console list names {name} once");
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
     }
 }

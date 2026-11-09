@@ -3189,3 +3189,58 @@ fn f11p1_the_light_day_board_uses_the_same_token_names_and_leaves_the_console_pa
     let block = &css[at..css[at..].find('}').map_or(css.len(), |e| at + e)];
     assert!(block.contains("--su-ground:") && block.contains("--su-board:") && block.contains("--su-ink:"));
 }
+
+// ---- S6t: Settings' one school sign-in row (onboarding plan S6t/S6b; replan RQ18) ----------------------
+//
+// The ids `set-school`, `set-school-forget` and `set-school-note` are this test's choice (the plan names
+// none); S6b may rename them only by editing this test in the same change, with a reason.
+
+/// The body of `EL("<id>").addEventListener("click", ...)`: from its head to the next listener or helper.
+fn click_handler<'a>(js: &'a str, id: &str) -> &'a str {
+    let head = format!("EL(\"{id}\").addEventListener(\"click\"");
+    let at = js.find(&head).unwrap_or_else(|| panic!("console.js needs {head}"));
+    let rest = &js[at + head.len()..];
+    let end = rest.find("\n  EL(\"").into_iter().chain(rest.find("\n  function ")).chain(rest.find("\n  // ")).min().unwrap_or(rest.len());
+    &js[at..at + head.len() + end]
+}
+
+#[test]
+fn the_school_sign_in_row_reads_the_ruled_words_and_the_mailbox_keeps_its_own_row() {
+    let html = read("index.html");
+    let js = read("console.js");
+    assert!(html.contains("id=\"set-school\"") && html.contains("id=\"set-school-forget\""), "the row and its Forget button");
+    let words = "School sign-in: kept on this computer, used for grades and your course list";
+    assert!(html.contains(words) || js.contains(words), "RQ18's ruled words, verbatim: {words}");
+    // The mailbox keeps its own rows, untouched by the school's words.
+    let mail_row = html.lines().find(|l| l.contains("id=\"set-email\"")).expect("the mailbox row stays");
+    assert!(!mail_row.contains("School sign-in"), "the mailbox row does not carry the school's words");
+    let keep_row = html.lines().find(|l| l.contains("id=\"set-email-keeprow\"")).expect("the mailbox sign-in row stays");
+    assert!(keep_row.contains("Email sign-in") && !keep_row.contains("School sign-in"), "the mailbox keeps its own sign-in row");
+    let school_row = html.lines().find(|l| l.contains("id=\"set-school\"")).expect("school row");
+    assert!(!school_row.contains("set-email"), "the school row is its own row, not inside the mailbox's");
+}
+
+#[test]
+fn the_school_rows_handler_calls_school_forget_only_after_a_confirm_that_lists_the_uses() {
+    let js = read("console.js");
+    assert!(js.contains("invoke(\"school_status\""), "the row reads the uses from school_status");
+    let h = click_handler(&js, "set-school-forget");
+    let confirm_at = h.find("confirm(").expect("the handler asks before it forgets");
+    let invoke_at = h.find("invoke(\"school_forget\"").expect("the handler calls school_forget");
+    assert!(confirm_at < invoke_at, "school_forget is called only after the confirm: {h}");
+    let between = &h[confirm_at..invoke_at];
+    assert!(between.contains("return"), "a declined confirm returns before the call: {between}");
+    let before_call = &h[..invoke_at];
+    assert!(before_call.contains("uses"), "the confirm lists the uses school_status gave: {before_call}");
+    assert_eq!(js.matches("invoke(\"school_forget\"").count(), 1, "one call site, the one behind the confirm");
+}
+
+// Review of the S6 lane: Connect shows only where grades sign-in is available, and at a shared school the
+// grades row hides while its note is empty (it never leaves a blank row) but is not removed.
+#[test]
+fn at_a_shared_school_only_the_grades_forget_button_hides_and_the_grades_row_stays() {
+    let js = read("console.js");
+    assert!(js.contains("EL(\"set-grades-forget\").hidden = shared"), "the grades Forget button hides at a shared school");
+    assert!(js.contains("EL(\"set-grades\").hidden = !!SCHOOL.shared && !EL(\"set-grades-note\").textContent"), "the grades row hides only while its note is empty");
+    assert!(js.contains("g.available !== false"), "Connect needs grades sign-in to be available");
+}

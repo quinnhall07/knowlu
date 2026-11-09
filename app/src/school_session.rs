@@ -317,3 +317,137 @@ pub fn grades_profile(data_dir: &Path) -> Result<PathBuf, String> {
     }
     Ok(profile)
 }
+
+// ---- Settings' one school sign-in row (S6a; tests: `app/tests/school_session.rs`, S6t) -------------
+
+/// What `school_status` answers: `{ "uses": [name], "folder": bool, "label": string|null }`. The uses are
+/// [`Use`]'s names in the order recorded, `folder` whether a school sign-in is kept in either form
+/// (`school-session`, or an old install's `lms-session`), `label` the curated
+/// school's own name. Never a path, a cookie or a host. A `school.json` that cannot be read answers no uses
+/// (the folder flag still tells the row there is something to Forget).
+pub fn status_with(data_dir: &Path, row: Option<&Curated>) -> Value {
+    let names: Vec<&str> = uses(data_dir).unwrap_or_default().into_iter().map(Use::name).collect();
+    json!({
+        "uses": names,
+        "folder": session_dir(data_dir).exists() || data_dir.join(LEGACY_GRADES_DIR).exists(),
+        "label": row.map(|r| r.label),
+    })
+}
+
+/// What `school_forget` does, over injected seams (`close_window` is handed each label to close), with no
+/// wait: a Busy lock answers Busy at once. The command waits through [`school_forget_retrying`]. In the
+/// order the replan binds (§4.5, S6a):
+/// 1. close every window on the school folders by label ([`crate::account::SCHOOL_WINDOWS`]). That
+///    includes `lms-signin`, which the registrar's throwaway window uses too, so a registrar read in
+///    progress is stopped, as sign-out does;
+/// 2. P1's `forget_with` (the password, then the marks), **before** this call takes its own guard,
+///    because it takes the profile's lock itself. Busy there is `ok: false` and nothing else touched;
+///    any other failure is remembered, and the rest still runs (forget as much as it can);
+/// 3. take the guard, then forget the school folder and every use ([`forget`]) and the legacy
+///    `lms-session` ([`crate::grades::forget`]), each tried whatever the other answered, and clear
+///    grades' signed-out mark.
+/// Reply `{ "ok": bool, "error": string|null }`; the error names the first thing that failed and never
+/// carries the secret.
+pub fn school_forget_with(
+    data_dir: &Path,
+    profile_id: &str,
+    store: &dyn crate::school_password::SchoolStore,
+    marks: &dyn crate::school_password::SchoolMarks,
+    close_window: &mut dyn FnMut(&str),
+) -> Value {
+    school_forget_retrying(data_dir, profile_id, store, marks, close_window, &mut || {}, &mut |id| try_take(id))
+}
+
+/// Eight pauses of 250 ms: the two seconds Forget waits for a window's lock to drop.
+pub const FORGET_RETRIES: u32 = 8;
+const FORGET_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// [`school_forget_with`] with its two waits injected. A window the windows' close has just destroyed
+/// holds the profile lock until its Destroyed event runs on the event loop, so both takes (P1's own, and
+/// `take` for the folder's guard) are tried again after each `pause`, up to [`FORGET_RETRIES`] pauses
+/// shared between the two, before they answer Busy. The windows are closed once. A Busy at P1's step
+/// touches nothing. A Busy at the folder's step comes after the password was forgotten, and the reply says so.
+pub fn school_forget_retrying(
+    data_dir: &Path,
+    profile_id: &str,
+    store: &dyn crate::school_password::SchoolStore,
+    marks: &dyn crate::school_password::SchoolMarks,
+    close_window: &mut dyn FnMut(&str),
+    pause: &mut dyn FnMut(),
+    take: &mut dyn FnMut(&str) -> Option<SessionGuard>,
+) -> Value {
+    use crate::school_password::{forget_with, BUSY};
+    let reply = |ok: bool, error: Option<String>| json!({ "ok": ok, "error": error });
+    for label in crate::account::SCHOOL_WINDOWS {
+        close_window(label);
+    }
+    let mut first_error: Option<String> = None;
+    // One budget for both takes, so the whole wait is at most FORGET_RETRIES pauses (two seconds).
+    let mut pauses_left = FORGET_RETRIES;
+    loop {
+        match forget_with(store, marks, profile_id) {
+            Err(e) if e == BUSY && pauses_left > 0 => {
+                pauses_left -= 1;
+                pause();
+            }
+            Err(e) if e == BUSY => return reply(false, Some(e)),
+            Err(e) => {
+                first_error = Some(e);
+                break;
+            }
+            Ok(()) => break,
+        }
+    }
+    let mut held = take(profile_id);
+    while held.is_none() && pauses_left > 0 {
+        pauses_left -= 1;
+        pause();
+        held = take(profile_id);
+    }
+    let Some(_held) = held else {
+        let in_use = "the school sign-in itself is in use right now. Press Forget again in a moment to finish.";
+        let said = match first_error {
+            Some(e) => format!("{e} Also, {in_use}"),
+            None => format!("Your saved school password is forgotten, but {in_use}"),
+        };
+        return reply(false, Some(said));
+    };
+    if let Err(e) = forget(data_dir) {
+        first_error.get_or_insert(e);
+    }
+    if !crate::grades::forget(data_dir) {
+        first_error.get_or_insert_with(|| "the saved Blackboard sign-in could not be deleted yet; try again in a moment".to_string());
+    }
+    // This row replaces grades' own Forget at a shared school, so it clears the same mark.
+    crate::grades::set_signed_out(data_dir, false);
+    reply(first_error.is_none(), first_error)
+}
+
+/// The row's status for the console profile's campus. Thin: `status_with` over the profile's own folder.
+#[tauri::command(async)]
+pub fn school_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let campus = crate::grades::campus_of(&cs.vault);
+    status_with(&cs.data_dir, crate::scaffold::curated(&campus.unitid))
+}
+
+/// The row's Forget: [`school_forget_retrying`] over Credential Manager, the profile's marks, the real
+/// windows (destroyed by label as sign-out does, [`crate::account::SCHOOL_WINDOWS`]) and a real 250 ms
+/// pause. It runs off the event loop (`async`), which is what lets the windows' Destroyed events run.
+#[tauri::command(async)]
+pub fn school_forget(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    use tauri::Manager;
+    let id = profile_key(&cs.data_dir);
+    school_forget_retrying(
+        &cs.data_dir,
+        &id,
+        &crate::school_password::RealStore,
+        &crate::school_password::FileMarks::new(&cs.data_dir),
+        &mut |label| {
+            if let Some(w) = app.get_webview_window(label) {
+                let _ = w.destroy();
+            }
+        },
+        &mut || std::thread::sleep(FORGET_PAUSE),
+        &mut |id| try_take(id),
+    )
+}

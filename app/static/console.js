@@ -1304,7 +1304,7 @@
     return gradesStatus().then(refreshGradesDrawer);
   }
   function gradesStatus() {
-    return invoke("grades_status", {}).then(function (s) { GRADES.status = s; drawGrades(); }).catch(function () { GRADES.status = null; drawGrades(); });
+    return invoke("grades_status", {}).then(function (s) { GRADES.status = s; drawGrades(); schoolConnectSync(); }).catch(function () { GRADES.status = null; drawGrades(); schoolConnectSync(); });
   }
   function gradesUnavailableHtml() {
     return '<div class="gs-line"><span>Grades from Blackboard are not available at your school yet</span></div>';
@@ -1418,11 +1418,57 @@
       return gradesStatus();
     }).catch(function () {});
   });
+  // S6b: the one school sign-in row. It shows at a curated (shared) school, where school_status
+  // returns a label; there it stands in for grades' own Forget button.
+  var SCHOOL = { uses: [] };
+  var SCHOOL_USE_WORDS = { grades: "grades", course_list: "your course list" };
+  var SCHOOL_USE_AGAIN = { grades: "Grades", course_list: "Your course list" };
+  function schoolWords(uses) {
+    var w = uses.map(function (u) { return SCHOOL_USE_WORDS[u]; }).filter(Boolean);
+    if (w.length === 2 && uses.indexOf("grades") >= 0) { return "School sign-in: kept on this computer, used for grades and your course list"; }
+    return "School sign-in: kept on this computer" + (w.length ? ", used for " + w.join(" and ") : "");
+  }
+  function schoolRow() {
+    return invoke("school_status", {}).then(function (s) {
+      var shared = !!(s && s.label), has = !!(s && s.folder);
+      SCHOOL.uses = (s && s.uses) || [];
+      EL("set-school").hidden = !shared;
+      SCHOOL.shared = shared; SCHOOL.has = has;
+      EL("set-grades-forget").hidden = shared;
+      EL("set-grades-key").textContent = shared ? "Grades" : "Blackboard sign-in";
+      syncGradesRow();
+      EL("set-school-state").textContent = has ? schoolWords(SCHOOL.uses) : "School sign-in: not connected";
+      schoolConnectSync();
+      EL("set-school-forget").hidden = !has;
+    }).catch(function () { SCHOOL.shared = false; EL("set-school").hidden = true; EL("set-grades-forget").hidden = false; syncGradesRow(); });
+  }
+  // Connect shows only where grades sign-in is available (review: grades_connect needs a Blackboard school).
+  function schoolConnectSync() {
+    var g = GRADES.status;
+    EL("set-school-connect").hidden = !!SCHOOL.has || !(g && g.ok !== false && g.available !== false);
+  }
+  // At a shared school the grades row holds only its note; hide it while the note is empty.
+  function syncGradesRow() { EL("set-grades").hidden = !!SCHOOL.shared && !EL("set-grades-note").textContent; }
+  EL("set-school-connect").addEventListener("click", function () {
+    invoke("grades_connect", {}).then(function (r) {
+      EL("set-school-note").textContent = r && r.ok === false ? String(r.error || "") : "";
+      return schoolRow();
+    }).catch(function () {});
+  });
+  EL("set-school-forget").addEventListener("click", function () {
+    var uses = SCHOOL.uses, again = uses.map(function (u) { return SCHOOL_USE_AGAIN[u]; }).filter(Boolean);
+    if (!confirm("Forget your school sign-in?" + (again.length ? " You will need to sign in again for: " + again.join(", ") + "." : " You will need to sign in again."))) { return; }
+    invoke("school_forget", {}).then(function (r) {
+      EL("set-school-note").textContent = r && r.ok === false ? String(r.error || "") : "forgotten";
+      return Promise.all([schoolRow(), gradesStatus()]);
+    }).catch(function () {});
+  });
   // Hide grades (spec §2, §9): a settings row like Start with Windows, through set_settings; the
   // flag lives in grades.json, and the strip follows grades_status's `hidden`.
   EL("set-grades-hide-in").addEventListener("change", function () {
     invoke("set_settings", { patch: { grades_hidden: EL("set-grades-hide-in").checked } }).then(function (r) {
       EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "";
+      syncGradesRow();
       return gradesStatus();
     }).catch(function () {});
   });
@@ -2860,7 +2906,7 @@
     maybeReconsent(); owedSettings();
     loadPrefs(); loadInterests();
     checkAccount();
-    gradesStatus();
+    gradesStatus(); schoolRow();
     mailSettingsRow();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
