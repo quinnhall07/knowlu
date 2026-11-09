@@ -115,7 +115,9 @@ switch it does offer.
   `ANTHROPIC_DEFAULT_MODEL` pins that default to Opus 5.5, and the `modelSettings` entry runs it at
   `xhigh`.
 - `planner` and `debugger` follow the session, so they move with it and need no change at dispatch. To
-  give one of them Fable from a session kept on Opus on purpose, pass `model: 'fable'`.
+  give one of them Fable from a session kept on Opus on purpose, pass `model: 'fable'`. They follow a
+  session to Sonnet too, which is below what the map gives them, so from a session on any other model
+  pass `model: 'opus'`.
 - A new session starts on Fable again and asks again until the allowance resets. Answering "keep Fable
   on usage credits" stops the question from coming back, and the fallback with it.
 - Nobody at the keyboard: an ordinary session waits at the question. A background session, or one
