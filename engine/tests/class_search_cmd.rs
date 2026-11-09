@@ -71,8 +71,12 @@ fn meeting(kind: &str, begin: &str, end: &str, days: &[&str]) -> Value {
 }
 
 fn row(subject: &str, number: &str, crn: &str, meetings: Vec<Value>) -> Value {
+    row_seq(subject, number, "001", crn, meetings)
+}
+
+fn row_seq(subject: &str, number: &str, sequence: &str, crn: &str, meetings: Vec<Value>) -> Value {
     let faculty: Vec<Value> = meetings.into_iter().map(|m| json!({ "meetingTime": m })).collect();
-    json!({ "term": "202640", "subject": subject, "courseNumber": number, "sequenceNumber": "001",
+    json!({ "term": "202640", "subject": subject, "courseNumber": number, "sequenceNumber": sequence,
         "courseReferenceNumber": crn, "scheduleTypeDescription": "Lecture", "isSectionLinked": false,
         "linkIdentifier": null, "meetingsFaculty": faculty })
 }
@@ -352,12 +356,214 @@ fn a_no_time_section_naming_no_vault_course_is_not_in_the_block_but_counts() {
     let v = scratch("no-time-no-course");
     let queries = vec![answered("QQQ", "500", vec![row("QQQ", "500", "90009", Vec::new())]), answered("ABC", "200", vec![row("ABC", "200", "90002", Vec::new())])];
     let out = run_cs(&v, &bundle_of("202640", queries), FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["no_time"], json!(2), "{report}");
     let file = series_file(&v);
     let listed: Vec<String> = file["class_search"]["classsearch:ua:202640"]["no_time"].as_array().unwrap().iter().map(|c| compact(c.as_str().unwrap())).collect();
     assert_eq!(listed, ["abc200"], "{file}");
     let _ = std::fs::remove_dir_all(&v);
+}
+
+/// A bad `--today` is a named line at exit 0 with nothing written, like every other bad input.
+#[test]
+fn a_bad_today_is_a_named_line_and_writes_nothing() {
+    let v = scratch("bad-today");
+    let before = snapshot(&v);
+    let out = run_cs(&v, &bundle_of("202640", all_states()), "2026-13-45", &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(line.trim().lines().count() == 1 && line.to_lowercase().contains("class"), "a named line, got {line:?}");
+    assert_eq!(snapshot(&v), before, "wrote something");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// A vault folder that is not there (a `--vault` typo) is a named line, exit 0, and nothing is
+/// created: not the folder, not `state/`, not the lock file.
+#[test]
+fn a_missing_vault_is_a_named_line_and_creates_nothing() {
+    let v = scratch("missing-vault");
+    let gone = v.with_extension("no-such-vault");
+    let _ = std::fs::remove_dir_all(&gone);
+    let bundle = put_beside(&v, &bundle_of("202640", all_states()));
+    let out = Command::new(binary())
+        .args(["commitments", "--vault"])
+        .arg(&gone)
+        .args(["--today", FALL_DAY, "--school", "ua", "--class-search"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(line.trim().lines().count() == 1 && line.to_lowercase().contains("vault"), "a line naming the vault: {line:?}");
+    assert!(!gone.exists(), "created {gone:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// A term whose suffix the school does not know (`202699`; UA's are `10` and `40`) makes the bundle
+/// unreadable: a named line, exit 0, nothing written; the preview reads it as `null` too.
+#[test]
+fn a_term_the_school_does_not_know_makes_the_bundle_unreadable() {
+    let v = scratch("odd-term");
+    let before = snapshot(&v);
+    let text = bundle_of("202699", all_states());
+    let out = run_cs(&v, &text, FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(line.trim().lines().count() == 1 && line.to_lowercase().contains("class"), "a named line, got {line:?}");
+    assert_eq!(snapshot(&v), before, "wrote something");
+    let j: Value = serde_json::from_slice(&preview(&v, "odd-term", &put_beside(&v, &text)).stdout).unwrap();
+    assert_eq!(j["class_search"], Value::Null, "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+// ---- what a second read does to the file (C3 review) ----
+
+const BLOCK_NOW: &str = "classsearch:ua:202640";
+const BLOCK_SPRING: &str = "classsearch:ua:202610";
+
+/// The block's no-time courses under `key`, compacted, or `None` with no entry.
+fn listed(v: &Path, key: &str) -> Option<Vec<String>> {
+    let file = series_file(v);
+    file.get("class_search")?.get(key)?["no_time"].as_array().map(|a| a.iter().map(|c| compact(c.as_str().unwrap())).collect())
+}
+
+fn read_again(v: &Path, queries: Vec<Value>) {
+    let out = run_cs(v, &bundle_of("202640", queries), FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+fn no_time_pair() -> Vec<Value> {
+    vec![answered("ABC", "200", vec![row("ABC", "200", "90002", Vec::new())]), answered("XYZ", "100", vec![row("XYZ", "100", "90001", Vec::new())])]
+}
+
+/// The merge rule across two reads: a course the second read could not ask about (`closed`, `paused`
+/// or `fetch_failed`) keeps its earlier no-time entry; a course it answered is replaced by the answer
+/// (found or not found removes it); an entry left empty is dropped, and with it the `class_search` key.
+#[test]
+fn a_second_read_keeps_what_it_did_not_answer_and_replaces_what_it_did() {
+    for status in ["closed", "paused", "fetch_failed"] {
+        let v = scratch(&format!("merge-{status}"));
+        read_again(&v, no_time_pair());
+        assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into(), "xyz100".into()]));
+        read_again(&v, vec![unanswered("ABC", "200", status), unanswered("XYZ", "100", status)]);
+        assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into(), "xyz100".into()]), "{status} must keep the entry");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+    let v = scratch("merge-answered");
+    read_again(&v, no_time_pair());
+    // ABC is unasked; XYZ is found: its entry goes, ABC's stays.
+    let found = answered("XYZ", "100", vec![row("XYZ", "100", "90001", vec![meeting("CLAS", "0900", "0950", &["monday"])])]);
+    read_again(&v, vec![unanswered("ABC", "200", "paused"), found]);
+    assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into()]));
+    // ABC answered with no such section: the entry is left empty and goes, and the key with it.
+    read_again(&v, vec![answered("ABC", "200", Vec::new())]);
+    assert_eq!(listed(&v, BLOCK_NOW), None);
+    assert!(series_file(&v).get("class_search").is_none(), "an empty block is absent: {}", series_file(&v));
+    // ABC no-time again: the answer puts it back.
+    read_again(&v, vec![answered("ABC", "200", vec![row("ABC", "200", "90002", Vec::new())])]);
+    assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into()]));
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// A bundle for the coming term, read in the gap (`term_for` still the old term), writes the block
+/// under both terms; read in its own term, under that term only; a stale bundle (an older term than
+/// `term_for`'s) writes under neither of the keys the current term reads, so it can never claim
+/// something about the current term, nor leave a block the next `rank` must drop.
+#[test]
+fn the_second_block_key_is_written_only_for_a_bundle_ahead_of_term_for() {
+    let queries = || vec![answered("ABC", "200", vec![row("ABC", "200", "90002", Vec::new())])];
+    let v = scratch("keys-gap");
+    let out = run_cs(&v, &bundle_of("202640", queries()), "2026-05-20", &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into()]));
+    assert_eq!(listed(&v, BLOCK_SPRING), Some(vec!["abc200".into()]));
+    let _ = std::fs::remove_dir_all(&v);
+
+    let v = scratch("keys-own-term");
+    read_again(&v, queries());
+    assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into()]));
+    assert_eq!(listed(&v, BLOCK_SPRING), None, "term_for's term is the bundle's: one key");
+    let _ = std::fs::remove_dir_all(&v);
+
+    let v = scratch("keys-stale");
+    let mut stale_row = row("ABC", "200", "90002", Vec::new());
+    stale_row["term"] = json!("202610");
+    let stale = vec![answered("ABC", "200", vec![stale_row])];
+    let out = run_cs(&v, &bundle_of("202610", stale), FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["no_time"], json!(1), "the stale bundle still reads: {report}");
+    let on_disk = std::fs::read_to_string(v.join(SERIES)).unwrap_or_default();
+    assert!(!on_disk.contains("class_search"), "a stale bundle leaves no block (own term passed, current not its to claim): {on_disk}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// A query's state when its sections differ is the first of found, part_read, ambiguous, no_time,
+/// not_found; the rows follow the sections that were found, the block the query that ended no_time.
+#[test]
+fn a_query_with_mixed_sections_ends_in_the_first_state_of_the_precedence() {
+    let v = scratch("mixed");
+    let two = |subject: &str, number: &str, first: Vec<Value>, second: Vec<Value>| {
+        let body = json!({ "success": true, "totalCount": 3, "data": first.into_iter().chain(second).collect::<Vec<_>>() }).to_string();
+        json!({ "subject": subject, "number": number, "sections": ["001", "002"], "status": "answered", "body": body })
+    };
+    let times = || vec![meeting("CLAS", "0900", "0950", &["monday"])];
+    let queries = vec![
+        // found + no_time -> found
+        two("XYZ", "100", vec![row_seq("XYZ", "100", "001", "90001", times())], vec![row_seq("XYZ", "100", "002", "90011", Vec::new())]),
+        // part_read (across midnight) + ambiguous -> part_read
+        two(
+            "PRT",
+            "110",
+            vec![row_seq("PRT", "110", "001", "90021", vec![meeting("CLAS", "2300", "0100", &["friday"])])],
+            vec![row_seq("PRT", "110", "002", "90022", times()), row_seq("PRT", "110", "002", "90023", times())],
+        ),
+        // ambiguous + no_time -> ambiguous
+        two(
+            "AMB",
+            "120",
+            vec![row_seq("AMB", "120", "001", "90031", times()), row_seq("AMB", "120", "001", "90032", times())],
+            vec![row_seq("AMB", "120", "002", "90033", Vec::new())],
+        ),
+        // no_time + not_found (no row for section 002) -> no_time
+        two("ABC", "200", vec![row_seq("ABC", "200", "001", "90002", Vec::new())], Vec::new()),
+    ];
+    let out = run_cs(&v, &bundle_of("202640", queries), FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    for (state, n) in [("found", 1), ("part_read", 1), ("ambiguous", 1), ("no_time", 1), ("not_found", 0), ("closed", 0)] {
+        assert_eq!(report[state], json!(n), "{state}: {report}");
+    }
+    let file = series_file(&v);
+    let uids: Vec<&str> = file["series"].as_array().unwrap().iter().map(|s| s["source_uid"].as_str().unwrap()).collect();
+    assert_eq!(uids, ["classsearch:ua:202640-90001"], "{file}");
+    assert_eq!(listed(&v, BLOCK_NOW), Some(vec!["abc200".into()]), "only the query that ended no_time: {file}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// The same bundle read twice gives byte-identical series files, and so does the same queries in
+/// the opposite order on another vault.
+#[test]
+fn the_same_bundle_read_twice_gives_byte_identical_series_files() {
+    let bytes = |name: &str, queries: Vec<Value>, times: usize| {
+        let v = scratch(name);
+        let mut last = Vec::new();
+        for _ in 0..times {
+            read_again(&v, queries.clone());
+            last = std::fs::read(v.join(SERIES)).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&v);
+        last
+    };
+    let mut forward = all_states();
+    forward.extend(no_time_pair());
+    let mut backward = forward.clone();
+    backward.reverse();
+    let once = bytes("bytes-once", forward.clone(), 1);
+    assert!(!once.is_empty());
+    assert_eq!(bytes("bytes-twice", forward, 2), once, "a second read changed the file");
+    assert_eq!(bytes("bytes-reversed", backward, 1), once, "the order of the queries changed the file");
 }
 
 // ---- the term gap (C2b's binding note) ----
