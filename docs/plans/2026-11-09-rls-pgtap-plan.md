@@ -3,9 +3,9 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status: r1, awaiting plan review r2.** §4 is answered. Plan review r1 (2026-11-09) failed: I1 to I5 and
-M1 to M6, all folded in; §13 maps each finding to where it is answered. No task starts before the review
-passes (§10).
+**Status: r2, review r2 passed with notes folded.** §4 is answered. Plan review r1 (2026-11-09) failed: I1
+to I5 and M1 to M6, folded in, and §13 maps them. Plan review r2 passed with ten notes, folded in, and
+§13.1 maps them.
 
 **Date:** 2026-11-09. **Lane:** security, RLS behaviour tests. **Branch:** `security/rls-pgtap`, worktree
 `../knowlu-rls`, cut from `origin/main` at `c61c7cec` (it carries `20261109000100_definer_trigger_execute.sql`).
@@ -212,9 +212,20 @@ One row per relation, in `_matrix.psql`, inserted into a temporary `tests.matrix
 | `kind` | `table`, `view` |
 | `access` | `own` (owner-read policy), `service` (no policy), `invoker_view`, `closed_view` |
 | `key_col` | `id`, `account_id`, or null for a global table (`models`, `webhook_events`, `deleted_accounts`, `rule_evidence`, `eval_cases`, `eval_runs`) and for views; `mail_batches` and `mail_canaries` are keyed through `address_id` |
-| `touch_col` | a column that an update probe sets to a sentinel (r1 I1): never generated, identity or trigger-rewritten |
+| `touch_col` | a column that an update probe sets to a sentinel (r1 I1). Never one of: generated; identity; trigger-rewritten; under a CHECK constraint; of an enum type; part of a foreign key (r2 note 6). A sentinel there would fail for its own reason, under the owner as well, and C7's validity run would show it |
 | `grants` | `default` (client roles hold Supabase's default table rights) or `revoked` |
 | `policies` | the exact policy names, `{}` for none |
+| `view_insert_code` | views only: the SQLSTATE V3 expects from `insert … default values` (r2 note 1) |
+
+**V3's expected SQLSTATE, row by row** (`view_insert_code`):
+- `55000` for the five public closed views and for `billing_subscribers`.
+  - `telemetry_daily`, `correction_rates` and `monthly_spend` aggregate; `effective_entitlements` and
+    `billing_subscribers` join; `sync_limits` has no `from`.
+  - None of them is updatable, and Postgres raises 55000 for that before it checks any privilege.
+- `42501` for the three `admin` views, because the schema's `usage` is checked first.
+
+The probe catches only 42501, 55000 and 0A000, and the case compares the code with the row's value.
+Success, or a code outside the caught set, fails the case.
 
 **What a probe returns (r1 I2).** One integer, so a grant-level refusal and an RLS refusal never look
 alike:
@@ -226,8 +237,9 @@ alike:
 
 The probe reads the message with `get stacked diagnostics`. Any other SQLSTATE, or a 42501 whose message
 matches neither phrase, is re-raised. It is never mapped to a denial, so a probe that breaks fails loud.
-The phrases are English server messages. T3's smoke file pins `lc_messages` to an English or `C` locale
-so they cannot drift.
+The phrases are English server messages. T3's smoke file checks `lc_messages` is `C`, `C.*`, `POSIX` or
+`en*` (r2 note 5). The stated proof that both phrases really occur is the I2-split self-test (D6): no
+fallback relies on `set lc_messages`, which probably needs a superuser on the Supabase image.
 
 **"Per `grants`"** in the table below means:
 
@@ -238,7 +250,8 @@ so they cannot drift.
 | insert, upsert | -2 | -1 |
 
 **An update or delete that "touched 0 rows" is checked by the owner too (r1 I1).**
-- Before each write probe, the owner records the target rows' `(primary key, ctid)` pairs.
+- One driver call does the whole check (D5's `tests.probe_write`, r2 note 4). Before the write probe, the
+  owner records the target rows' `(primary key, ctid)` pairs.
 - Every update probe sets `touch_col` to a per-type sentinel, not to itself: `'rls-probe'` for text,
   `-424242` for numbers, `now() - interval '1 year'` for timestamps, `not touch_col` for booleans.
 - After the probe, the owner re-reads the pairs and the `touch_col` value. Any changed `ctid`, missing row
@@ -270,7 +283,7 @@ Every assertion runs as the owner. Only the probe runs as the client role, throu
 | S5 | A | `service` | delete A's rows | per `grants`; owner re-read unchanged |
 | V1 | A | `billing_subscribers` | `select` | A's row only (A and B both hold an active subscription in the fixture) |
 | V2 | A | `closed_view` | `select` | -1 |
-| V3 | `anon`, A | every view | `insert … default values`, through its own probe `tests.view_insert` (r1 I4a). It returns the SQLSTATE and catches only 42501, 55000 and 0A000; success, or any other code, fails the case | `closed_view`: `42501`. `billing_subscribers` (a three-table join, so not updatable): `55000` |
+| V3 | `anon`, A | every view | `insert … default values`, through its own probe `tests.view_insert` (r1 I4a) | the row's `view_insert_code`: `55000` for the six public views, `42501` for the three `admin` views (r2 note 1) |
 | F1 | catalog | `public`, `admin` | SECURITY DEFINER functions executable by `anon` or `authenticated` | none |
 | F2 | catalog | `public`, `admin` | any non-trigger function executable by `anon` or `authenticated`, minus the matrix's RPC allowlist (empty today) | none |
 | F3 | `anon`, A | the 7 definer functions | call with typed nulls | -1 |
@@ -382,11 +395,23 @@ end $$;
 - `tests.probe` rolls its subtransaction back on purpose, and Postgres reverts the role and claim
   settings with it. So the effect of a write that got through is undone. Its count is not: the probe
   reports it.
-- The owner's `(primary key, ctid)` re-read (D3) runs on a separate, **non**-rolled-back path for the
-  write probes: `tests.probe_keep(who, sql)` is the same driver without the closing raise.
-  - It exists so that a write that reported 0 but changed a row is caught by the owner, not trusted.
-  - Before each `probe_keep`, the file sets `savepoint w`. After the owner's re-read, it runs `rollback to
-    savepoint w`, and then calls pgTAP.
+- **The write probes use `tests.probe_write(who, rel, sql, target_where)`**, which does the whole check
+  of D3 in **one** driver call (r2 note 4). It returns `(n bigint, changed boolean)` to the owner. Inside
+  the same KNRLS subtransaction it:
+  1. as the owner, takes the snapshot of the target rows: `(primary key, ctid, touch_col::text)`, built
+     from the matrix's `key_col`, `touch_col` and the table's primary key;
+  2. switches to the client and runs the probe through `tests.run`;
+  3. resets to the owner and re-reads the same rows;
+  4. sets `changed` when any `ctid` moved, any row is missing, any row left its key, or any `touch_col`
+     holds the sentinel;
+  5. raises KNRLS with `n` and `changed` in the detail.
+
+  The subtransaction then undoes the write, and the owner's assertions read the two returned values.
+- There is no psql savepoint and no `\gset`. A write case is one SQL call that a loop over
+  `tests.matrix` can make, so a new table needs only its matrix row and its fixture case (T10's promise
+  holds).
+- `tests.probe`, `tests.probe_write`, `tests.under_fault` and `tests.call_outcome` are all SECURITY
+  INVOKER. They switch roles with `set local role` and never run with the definer's rights.
 
 **The cleared slot (r1 I4b).**
 - `accounts`, `entitlements`, `billing_reminders`, `sync_usage`, `google_accounts` and `mail_accounts`
@@ -405,10 +430,12 @@ Other helpers:
 - `tests.insert_sql(rel, account)`: a valid insert for that table and account, one case per matrix
   table. It raises on a table it does not know.
 - `tests.view_insert(rel)`: V3's own probe. It returns a SQLSTATE and catches only `42501`, `55000` and
-  `0A000`.
+  `0A000`. The case compares it with the row's `view_insert_code`.
+- `tests.call_outcome(who, sql)`: for F3 and F4 under a fault (r2 note 8). It returns `denied` for a
+  `permission denied` 42501, and `executed` for success or any other SQLSTATE.
 - `tests.unlisted()`: D4.
 - `tests.client_functions(role)`: F1 and F2.
-- `tests.under_fault(fault, who, sql)`: D6.
+- `tests.under_fault(fault, check)`: D6.
 
 The `tests` schema gets `usage` and `execute` for `anon` and `authenticated`, because the probe body runs
 under them. The whole schema is rolled back with the file.
@@ -437,7 +464,9 @@ rollback;
 - **Validity, proven before anything is denied.** Every insert that A2, O3, O4, O5 and S2 expect to be
   refused uses the same `tests.insert_sql` text and the same `tests.clear_sql` slot.
   - The owner runs that pair first, through the driver with `p_who = 'owner'`, and the driver's
-    subtransaction undoes it (C7, one case per table and account).
+    subtransaction undoes it. C7 makes one case per table and account, each wrapped in pgTAP's
+    `lives_ok`, because `tests.run` re-raises a constraint error such as 23514 rather than return a
+    count (r2 note 7).
   - A -1 or -2 from the client can then only mean a grant or a policy refused it. It can never mean a
     bad row or a 23505 on a one-row-per-account table (r1 I4b).
 - **No real data.** No real address, name, course or note text: `rls-a@example.invalid`, a
@@ -451,9 +480,12 @@ skipped silently.
 - A deny test against a correct schema is green on its first run, so "red first" cannot mean "fails until
   the code is written". Here it means two things.
   - Every check is first shown to fail against its own planted fault, in `09_self_test_test.sql` (r1 I3).
-  - Each fault is isolated. `tests.under_fault(fault_sql, who, check_sql)` runs the fault as the owner,
-    then the check, inside one subtransaction it always rolls back, and returns the check's result to the
+  - Each fault is isolated. `tests.under_fault(fault_sql, check_sql)` runs the fault as the owner, then
+    the check, inside one subtransaction it always rolls back, and returns the check's result to the
     owner, the way `tests.probe` does.
+    - The check is any owner-side expression: a `tests.probe` call, a `tests.probe_write` call, or a
+      catalog query.
+    - Nested subtransactions are fine.
     - No fault outlives its own case, so no fault can mask or cause another's result.
     - The pgTAP assertion runs after the rollback, so its result row is not rolled back with the fault.
   - The faults. Every row must make its check report the fault:
@@ -461,19 +493,14 @@ skipped silently.
 | Check | Planted fault (on `issues` unless named) | The check must report |
 |---|---|---|
 | A1 | `create policy zz on issues for select to anon using (true)` | a count above 0 |
-| O1, O2, V1 | `… for select to authenticated using (true)`; for V1, the same on `entitlements` | B's row visible; V1 shows two rows |
-| O3, A2 | `… for insert to anon, authenticated with check (true)` | a count of 1, not -2 |
+| O1, O2, O11 | `… for select to authenticated using (true)` | B's row visible to A (O1, O2); A's row visible to B (O11) |
+| V1 | select-all policies on **both** `accounts` and `entitlements` (the view inner-joins them; r2 note 2) | V1 shows two rows |
+| O3, O4, A2 | `… for insert to anon, authenticated with check (true)` | a count of 1, not -2, for A's slot and B's |
 | the I2 split | `revoke insert on issues from authenticated` | O3 returns -1, not -2 |
 | O5 | the insert policy, plus `… for update using (true)`, plus a select-all policy | the upsert succeeds |
 | O6, O7, A3 | `… for update to anon, authenticated using (true)`, plus a select-all policy for both roles | O7 and A3 above 0; the owner's re-read shows a new `ctid` and the sentinel |
-| O8 | `… for update using (true) with check (true)` | the move above 0; the row is under B in the re-read |
+| O8 | `… for update using (true) with check (true)`, plus a select-all policy (r2 note 3) | the move above 0; the row is under B in the re-read |
 | O9, O10, A4 | `… for delete to anon, authenticated using (true)`, plus a select-all policy for both roles | O10 and A4 above 0; the row is gone from the re-read |
-
-**Why the select-all companions.** Postgres also applies SELECT policies to the rows an UPDATE or
-DELETE reads through its `where`, and to the existing row an upsert conflicts with. Without the
-companion, the update or delete fault alone would still report 0, and the fault would prove nothing.
-Each such fault row therefore plants the select-all policy too, and its own case still names exactly
-one check.
 | O12, O13 | `… for select to authenticated using (auth.uid() is null or true)` | above 0 |
 | S1 to S5 | `create policy zz on judgments for all to authenticated using (true) with check (true)` | each S probe changes result |
 | C1 | `create table public.zz_unlisted (id int)` | the name in `tests.unlisted()` |
@@ -485,18 +512,32 @@ one check.
 | C7 | `delete from issues where account_id = <B>` | the non-vacuous check fails |
 | A5, V2 | `grant select on monthly_spend to anon, authenticated` | a count, not -1 |
 | V3 | `create view public.zz_v as select * from issues` (updatable, runs as its owner), then `grant insert` to `anon` | `view_insert` reports success, which V3 fails |
-| F1, F3, F4 | `grant execute on function read_google_grant(uuid, text) to anon, authenticated` | listed by F1; F3 and F4 not -1 |
+| F1, F3, F4 | `grant execute on function read_google_grant(uuid, text) to anon, authenticated` | listed by F1. F3 and F4 report `executed`: under a fault, `tests.call_outcome` counts any outcome other than a `permission denied` 42501 as executed, because a definer function called with nulls may raise something else (r2 note 8) |
 | F2 | `grant execute on function public.sync_prune(int) to anon` | listed by F2 |
 | F5 | `grant usage on schema admin to anon` | F5 true |
 | P1 | one `storage.buckets` row (when the schema exists) | count 1 |
 | P2 | `create policy zz on storage.objects for select using (true)` | an unlisted policy |
 | P3 | `alter publication supabase_realtime add table public.issues` (or `create publication zz for table public.issues` if T4 finds none) | listed |
 
+**Why the select-all companions.**
+- Postgres also applies SELECT policies to:
+  - the rows an UPDATE or DELETE reads through its `where`;
+  - the new row of an UPDATE that has a `where` (r2 note 3);
+  - the existing row an upsert conflicts with.
+- Without the companion, an update, delete or move fault alone would still report 0 or -2, and so
+  would prove nothing.
+- Each such row therefore plants the select-all policy too, and its case still names one check.
+
   - **Guard rails.**
     - A probe given a broken statement (an unknown column) raises; it is never read as 0, -1 or -2.
     - A 42501 raised by `raise exception using errcode = '42501', message = 'other'` is re-raised, not
       classified.
-    - C7's validity check reports false for a row that breaks a check constraint.
+    - The owner's validity run is wrapped in pgTAP's `lives_ok` (r2 note 7), because `tests.run`
+      re-raises a 23514. The guard rail shows a row that breaks a check constraint makes that run raise,
+      with `throws_ok(…, '23514')`, so C7 cannot pass on a bad `insert_sql`.
+    - The I2 split doubles as the proof that both message phrases occur on this image (r2 note 5): with
+      no fault, O3 returns -2 (the RLS phrase), and under the `revoke insert` fault it returns -1 (the
+      `permission denied` phrase). A locale that changed either phrase fails one of the two.
     - With `request.jwt.claim.sub` set to B, a following `as_user(A)` still makes `auth.uid()` A (C8).
   - The static twin is written before `_matrix.psql` exists, and fails for that reason.
 - **Who runs what.**
@@ -605,12 +646,12 @@ second. That is the guard working: the second lane adds the matrix row.
 | T7 | cloud-engineer | `03_own_rows_test.sql` (O1-O13, V1) | T5a-T5c faults | CI |
 | T8 | cloud-engineer | `04_service_only_test.sql` (S1-S5, V2) | T5a-T5c faults | CI |
 | T9 | cloud-engineer | `05_functions_test.sql` (F1-F5), `06_platform_test.sql` (P1-P3) | T5a-T5c faults | CI |
+| T10 | docs-keeper | README "Testing", HANDOFF line | | |
+| T11 | reviewer, then main session | whole-branch review, workspace suite, ready for review | | PASS |
 
 **Edit size (r1 I5).** No single edit is longer than about 80 lines. A file longer than that (the
 fixtures, `insert_sql`, any matrix-wide test) is written in successive edits of 80 lines or fewer, each
 one complete SQL statements, and each task's ledger line counts its edits.
-| T10 | docs-keeper | README "Testing", HANDOFF line | | |
-| T11 | reviewer, then main session | whole-branch review, workspace suite, ready for review | | PASS |
 
 ## T0. Base, baselines and pins (main session)
 
@@ -663,8 +704,14 @@ Files: `cloud/supabase/tests/_matrix.psql` (new).
   - 3 `admin` views;
   - a `tests.rpc_allowlist` insert with no rows (Q3).
   - The rows are inserted into `tests.matrix`, which `_setup.psql` creates (T3), with the columns of D3.
-  - `touch_col` is never a generated column (`sync_records.keep`), an identity column, or a column
-    under a trigger that rewrites it (`sync_notes.rev`).
+  - `touch_col` is never:
+    - a generated column (`sync_records.keep`);
+    - an identity column;
+    - a column under a trigger that rewrites it (`sync_notes.rev`);
+    - a column under a CHECK constraint;
+    - an enum-typed column;
+    - part of a foreign key (r2 note 6).
+  - Every view row carries its `view_insert_code` (D3, r2 note 1).
 - [ ] Run the Deno line: T1's file is green and the count is the baseline plus T1's tests. Record it.
 - [ ] Commit `_matrix.psql` alone: `test(cloud): the RLS matrix, every public and admin relation`.
 
@@ -742,7 +789,8 @@ Files: `engine/tests/workflows.rs` (one test appended), `.github/workflows/ci.ym
   - C8's three `auth.uid()` checks;
   - `current_user` is `authenticated` after `as_user`;
   - `current_user` is the session user after `as_owner`;
-  - `current_setting('lc_messages')` is `C`, or starts `en`, so D3's message phrases hold (r1 I2).
+  - `current_setting('lc_messages')` is `C`, `C.*`, `POSIX` or `en*` (r1 I2, r2 note 5). The
+    phrases themselves are proven by T5b's I2-split self-test.
 
   It also prints a `diag` of `version()` and `session_user`, and nothing else.
 - [ ] **`supabase-images.sh`** (LF, run with `bash`).
@@ -792,7 +840,7 @@ Files: `cloud/supabase/tests/09_self_test_test.sql` (new), `_setup.psql` (second
     stale-legacy-key check.
   - **Controller:** push. **Expected red:** the file fails because `tests.run`, `tests.probe`,
     `tests.under_fault`, `tests.unlisted` and `tests.client_functions` do not exist yet. Record the run.
-- [ ] **Green.** Write those functions, `tests.probe_keep` and `tests.view_insert` into `_setup.psql`
+- [ ] **Green.** Write those functions, `tests.probe_write`, `tests.call_outcome` and `tests.view_insert` into `_setup.psql`
   (D5), in edits of 80 lines or fewer.
   - **Controller:** push. **Expected:** `09` green, and `00` still green.
 - [ ] Commit both files: `test(cloud): RLS probe driver, each probe proven to see a planted fault`.
@@ -837,8 +885,8 @@ Files: `cloud/supabase/tests/01_coverage_test.sql` (new).
   - C5 reads `reloptions` for `security_invoker`.
   - C6 calls `has_table_privilege` for `anon` and `authenticated` on select, insert, update and delete,
     against `grants`.
-  - C7 runs each table's `insert_sql` in its `clear_sql` slot as the owner, through the driver, and
-    counts A's and B's rows.
+  - C7 runs each table's `insert_sql` in its `clear_sql` slot as the owner, through the driver, inside
+    `lives_ok` (r2 note 7). It also counts A's and B's rows.
   - `plan()` is computed from `tests.matrix`.
 - [ ] **Controller:** push. **Expected:** green on the first run. Each check was already shown able to
   fail in T5a to T5c. Any red case stops the task under §3.
@@ -849,8 +897,9 @@ Files: `cloud/supabase/tests/01_coverage_test.sql` (new).
 Files: `cloud/supabase/tests/02_anon_test.sql` (new).
 
 - [ ] A1 to A5 over every matrix table and view, plus V3 as `anon`. Every probe goes through
-  `tests.probe` (`tests.probe_keep` for A3 and A4, with the owner's re-read between a savepoint and its
-  rollback). Expectations are per `grants` (D3). V3 uses `tests.view_insert`.
+  `tests.probe`, except A3 and A4, which go through `tests.probe_write` and assert `n` per `grants`
+  and `changed = false`. Expectations are per `grants` (D3). V3 uses `tests.view_insert` against each
+  row's `view_insert_code`.
   - Each description names the case and the relation, e.g. `A2 anon cannot insert into public.issues`.
 - [ ] **Controller:** push; expect green. Any red stops the task under §3.
   - Drift between these results and staging is not this file's business: Q5's proof checks staging
@@ -864,14 +913,12 @@ Files: `cloud/supabase/tests/02_anon_test.sql` (new).
 Files: `cloud/supabase/tests/03_own_rows_test.sql` (new).
 
 - [ ] O1 to O13, for every `own` row, and V1.
-  - Each write probe (O6 to O10) runs as `savepoint w`, then `tests.probe_keep`, then the owner's
-    re-read, then `rollback to savepoint w`, and only then the assertions (D3, r1 I1):
-    - the count it returned is 0;
-    - every `(primary key, ctid)` pair is unchanged;
-    - no row holds the sentinel, and no row has left A or B.
-
-    An update or delete that touched a row fails the case even if its count was 0. T5b's
-    `for update` and `for delete` faults showed both checks fire.
+  - Each write probe (O6 to O10) is one `tests.probe_write` call (D5, r2 note 4). It asserts that
+    `n = 0` and `changed = false`. `changed` covers every `(primary key, ctid)` pair, the sentinel, and
+    a row leaving A or B.
+    - An update or delete that touched a row fails the case even if its count was 0. T5b's
+      `for update` and `for delete` faults showed both values fire.
+    - The cases are generated by a loop over `tests.matrix`; nothing is written per table.
   - O3 and O4 run in the cleared slot (`clear_sql` for A, then for B) and expect -2 (D3, r1 I4b).
   - O5 uses `insert … on conflict (<primary key>) do update set <touch_col> = excluded.<touch_col>`
     with B's existing key, and expects -2.
@@ -886,7 +933,7 @@ Files: `cloud/supabase/tests/04_service_only_test.sql` (new).
 - [ ] S1 to S5, for every `service` row, as A, per `grants` (D3).
   - For the keyed ones, also as B against B's own rows: a student gets nothing, even of their own.
   - S2 runs in the cleared slot.
-  - S3 to S5 use `probe_keep` and the owner's re-read, as in T7.
+  - S3 to S5 use `tests.probe_write`, as in T7.
   - V2: every `closed_view` as A is -1.
 - [ ] **Controller:** push; expect green.
 - [ ] Commit: `test(cloud): service-only tables answer no student, their own rows included`.
@@ -955,7 +1002,7 @@ Files: `cloud/supabase/tests/05_functions_test.sql`, `06_platform_test.sql` (new
 | pgTAP not on `search_path` | T4 | `set search_path = public, extensions` in `_setup.psql` | none |
 | A CLI image moves under a tag | `verify` | bump the lock deliberately | one reviewed line per image |
 | The CLI errors on `config.toml`'s unset `SMTP_PASSWORD` (r1 M2) | T4, the step log | job-level `SMTP_PASSWORD: ci-local-unused` | one pinned literal |
-| Server messages are not English, so D3's phrases do not match | the smoke file's `lc_messages` check | `set lc_messages = 'C'` in `_setup.psql` | none |
+| Server messages are not English, so D3's phrases do not match | the smoke file's `lc_messages` check (`C`, `C.*`, `POSIX`, `en*`); the I2-split self-test, which proves both phrases | none: stop and rule at checkpoint 3. `set lc_messages` probably needs a superuser on this image, so no fallback relies on it (r2 note 5) | the lane waits |
 | A probe reports a denial it did not get (false green) | T5a to T5c per-check faults; re-raise on unknown SQLSTATE or message; the owner's `ctid` and sentinel re-read after writes | | |
 | A real hole is found | any T6a to T9 case | stop (§3) | the lane waits for a fix lane |
 
@@ -1014,6 +1061,8 @@ Files: `cloud/supabase/tests/05_functions_test.sql`, `06_platform_test.sql` (new
 
 - **r0 to r1 (plan review r1, 2026-11-09, FAIL).** Five important findings and six minor ones, all
   folded in. §13 maps each to where it is answered.
+- **r1 to r2 (plan review r2, 2026-11-09, PASS with notes).** Ten notes, all folded in; §13.1 maps them.
+  The `probe_keep` savepoint mechanism of r1 is replaced by the single-call `tests.probe_write`.
 
 ## 12. Out of scope
 
@@ -1032,7 +1081,7 @@ Files: `cloud/supabase/tests/05_functions_test.sql`, `06_platform_test.sql` (new
 
 | Finding | Answer | Where |
 |---|---|---|
-| **I1** A self-assigning update is invisible to the owner's re-read; `tests.affected` was never planted against | Every update probe sets `touch_col` to a per-type sentinel. The owner snapshots `(primary key, ctid)` before each write probe and re-reads after it, so any update (self-assigning included) or delete is caught whatever count it returned. `for update using (true)` and `for delete using (true)` faults make O7 and O10 report above 0 and show a new `ctid`, the sentinel, or a missing row. The overstated "a trigger moved data" claim is gone | D3 ("checked by the owner too"); D5 (`probe_keep`, savepoint); D6 fault table (O6/O7/A3, O8, O9/O10/A4); T7; T8 |
+| **I1** A self-assigning update is invisible to the owner's re-read; `tests.affected` was never planted against | Every update probe sets `touch_col` to a per-type sentinel. The owner snapshots `(primary key, ctid)` before each write probe and re-reads after it, so any update (self-assigning included) or delete is caught whatever count it returned. `for update using (true)` and `for delete using (true)` faults make O7 and O10 report above 0 and show a new `ctid`, the sentinel, or a missing row. The overstated "a trigger moved data" claim is gone | D3 ("checked by the owner too"); D5 (`probe_write`, which replaced r1's `probe_keep` at r2 note 4); D6 fault table (O6/O7/A3, O8, O9/O10/A4); T7; T8 |
 | **I2** A grant deny and an RLS deny both map to -1 | `tests.run` reads `MESSAGE_TEXT` with `get stacked diagnostics`: `permission denied for …` is -1, `… violates row-level security policy …` is -2, and anything else is re-raised. Insert and upsert expect -2 on `grants = default` and -1 on `revoked`; closed views expect -1. The `revoke insert on issues from authenticated` fault turns O3 from -2 to -1. The "0, or 42501" cells now read "per `grants`", with a three-row key | D3 (return codes, the "per `grants`" table, the cases table); D5 (`tests.run`); D6 (the I2 split); T3 smoke (`lc_messages`); §7 |
 | **I3** Five shared-transaction faults left most checks unproven and leaked into each other | One fault per check: 25 rows covering A1-A5, O1-O13, S1-S5, V1-V3, C1-C7, F1-F5 and P1-P3. Each runs through `tests.under_fault`, inside a subtransaction rolled back per case, with the assertion made after the rollback. The table includes every fault the review named (RLS disabled, `alter policy … using (true)`, `revoke select`, `grant execute … sync_prune` to `anon`, `grant usage on schema admin`, a `storage.buckets` row, `alter publication supabase_realtime add table`) | D6 (fault table and guard rails); T5a, T5b, T5c; §10 checkpoint 4 |
 | **I4a** V3's insert into `billing_subscribers` raises 55000 and the re-raise aborts the file | V3 has its own probe, `tests.view_insert`. It returns the SQLSTATE and catches only 42501, 55000 and 0A000. It expects `42501` for closed views and `55000` for `billing_subscribers`; success or any other code fails the case | D3 (V3); D5 (other helpers); T6b; the V3 fault in D6 |
@@ -1042,6 +1091,21 @@ Files: `cloud/supabase/tests/05_functions_test.sql`, `06_platform_test.sql` (new
 | **M1** `db start` runs one-off auth and storage migration images; "any other image" is wrong on a hosted runner | `images.lock` lists every image the two commands run, the one-off migration containers included. `baseline` saves the runner's own images first, and `verify` diffs against it | D2 (pinning); T3 (`baseline` step and script); T4 |
 | **M2** The SMTP block's unset `env(SMTP_PASSWORD)` | T4 records whether the pinned CLI warns or errors. If it errors, the named fallback is the literal `SMTP_PASSWORD: ci-local-unused`, allowed by the workflows pin and recorded as a deviation | D2; T3 pin; T4; §7 |
 | **M3** F4 is a grant-level deny, not account scoping | F4 expects -1 and is labelled a grant-level deny. The ledger counts it with F1-F3 and states it is not an account-scoping proof. §9 says what it does not prove | D3 (F4); T9; §8; §9 |
-| **M4** How a probe's result crosses `as_owner()` | `tests.probe` keeps the result in a plpgsql local, which survives the role reset, and returns it to the owner, so pgTAP never runs under a client role. `under_fault` and `probe_keep` do the same | D5 (driver), D6 |
+| **M4** How a probe's result crosses `as_owner()` | `tests.probe` keeps the result in a plpgsql local, which survives the role reset, and returns it to the owner, so pgTAP never runs under a client role. `under_fault` and `probe_write` (r2) do the same | D5 (driver), D6 |
 | **M5** Stale text: Q2 open in §1 and T6; staging drift in a public file; "F2 if Q3"; status | §1 and §4's Q2 say "closed at 36". T6b sends any staging difference to Quinn privately and never into a commit, the PR or the ledger. The ledger names F2 unconditionally (Q3 answered). The status line reads r1 | Status; §1; §4; T6b; §8 |
 | **M6** `--workdir` on every `supabase` call | Every invocation carries `--workdir cloud`, `supabase --workdir cloud --version` included, pinned line by line in T3's workflows test | D2; T3 (pin and the CLI step) |
+
+### 13.1 Plan review r2 (PASS with notes): where each note is answered
+
+| Note | Answer | Where |
+|---|---|---|
+| **1** V3 per row: non-updatable views raise 55000 before any privilege check; only the `admin` views give 42501 | A new matrix column, `view_insert_code`. It is 55000 for the five public closed views and `billing_subscribers`, and 42501 for the three `admin` views. The case compares the probe's code with the row; only success, or a code outside {42501, 55000, 0A000}, fails | D3 (column table, "V3's expected SQLSTATE", V3 row); D5 (`view_insert`); T2; T6b |
+| **2** V1's fault must cover both joined tables | Select-all policies on both `accounts` and `entitlements` | D6 fault table (V1 row) |
+| **3** O8's fault needs the select-all companion | Added. The companion paragraph names an UPDATE's new row, not only its `where` | D6 fault table (O8 row); "Why the select-all companions" |
+| **4** Drop the psql savepoint/`\gset` mechanism | `tests.probe_write(who, rel, sql, target_where)` does the snapshot, the client probe, the reset, the re-read and the raise in one KNRLS subtransaction. It returns `(n, changed)`. `savepoint w` is gone from T6b, T7 and T8; the cases are loops over `tests.matrix`, so T10's "a matrix row, a fixture case and nothing else" holds. Every driver is SECURITY INVOKER | D3 (owner check); D5 (`probe_write`, the invoker bullet); T5a; T6b; T7; T8 |
+| **5** `lc_messages`: accept C, C.*, POSIX, en*; no superuser-dependent fallback | The smoke check accepts all four. The I2-split self-test is the stated proof that both phrases occur. §7 has no `set lc_messages` fallback; a mismatch stops at checkpoint 3 | D3 (message phrases); D6 guard rails; T3 smoke; §7 |
+| **6** `touch_col` exclusions | Also never a column under a CHECK constraint, of an enum type, or part of a foreign key | D3 (`touch_col` row); T2 |
+| **7** C7 guard rail: `lives_ok` around the owner validity run | C7's owner runs are wrapped in `lives_ok`. The guard rail shows a constraint-breaking row raises 23514 (`throws_ok`) | D5 (fixtures, validity); D6 guard rails; T6a |
+| **8** F3/F4 under a fault: any non-42501 outcome counts as executed | `tests.call_outcome(who, sql)` returns `denied` only for a `permission denied` 42501, and `executed` for anything else | D5 (other helpers); D6 fault table (F1/F3/F4 row); T5a |
+| **9** The fault table must name O4 and O11 | The O1/O2/O11 row and the O3/O4/A2 row | D6 fault table |
+| **10** Paragraphs inside tables | "Why the select-all companions" now follows the fault table, and "Edit size" follows the tasks table, after T11's row | D6; §6 |
