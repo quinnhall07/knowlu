@@ -13,7 +13,7 @@ re-check before quoting. Usage figures come from this repository's own Claude Co
 | Role | Before | Now |
 |---|---|---|
 | main session | Opus 5.5, medium | Fable 5.2, high |
-| `planner`, `debugger` | Opus 5.5, high | Fable 5.2, high |
+| `planner`, `debugger` | Opus 5.5, high | the session's model and level: Fable 5.2, high |
 | `implementer` | Sonnet 5.5, high | Opus 5.5, high |
 | `test-writer`, `console-ui`, `researcher` | Sonnet 5.5, medium | Opus 5.5, high |
 | `explorer` | Haiku 5.5, low | Sonnet 5.5, medium |
@@ -21,7 +21,8 @@ re-check before quoting. Usage figures come from this repository's own Claude Co
 | `reviewer`, `cloud-engineer`, `integrator` | Opus 5.5, high | unchanged |
 | `contract-engineer`, `contract-reviewer` | Opus 5.5, xhigh | unchanged for now |
 | `docs-keeper` | Sonnet 5.5, medium | unchanged |
-| an agent with no model of its own | the session's model | Opus 5.5 |
+| an agent with no model of its own | the session's model | Opus 5.5, xhigh |
+| any of the Fable roles once Fable's allowance is used up | | Opus 5.5, xhigh |
 
 ## What the transcripts showed
 
@@ -66,7 +67,8 @@ re-check before quoting. Usage figures come from this repository's own Claude Co
 Checked against the Claude Code documentation for v2.1.321 on 2026-11-09.
 
 - `.claude/settings.json`: `model: claude-fable-5-2`, `effortLevel: high`, `maxEffortLevel: xhigh`,
-  `switchModelsOnFlag: false`, and `CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5` in `env`.
+  `switchModelsOnFlag: false`, a `modelSettings` entry that runs Opus 5.5 at `xhigh`, and in `env`
+  `CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5` and `ANTHROPIC_DEFAULT_MODEL=claude-opus-5-5`.
 - A subagent's model resolves in this order: the Agent call's `model`, the agent file's `model:`, then
   `CLAUDE_CODE_SUBAGENT_MODEL`, then the session's model. The variable is a default since v2.1.251;
   before that it overrode every agent file. Never set `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which brings
@@ -74,7 +76,11 @@ Checked against the Claude Code documentation for v2.1.321 on 2026-11-09.
 - Effort resolves per model from the highest-precedence settings file that names one, and a project
   file outranks the user file. So this repository's `effortLevel` decides how a session starts, and a
   level saved with `/effort` does not carry into the next session here; `/effort` still works within
-  one. Each agent runs at its own `effort:` (measured in the transcripts).
+  one. Each agent runs at its own `effort:` (measured in the transcripts). Within one file a model's
+  `modelSettings` level outranks the top-level `effortLevel`, so here Opus 5.5 runs at `xhigh` and every
+  other model at `high` wherever no agent file names a level.
+- `planner` and `debugger` have `model: inherit` and no `effort:`, so they take the session's model and
+  its level. See "When Fable runs out".
 - `maxEffortLevel` is honored from project settings, and across files the lowest cap wins. This closes
   the first "to verify" item in the September note.
 - `switchModelsOnFlag: false`: when a safety classifier flags a request the session pauses and asks,
@@ -94,10 +100,47 @@ Checked against the Claude Code documentation for v2.1.321 on 2026-11-09.
 
 - The Max plans include Fable up to half the weekly limit. On this map the heaviest week in the record
   would have put between about two-fifths and two-thirds of its use on Fable, so a push week may run
-  out. The order then: `planner` and `debugger` go to Opus at `xhigh` first (`CLAUDE.md` says how), the
-  main session last.
-- Past the allowance, an interactive session asks before it bills usage credits. A non-interactive one
-  (`claude -p`, a background session) bills without asking when credits are enabled on the account.
+  out.
+- `claude -p` never asks before a Fable request bills usage credits. Nothing in this repository runs
+  Claude that way today.
+
+## When Fable runs out
+
+Quinn's rule, 2026-11-09: a role that runs on Fable goes to Opus 5.5 at `xhigh` when the allowance is
+used up. Claude Code has no setting that makes that switch by itself, so the rule rests on the one
+switch it does offer.
+
+- Past the allowance an interactive session asks once: keep Fable on usage credits, or switch to the
+  default model. Switching, or dismissing the question, continues the turn on the default model.
+  `ANTHROPIC_DEFAULT_MODEL` pins that default to Opus 5.5, and the `modelSettings` entry runs it at
+  `xhigh`.
+- `planner` and `debugger` follow the session, so they move with it and need no change at dispatch. To
+  give one of them Fable from a session kept on Opus on purpose, pass `model: 'fable'`.
+- A new session starts on Fable again and asks again until the allowance resets. Answering "keep Fable
+  on usage credits" stops the question from coming back, and the fallback with it.
+- Nobody at the keyboard: an ordinary session waits at the question. A background session, or one
+  with Remote Control connected, ends the turn after five minutes (`dialogExpiry`) without switching.
+- The fallback chain (`fallbackModel`) does not cover this: it never fires on a billing or rate-limit
+  error. What a Fable subagent does when its own request is the first to need credits is not
+  documented; `CLAUDE.md` says to start it again after the session has switched.
+
+Measured on 2026-11-09 with headless runs in a worktree carrying these files (v2.1.321). Each run
+started a `planner` and an agent with no type, and the transcripts give the model and level of every
+request:
+
+| Session started on | Session | `planner` | Agent with no type |
+|---|---|---|---|
+| the project default | Fable 5.2, high | Fable 5.2, high | Opus 5.5, xhigh |
+| Opus (`--model opus`) | Opus 5.5, xhigh | Opus 5.5, xhigh | Opus 5.5, xhigh |
+| Sonnet (`--model sonnet`) | Sonnet 5.5, high | Sonnet 5.5, high | Opus 5.5, xhigh |
+| Opus, without the `modelSettings` entry | Opus 5.5, high | not run | Opus 5.5, high |
+
+The question itself, and the switch it makes, could not be tested without running the allowance out.
+
+One side effect: an agent with no `effort:` of its own takes the level of the model it runs on, so
+agents with no type, workflow agents among them, now run Opus at `xhigh` where they ran at `high`.
+That spends the weekly limit faster in a large workflow. Give those agents an `effort` at dispatch to
+hold them at `high`.
 
 ## How to tell whether it worked
 

@@ -6,8 +6,7 @@ description: >-
   once, or when a symptom appears far from its source. Reproduces first, reports the cause before
   fixing. Do not use for known, specified changes (use mechanical or the main session) or for design
   work (use planner). If the fix lands on the contract list, hand it to contract-engineer.
-model: claude-fable-5-2
-effort: high
+model: inherit
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
