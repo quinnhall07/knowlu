@@ -1310,6 +1310,11 @@ Tests:
 
 ### C2c. Engine: a registrar read adopts a class-search note
 
+**Accepted limit (C2c review, 2026-11-08).** A note that is not adopted, either because its write failed or
+because the student set its `source_uid`, and whose times differ from the registrar's, leaves the registrar
+row as a live proposal. A later `rank` files a `commitment-check` card for it. If the student approves
+that card, the section has two notes. The student chose this, and the card names it.
+
 Tests, through `run_parsed` with invented rows:
 - A confirmed `classsearch:` note of the fetched term becomes `registrar:` with one journal record, actor
   `agent:knowlu.registrar`, written before the surgery, through `write::to_literal`.
