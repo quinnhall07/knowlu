@@ -22,7 +22,7 @@ command output or a URL, and you mark what you could not verify.
 - Never cargo, supabase, fetch, stash, checkout, add or commit. Never write a file.
 - Never read a student vault or quinn-ops's vault. Read files over 300 lines in ranges.
 
-Final message, 50 lines at most:
+Final message:
 1. the answer first;
 2. a table: item | exists / partial / missing | evidence | size (S/M/L, files touched,
    contract-list yes/no);

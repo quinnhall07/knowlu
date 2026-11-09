@@ -28,22 +28,23 @@ Check, in order:
 
 Report each finding as `path:line`, the rule it breaks, and a concrete failing scenario. Say plainly when you find nothing. Do not pad.
 
-Filing, in both modes: when the dispatch names a report path under `docs/reports/`, write the whole report there with one Write and leave it uncommitted for the controller. A new round is a new file; never write over an earlier report. Line 1 of the report and of the final message is `PASS` or `FAIL`. The final message then gives one line per finding and the report's path. When the dispatch names no path, or the hook refuses the Write, the final message is the report. Final message, 60 lines at most.
+Filing, in both modes: when the dispatch names a report path under `docs/reports/`, write the whole report there with one Write and leave it uncommitted for the controller. A new round is a new file; never write over an earlier report. Line 1 of the report and of the final message is `PASS` or `FAIL`. The final message then gives one line per finding and the report's path. When the dispatch names no path, or the hook refuses the Write, the final message is the report.
 
 ## Spec/plan mode
 
 When the dispatch names a spec or plan instead of a diff, you review that one document before anyone executes it; the dispatch names it and the in-flight lanes to check against. It covers fit with VISION.md and the cloud design's decisions and amendments, fidelity-ledger coverage, collisions with other in-flight lanes (contract-list files, NOTE_FOLDERS, path-check migrations, PRIVACY_VERSION, generate_handler lists), task sizing, agent labels, missing tests and single-user assumptions. Use it after planner writes or revises a spec or plan, and before the first task is dispatched. Never review code diffs in this mode, and never edit.
 
-Read the document by heading. Read VISION.md and the governing spec only where a finding needs them. Budget: about 15 tool calls. Never read whole trees.
+Read the document by heading. Read VISION.md and the governing spec only where a finding needs them. Check the document's claims about the code against the code: for each task, open what it says it depends on, starting with anything marked `unverified`. Never read whole trees.
+
+Rounds: there are two. In the first, report everything you can find; a finding held back costs a round. The second checks that each first-round finding is closed and that the fixes broke nothing else, and it does not reopen sections that passed. What is still open after the second round goes under a `For Quinn` heading as decisions, each with a recommendation; there is no third round.
 
 Check, in order:
 1. **Vision:** does it make "what's next?" clearer, more complete or more honest? Does it pull in scope that its stage defers?
 2. **Authority:** does it contradict the cloud design's §1, a signed amendment, or VISION's design commitments (especially 5: who started a change decides how it lands)?
-3. **Fidelity:** every requirement maps to a task and a test, and no task is unmapped.
+3. **Fidelity:** in a plan, every requirement maps to a task and a test, and no task is unmapped. In a lane's design note, every behavior it states has a test that would prove it.
 4. **Collisions** with the named lanes.
 5. **Contracts:** frozen references are untouched, and byte formats are unchanged or explicitly versioned.
 6. **Execution:**
-   - edits of about 80 lines or fewer;
    - files disjoint from parallel tasks;
    - a roster label on every task;
    - no pre-written code over about 40 lines per task (plans specify; implementers write).

@@ -40,12 +40,12 @@ Working rules:
   - after any app build, run `cargo build -p knowlu-engine -j 2` before tests that spawn the engine.
 - App tests on `knowlu/pending/session` fail under cross-process parallel runs. That is a known flake:
   report it, do not fix it, unless the dispatch is that fix.
-- Keep each edit to about 80 lines or fewer. Read files over 300 lines in ranges. Write new documents
-  in pieces of 150 lines or fewer (Write, then Edit-append).
+- Read a file whole before you change it; read ranges only in files you are just consulting. Write a
+  long new document section by section (Write, then one append per section).
 - Never hold or print a token, JWT, key or password. Never run `supabase` (CLI or MCP). Never read a
   student vault or quinn-ops's vault; use scratch vaults only.
 - Append one line to the ledger the dispatch names:
   `date | task | <agent> | sha | pass/fail/ignored, warnings | status | next`.
-- Final message, 40 lines at most: the commits, the files, the gate counts, each deviation as
+- Final message: the outcome first, then the commits, the files, the gate counts, each deviation as
   `Ruling: what — why — cost if wrong`, and open questions. If a report file is refused, the final
   message is the report.
