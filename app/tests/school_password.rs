@@ -701,18 +701,101 @@ fn a_mark_that_cannot_be_carried_still_deletes_the_old_password_and_is_reported(
     assert!(f.entries.borrow().is_empty(), "a rejected password is never left to move later");
 }
 
-/// The wiring: the move goes through `retarget_with`, and the marks it honours are the OLD id's, read
-/// from that id's profile folder; a carried mark goes to the NEW id's. Both folders sit under the root
-/// `main` launches under (contract review r1, Minor 4), so no unset `LOCALAPPDATA` refuses Finish.
+/// The coordinator's ruling on review r1, Minor 5: item 5's case IS the one with no password (the
+/// step-3 fill was rejected, so the mark is set and the password deleted, then the vault is renamed
+/// before Finish). The rejected mark is carried whenever it is set, password or not.
+#[test]
+fn a_rejected_mark_is_carried_even_with_no_password_saved() {
+    let _serial = serial();
+    let f = Fake::new(A);
+    f.rejected.set(true);
+    let to = Fake::new(B);
+    assert_eq!(retarget_with(&f, &f, &to, A, B).expect("not a failure"), 0);
+    assert!(to.rejected.get(), "the new id shows the form, not today's path");
+    assert_eq!(count(&f.log, "write:") + count(&f.log, "delete:"), 0, "{:?}", f.log.borrow());
+}
+
+#[test]
+fn with_no_password_and_no_rejected_mark_the_new_id_gets_nothing() {
+    let _serial = serial();
+    let f = Fake::new(A);
+    f.in_flight.set(true); // never carried
+    let to = Fake::new(B);
+    assert_eq!(retarget_with(&f, &f, &to, A, B).expect("ok"), 0);
+    assert!(to.log.borrow().is_empty(), "{:?}", to.log.borrow());
+}
+
+// ---- the move over a real root (scratch): what it makes on disk ----------------------------------------------
+
+fn root_with_old_mark(tag: &str) -> PathBuf {
+    let root = scratch(tag);
+    let old = knowlu::profiles::profile_dir(&root, A);
+    std::fs::create_dir_all(&old).unwrap();
+    FileMarks::new(&old).set_rejected().unwrap();
+    root
+}
+
+#[test]
+fn with_neither_a_password_nor_a_mark_the_move_makes_nothing_on_disk() {
+    let _serial = serial();
+    let root = scratch("root-neither");
+    let f = Fake::new(A);
+    assert_eq!(knowlu::school_password::retarget_with_root(&f, &root, A, B).expect("ok"), 0);
+    assert!(!root.join("profiles").exists(), "no folder made");
+    assert_eq!(count(&f.log, "write:") + count(&f.log, "delete:"), 0, "{:?}", f.log.borrow());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_rejected_mark_with_no_password_is_carried_into_a_new_folder() {
+    let _serial = serial();
+    let root = root_with_old_mark("root-mark");
+    let f = Fake::new(A);
+    assert_eq!(knowlu::school_password::retarget_with_root(&f, &root, A, B).expect("ok"), 0);
+    assert!(FileMarks::new(&knowlu::profiles::profile_dir(&root, B)).rejected(), "the new id carries it");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_unmarked_password_moves_and_makes_no_folder() {
+    let _serial = serial();
+    let root = scratch("root-password");
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    assert_eq!(knowlu::school_password::retarget_with_root(&f, &root, A, B).expect("moved"), 1);
+    assert!(f.entries.borrow().contains_key(&t(B)) && !root.join("profiles").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_rejected_password_over_a_root_is_deleted_and_its_mark_carried() {
+    let _serial = serial();
+    let root = root_with_old_mark("root-both");
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    assert_eq!(knowlu::school_password::retarget_with_root(&f, &root, A, B).expect("ok"), 0);
+    assert!(f.entries.borrow().is_empty() && FileMarks::new(&knowlu::profiles::profile_dir(&root, B)).rejected());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The wiring: the school step is `retarget_with_root` over the root `main` launches under (review r1,
+/// Minor 4), looked up without making or migrating anything, so Finish with no school password and no
+/// mark touches nothing on disk and never calls `app_data_root_or_temp()`.
 #[test]
 fn the_retarget_command_reads_the_old_ids_marks_from_its_profile_folder() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/onboarding.rs")).expect("source");
     let body = src.split("pub fn retarget_credentials").nth(1).and_then(|b| b.split("\n}\n").next()).expect("the command");
-    assert!(body.contains("school_password::retarget_with("), "{body}");
-    assert!(body.contains("crate::state::app_data_root_or_temp()"), "{body}");
+    assert!(body.contains("school_password::retarget_with_root("), "{body}");
+    assert!(body.contains("crate::state::app_data_root_or_temp_path()"), "{body}");
+    assert!(!body.contains("app_data_root_or_temp()") && !body.contains("create_dir_all"), "{body}");
     assert!(!body.contains("no app data folder"), "{body}");
-    assert!(body.contains("FileMarks::new(&profiles::profile_dir(&root, &from_id))"), "{body}");
-    assert!(body.contains("profiles::profile_dir(&root, &to_id)"), "{body}");
+}
+
+/// The lookup and the root `main` makes are one path: `<base>\knowlu`, and `%TEMP%\knowlu` without a base.
+#[test]
+fn the_root_lookup_is_the_root_main_makes() {
+    let base = scratch("root-under");
+    assert_eq!(knowlu::state::app_data_root_in(&base), knowlu::state::root_under(&base));
+    assert_eq!(knowlu::state::root_or_temp(None), knowlu::state::root_under(&std::env::temp_dir()));
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Contract review r1, Minor 4: one rule for the root, shared with `main`.
