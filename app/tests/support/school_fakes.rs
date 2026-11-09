@@ -33,7 +33,9 @@ pub struct Fake {
     pub rejected: Cell<bool>,
     pub in_flight: Cell<bool>,
     /// Call names that fail: `write`, `delete`, `set_rejected`, `clear_rejected`, `write_in_flight`,
-    /// `flush_in_flight`, `clear_in_flight`.
+    /// `flush_in_flight`, `clear_in_flight`. Two more fail as the real store can (re-review of
+    /// 807ed978..a74cbe7b, Minor 3): `exists` answers false whatever is saved, as `credentials::exists`
+    /// does on any read error; `delete_not_found` answers a spurious not-found and removes nothing.
     pub fail: RefCell<HashSet<&'static str>>,
     /// When set, a failing `write` carries the secret in its error text, as a careless store could.
     pub echo_secret: Cell<bool>,
@@ -98,12 +100,15 @@ impl SchoolStore for Fake {
     }
     fn exists(&self, target: &str) -> bool {
         self.note(format!("exists:{target}"));
-        self.entries.borrow().contains_key(target)
+        !self.fails("exists") && self.entries.borrow().contains_key(target)
     }
     fn delete(&self, target: &str) -> Result<(), DeleteError> {
         self.note(format!("delete:{target}"));
         if self.fails("delete") {
             return Err(DeleteError::Failed(format!("credential delete failed for {target}: 5")));
+        }
+        if self.fails("delete_not_found") {
+            return Err(DeleteError::NotFound);
         }
         // Like `credentials::delete`: a target that is not there is the store's own not-found, an
         // answer of its own and never inferred from `exists` (contract review r1, Minor 2).

@@ -502,6 +502,24 @@ fn a_failed_delete_is_never_read_as_already_gone() {
     assert!(r.rejected.get());
 }
 
+/// Re-review of 807ed978..a74cbe7b, Minor 3: only a false `exists` is unreliable; a true one is not. A
+/// not-found delete while the password is still there is therefore a failure: Forget is not ok and
+/// clears nothing, so a spurious not-found never leaves a "forgotten" password in use.
+#[test]
+fn a_spurious_not_found_while_the_password_is_still_there_fails_forget_and_clears_nothing() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["delete_not_found"]);
+    f.rejected.set(true);
+    f.in_flight.set(true);
+    assert!(forget_with(&f, &f, A).is_err());
+    assert!(f.rejected.get() && f.in_flight.get() && f.entries.borrow().contains_key(&t(A)));
+    assert_eq!(count(&f.log, "clear_"), 0, "{:?}", f.log.borrow());
+    let r = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["delete_not_found"]);
+    let guard = try_take(A).unwrap();
+    assert!(reject_with(&r, &r, A, &guard).is_err(), "a rejection reports it too");
+    assert!(r.rejected.get(), "and its mark still blocks the password");
+}
+
 /// The controller's ruling (P1a): Forget clears the marks, so it takes the lock a fill holds, and a
 /// Forget during a fill answers `Busy` and touches nothing (no mark cleared under a running fill).
 #[test]
@@ -712,7 +730,37 @@ fn a_rejected_mark_is_carried_even_with_no_password_saved() {
     let to = Fake::new(B);
     assert_eq!(retarget_with(&f, &f, &to, A, B).expect("not a failure"), 0);
     assert!(to.rejected.get(), "the new id shows the form, not today's path");
-    assert_eq!(count(&f.log, "write:") + count(&f.log, "delete:"), 0, "{:?}", f.log.borrow());
+    // Re-review Minor 3: a marked password's delete is always tried (a false `exists` is no proof),
+    // so a delete call may appear here; nothing is ever written.
+    assert_eq!(count(&f.log, "write:"), 0, "{:?}", f.log.borrow());
+}
+
+/// Re-review of 807ed978..a74cbe7b, Minor 3: a false `exists` is no proof the password is gone, so a
+/// marked password's delete is always tried, never skipped on `exists`.
+#[test]
+fn a_spurious_false_exists_never_skips_deleting_a_marked_password() {
+    let _serial = serial();
+    for (rejected, in_flight) in [(true, false), (false, true)] {
+        let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["exists"]);
+        f.rejected.set(rejected);
+        f.in_flight.set(in_flight);
+        let to = Fake::new(B);
+        assert_eq!(retarget_with(&f, &f, &to, A, B).expect("not a failure"), 0);
+        assert!(f.entries.borrow().is_empty(), "deleted whatever exists said: {:?}", f.log.borrow());
+        assert_eq!(to.rejected.get(), rejected, "only the rejected mark is carried");
+    }
+}
+
+/// The same review: a not-found delete of a marked password that `exists` still finds is reported.
+#[test]
+fn a_spurious_not_found_on_a_marked_password_is_reported() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["delete_not_found"]);
+    f.rejected.set(true);
+    let to = Fake::new(B);
+    assert!(retarget_with(&f, &f, &to, A, B).is_err());
+    assert!(to.rejected.get(), "the mark is carried all the same");
+    assert_eq!(count(&f.log, &format!("write:{}", t(B))), 0);
 }
 
 #[test]
@@ -776,6 +824,77 @@ fn a_rejected_password_over_a_root_is_deleted_and_its_mark_carried() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Re-review of 807ed978..a74cbe7b, Minor 1: the move's unlocked look reads `exists` before the mark. A
+/// rejection marks before it deletes, so once `exists` answers false any rejection's mark is visible.
+/// This store lands a rejection (mark, then delete) inside its first `exists` answer: the window a
+/// mark-first read would miss.
+struct RejectsDuringExists<'a> {
+    inner: &'a Fake,
+    old_dir: PathBuf,
+    landed: std::cell::Cell<bool>,
+}
+impl SchoolStore for RejectsDuringExists<'_> {
+    fn write(&self, target: &str, user: &str, secret: &str) -> Result<(), String> {
+        self.inner.write(target, user, secret)
+    }
+    fn read(&self, target: &str) -> Result<(String, String), String> {
+        self.inner.read(target)
+    }
+    fn exists(&self, target: &str) -> bool {
+        if !self.landed.replace(true) {
+            FileMarks::new(&self.old_dir).set_rejected().unwrap();
+            self.inner.entries.borrow_mut().remove(target);
+        }
+        self.inner.exists(target)
+    }
+    fn delete(&self, target: &str) -> Result<(), DeleteError> {
+        self.inner.delete(target)
+    }
+}
+
+#[test]
+fn a_rejection_that_lands_while_the_move_looks_is_still_carried() {
+    let _serial = serial();
+    let root = scratch("root-race");
+    let old = knowlu::profiles::profile_dir(&root, A);
+    std::fs::create_dir_all(&old).unwrap();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    let store = RejectsDuringExists { inner: &f, old_dir: old, landed: std::cell::Cell::new(false) };
+    assert_eq!(knowlu::school_password::retarget_with_root(&store, &root, A, B).expect("ok"), 0);
+    assert!(FileMarks::new(&knowlu::profiles::profile_dir(&root, B)).rejected(), "the rejection's mark is carried");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Re-review, Minor 2: the new id's folder is made only under the lock and only for the carry, so a
+/// move refused as `BUSY` leaves no empty folder behind.
+#[test]
+fn a_move_refused_as_busy_makes_no_folder() {
+    let _serial = serial();
+    let root = root_with_old_mark("root-busy");
+    let f = Fake::new(A);
+    let held = try_take(A).expect("lock free");
+    assert_eq!(knowlu::school_password::retarget_with_root(&f, &root, A, B), Err(BUSY.to_string()));
+    assert!(!knowlu::profiles::profile_dir(&root, B).exists(), "no empty folder on a refused Finish");
+    drop(held);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Re-review, Minor 3, over a root: a spurious false `exists` never skips an in-flight password, and
+/// an in-flight mark is never carried, so no folder is made for it.
+#[test]
+fn over_a_root_a_spurious_false_exists_never_skips_an_in_flight_password() {
+    let _serial = serial();
+    let root = scratch("root-in-flight");
+    let old = knowlu::profiles::profile_dir(&root, A);
+    std::fs::create_dir_all(&old).unwrap();
+    FileMarks::new(&old).write_in_flight().unwrap();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["exists"]);
+    assert_eq!(knowlu::school_password::retarget_with_root(&f, &root, A, B).expect("ok"), 0);
+    assert!(f.entries.borrow().is_empty(), "{:?}", f.log.borrow());
+    assert!(!knowlu::profiles::profile_dir(&root, B).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// The wiring: the school step is `retarget_with_root` over the root `main` launches under (review r1,
 /// Minor 4), looked up without making or migrating anything, so Finish with no school password and no
 /// mark touches nothing on disk and never calls `app_data_root_or_temp()`.
@@ -789,13 +908,23 @@ fn the_retarget_command_reads_the_old_ids_marks_from_its_profile_folder() {
     assert!(!body.contains("no app data folder"), "{body}");
 }
 
-/// The lookup and the root `main` makes are one path: `<base>\knowlu`, and `%TEMP%\knowlu` without a base.
+/// Re-review of 807ed978..a74cbe7b, Minor 4: `state::app_data_root()` stays the one place the app-data
+/// path is decided (CLAUDE.md, docs/reference/app.md, app/README.md). Its pure part,
+/// `app_data_root_path()`, is what it calls, and the read-only lookup is that same part; the helpers
+/// under it are private, and `%LOCALAPPDATA%` is read in one place.
 #[test]
-fn the_root_lookup_is_the_root_main_makes() {
+fn the_root_lookup_is_app_data_roots_own_pure_part() {
+    let expected = std::env::var("LOCALAPPDATA").ok().filter(|s| !s.is_empty()).map(|b| PathBuf::from(b).join("knowlu"));
+    assert_eq!(knowlu::state::app_data_root_path(), expected);
+    assert_eq!(knowlu::state::app_data_root_or_temp_path(), knowlu::state::root_or_temp(expected));
     let base = scratch("root-under");
-    assert_eq!(knowlu::state::app_data_root_in(&base), knowlu::state::root_under(&base));
-    assert_eq!(knowlu::state::root_or_temp(None), knowlu::state::root_under(&std::env::temp_dir()));
+    assert_eq!(knowlu::state::app_data_root_in(&base), base.join("knowlu"));
     let _ = std::fs::remove_dir_all(&base);
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/state.rs")).expect("state.rs");
+    let body = src.split("pub fn app_data_root() -> Option<PathBuf> {").nth(1).and_then(|b| b.split("\n}\n").next()).expect("app_data_root");
+    assert!(body.contains("app_data_root_path()"), "app_data_root decides through its pure part: {body}");
+    assert_eq!(src.matches("std::env::var(\"LOCALAPPDATA\")").count(), 1, "the base is read in one place");
+    assert!(!src.contains("pub fn root_under") && !src.contains("pub fn local_app_data"));
 }
 
 /// Contract review r1, Minor 4: one rule for the root, shared with `main`.
