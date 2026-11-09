@@ -331,11 +331,20 @@ pub fn signed_in_with(marks: &dyn SchoolMarks) -> Result<(), String> {
 }
 
 /// Moves `school` between profile ids: the new target is written before the old is deleted; a password
-/// whose rejected or in-flight mark is set (read from `from_marks`) is deleted and not moved. `Ok(1)`
-/// moved, `Ok(0)` nothing to move or one dropped. It reads the old id's marks and secret, so it takes
-/// that id's lock (`BUSY` when held, nothing touched). The same id twice moves nothing: a write then a
-/// delete of one target would delete the only copy.
-pub fn retarget_with(store: &dyn SchoolStore, from_marks: &dyn SchoolMarks, from_id: &str, to_id: &str) -> Result<usize, String> {
+/// whose rejected or in-flight mark is set (read from `from_marks`) is deleted and not moved. A rejected
+/// mark goes with it (review r1, Minor 5): set in `to_marks` first, so the new id shows the form, then
+/// the old password is deleted, which runs even if the carry fails. An in-flight mark alone is not
+/// carried: with no password at the new id nothing can be sent. `Ok(1)` moved, `Ok(0)` nothing to move
+/// or one dropped. It reads the old id's marks and secret, so it takes that id's lock (`BUSY` when held,
+/// nothing touched). The same id twice moves nothing: a write then a delete of one target would delete
+/// the only copy.
+pub fn retarget_with(
+    store: &dyn SchoolStore,
+    from_marks: &dyn SchoolMarks,
+    to_marks: &dyn SchoolMarks,
+    from_id: &str,
+    to_id: &str,
+) -> Result<usize, String> {
     if from_id == to_id {
         return Ok(0);
     }
@@ -344,8 +353,10 @@ pub fn retarget_with(store: &dyn SchoolStore, from_marks: &dyn SchoolMarks, from
     if !store.exists(&old) {
         return Ok(0);
     }
-    if from_marks.rejected() || from_marks.in_flight() {
-        return gone(store.delete(&old)).map(|()| 0);
+    let rejected = from_marks.rejected();
+    if rejected || from_marks.in_flight() {
+        let carried = if rejected { to_marks.set_rejected() } else { Ok(()) };
+        return both(carried, gone(store.delete(&old))).map(|()| 0);
     }
     let (username, password) = store.read(&old).map_err(|_| READ_FAILED.to_string())?;
     store.write(&target(to_id), &username, &password).map_err(|_| WRITE_FAILED.to_string())?;

@@ -1209,14 +1209,19 @@ pub fn retarget_credentials(from_vault: String, to_vault: String) -> Value {
         moved += 1;
     }
     // P1b: the saved school password moves too, through `retarget_with`, unless the old id's rejected
-    // or in-flight mark is set: then it is deleted and never moved (review r6, Minor 3). The marks are
-    // the old id's, in its profile folder; with no saved password there is nothing to read them for.
+    // or in-flight mark is set: then it is deleted and never moved (review r6, Minor 3), and a rejected
+    // mark is carried to the new id (contract review r1, Minor 5). The marks are the old id's, in its
+    // profile folder; with no saved password there is nothing to read them for. The new id's folder is
+    // made here, as `profiles::register` would, so a carried mark has somewhere to go.
     if crate::credentials::exists(&crate::school_password::target(&from_id)) {
         let Some(root) = crate::state::app_data_root() else {
             return json!({ "ok": false, "error": "school: no app data folder to read its marks from", "moved": moved });
         };
+        let to_dir = profiles::profile_dir(&root, &to_id);
+        let _ = std::fs::create_dir_all(&to_dir); // a folder that cannot be made fails the carry, by name
         let marks = crate::school_password::FileMarks::new(&profiles::profile_dir(&root, &from_id));
-        match crate::school_password::retarget_with(&crate::school_password::RealStore, &marks, &from_id, &to_id) {
+        let to_marks = crate::school_password::FileMarks::new(&to_dir);
+        match crate::school_password::retarget_with(&crate::school_password::RealStore, &marks, &to_marks, &from_id, &to_id) {
             Ok(n) => moved += n,
             Err(e) => return json!({ "ok": false, "error": format!("school: {e}"), "moved": moved }),
         }
