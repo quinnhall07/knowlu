@@ -5413,8 +5413,9 @@ fn proposal_signatures(p: &Proposal, codes: &Codes) -> Vec<Signature> {
 ///   by `source_uid` or by signature, is skipped silently: a second Finish is a no-op.
 /// - **`not_mine`** → [`create_marker_as`] for the key and every twin ([`twin_keys`]), as a card
 ///   rejection does. A key a confirmed note holds gets no marker. A key already declined is skipped
-///   silently. A `classsearch:` key among them gets no marker: its row is removed from the series
-///   file first ([`remove_class_search_rows`], replan §6.7 item 4), and it is not counted.
+///   silently. A `classsearch:` key among them gets no marker: once every other twin's marker is
+///   written, its row is removed from the series file ([`remove_class_search_rows`], replan §6.7
+///   item 4), and it is not counted. A failed marker keeps the row.
 /// - **the window** → the planning day, created when there is none ([`create_confirmed_as`]).
 ///   Otherwise its one `window:` line is written through `write_literals`, a human edit that
 ///   `journal.human_set` protects. An equal window writes nothing (`unchanged`).
@@ -5494,16 +5495,23 @@ pub fn confirm(
             .into_iter()
             .filter(|twin| !held.contains(twin))
             .partition(|twin| is_class_search(twin));
-        // Replan §6.7 item 4: a class-search twin gets no marker; its row leaves the series file
-        // now, before any marker is written, so a hidden same-signature twin is declined by its own.
-        if let Err(why) = remove_class_search_rows(vault, &rows) {
-            report.warnings.push(format!("a class-search row: not removed ({why})"));
-        }
+        let mut marked = true;
         for twin in twins {
             match create_marker_as(vault, &twin, ctx, journal) {
                 Ok(Some(_)) => report.declined += 1,
                 Ok(None) => {}
-                Err(e) => report.warnings.push(format!("{}: marker not written ({e})", shown(&twin))),
+                Err(e) => {
+                    marked = false;
+                    report.warnings.push(format!("{}: marker not written ({e})", shown(&twin)));
+                }
+            }
+        }
+        // Replan §6.7 item 4: a class-search twin gets no marker; its row leaves the series file
+        // once every other twin is marked (C2d review). A failed marker keeps the row, so the
+        // student sees it again; a hidden same-signature twin is declined by its own marker.
+        if marked {
+            if let Err(why) = remove_class_search_rows(vault, &rows) {
+                report.warnings.push(format!("a class-search row: not removed ({why})"));
             }
         }
     }
@@ -5545,6 +5553,12 @@ fn remove_class_search_rows(vault: &Path, keys: &BTreeSet<String>) -> Result<(),
     if keys.is_empty() {
         return Ok(());
     }
+    #[cfg(test)]
+    BEFORE_ROW_REMOVAL.with(|hook| {
+        if let Some(signal) = hook.borrow().as_ref() {
+            signal();
+        }
+    });
     let _lock = lock_series_file(vault).map_err(|err| format!("could not lock {SERIES_LOCK_FILE} ({})", err.kind()))?;
     let mut file = match load_series_file(vault) {
         Loaded::Read(file) => file,
