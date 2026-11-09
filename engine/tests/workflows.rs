@@ -1,4 +1,4 @@
-//! Static pins on the two GitHub workflows: an action referenced by a floating tag can change under
+//! Static pins on the GitHub workflows: an action referenced by a floating tag can change under
 //! us, `pull_request_target` hands secrets to fork code, and a secret renamed in the workflow but not
 //! in the repository settings fails only on release day.
 use std::path::Path;
@@ -6,6 +6,20 @@ use std::path::Path;
 fn workflow(name: &str) -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".github").join("workflows").join(name);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
+/// Every workflow file, so a workflow added later is pinned by the same tests without anyone
+/// remembering to list it here.
+fn all_workflows() -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".github").join("workflows");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
+        .collect();
+    names.sort();
+    assert!(names.len() >= 3, "expected ci.yml, release.yml and security.yml, found {names:?}");
+    names
 }
 
 fn uses_lines(text: &str) -> Vec<String> {
@@ -31,7 +45,8 @@ fn job_block<'a>(text: &'a str, name: &str) -> &'a str {
 
 #[test]
 fn every_action_is_pinned_to_a_full_commit_sha() {
-    for name in ["ci.yml", "release.yml"] {
+    for name in all_workflows() {
+        let name = name.as_str();
         for line in uses_lines(&workflow(name)) {
             let re = regex::Regex::new(r"uses:\s*\S+@[0-9a-f]{40}(\s+#.*)?$").unwrap();
             assert!(re.is_match(&line), "{name}: not SHA-pinned: {line}");
@@ -41,7 +56,8 @@ fn every_action_is_pinned_to_a_full_commit_sha() {
 
 #[test]
 fn no_workflow_uses_pull_request_target() {
-    for name in ["ci.yml", "release.yml"] {
+    for name in all_workflows() {
+        let name = name.as_str();
         assert!(!workflow(name).contains("pull_request_target"), "{name} uses pull_request_target");
     }
 }
@@ -146,7 +162,8 @@ fn release_builds_for_the_staged_sidecars_triple_and_reads_its_output_under_it()
 
 /// C0 (2026-09-17): build and publish are two jobs joined by an artifact, so a publish-only failure
 /// - the first release run's, a wrong Cloudflare token after a 40-minute build - reruns in minutes
-/// with `gh run rerun --failed`; the build's cache is saved even when the build fails; and each job
+/// with `gh run rerun --failed`; the build restores no cache (2026-11-09, Quinn: a cache written by
+/// a main CI run must never reach the signing job, zizmor `cache-poisoning`); and each job
 /// holds only the permission it uses (OIDC in build, the Release in publish). The publish job never
 /// compiles, signs or reads a signing secret.
 #[test]
@@ -157,7 +174,7 @@ fn release_builds_and_publishes_in_two_jobs_joined_by_an_artifact() {
     assert!(publish.contains("needs: build"), "publish must depend on build");
     assert!(build.contains("actions/upload-artifact@") && !publish.contains("actions/upload-artifact@"), "build uploads the artifact");
     assert!(publish.contains("actions/download-artifact@") && !build.contains("actions/download-artifact@"), "publish downloads the artifact");
-    assert!(build.contains("cache-on-failure: true"), "the release cache must be saved on failure, as ci.yml's is");
+    assert!(!build.contains("rust-cache") && !build.contains("actions/cache"), "the signing job must build from scratch, never from a cache CI wrote");
     assert!(build.contains("id-token: write") && !publish.contains("id-token: write"), "only build needs the OIDC token");
     assert!(publish.contains("contents: write") && !build.contains("contents: write"), "only publish needs to write the Release");
     let before_jobs = r.split("\njobs:").next().unwrap();

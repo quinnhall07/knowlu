@@ -37,7 +37,7 @@ jobs:
       code: ${{ steps.diff.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0 , persist-credentials: false }
       - name: did anything outside the documents change?
         id: diff
         shell: bash
@@ -56,6 +56,8 @@ jobs:
           else
             range=""
           fi
+          # $range is one or two revisions on purpose (`a...b`, or `a b`), so it is split, never quoted.
+          # shellcheck disable=SC2086
           if [ -n "$range" ] && files=$(git diff --no-renames --name-only $range); then
             code=false
             for f in $files; do
@@ -79,7 +81,8 @@ jobs:
         run: echo "only documents changed; skipping the heavy steps"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         if: needs.changes.outputs.code != 'false'
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master  # zizmor: ignore[ref-version-mismatch] -- the action publishes no version tags; this is a reviewed master commit
         if: needs.changes.outputs.code != 'false'
         with: { toolchain: "1.98.0-x86_64-pc-windows-gnu" }
       - run: .\scripts\ci\toolchain.ps1
@@ -140,6 +143,7 @@ jobs:
         run: echo "only documents changed; skipping the heavy steps"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         if: needs.changes.outputs.code != 'false'
+        with: { persist-credentials: false }
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
         if: needs.changes.outputs.code != 'false'
         with: { deno-version: "2.x" }
@@ -220,7 +224,7 @@ jobs:
       STAGING_HOST: brvhgbihxevrudqpulcm.supabase.co
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0 , persist-credentials: false }
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
         if: needs.changes.outputs.code != 'false'
         with: { deno-version: "2.x" }

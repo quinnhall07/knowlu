@@ -1,0 +1,90 @@
+name: security
+# Free supply-chain and workflow scanners (docs/notes/2026-11-09-security-tooling.md). Not a
+# required check: the three required checks stay ci.yml's. Every job is Linux and reads only.
+#
+# Pinning: every action to a full commit SHA (engine/tests/workflows.rs is the judge), and the two
+# binaries downloaded here to a SHA-256 checked before they run. Two exceptions: zizmor-action pulls
+# the zizmor image and cargo-deny-action runs its container by version tag, not by digest.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 9 * * 1'   # Mondays: a new RustSec advisory shows up without a code change
+permissions: { contents: read }
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.ref }}   # a push to main never cancels the Monday run
+  cancel-in-progress: true
+jobs:
+  # Workflow security: template injection, credential persistence, over-broad tokens, cache
+  # poisoning, impostor commits. Findings fail the job.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { persist-credentials: false }
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd  # v0.8.1
+        with:
+          version: 1.32.0
+          advanced-security: false   # print and fail; no SARIF upload, so no security-events: write
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: 1.7.12
+      SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { persist-credentials: false }
+      - name: actionlint
+        run: |
+          f="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/$f"
+          echo "$SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
+  # Secrets anywhere in history. Reviewed false positives (test keys, the public anon key) are
+  # listed by fingerprint in .gitleaksignore.
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: 8.30.1
+      SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: gitleaks
+        run: |
+          f="gitleaks_${VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/$f"
+          echo "$SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
+          # HEAD's history only: checkout's fetch-depth 0 brings every branch, and another lane's
+          # unmerged test key must not turn this one red.
+          "$RUNNER_TEMP/gitleaks" git . --log-opts="HEAD" --redact --no-banner --exit-code 1
+
+  # deny.toml: licenses a paid closed app may ship, crates only from crates.io, banned crates
+  # (OpenSSL), and RustSec advisories. Advisories can turn red overnight with no change here, so on
+  # a pull request they report without blocking; the Monday run and pushes to main fail on them.
+  cargo-deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, 'bans licenses sources']
+    continue-on-error: ${{ matrix.checks == 'advisories' && github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { persist-credentials: false }
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
