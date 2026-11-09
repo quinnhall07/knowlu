@@ -1377,6 +1377,11 @@ start of the next they differ, so a block written for the coming term would not 
 term begins. C3 writes the block under the term the reader will use, or picks the term on purpose and
 states it, with a test across the gap.
 
+**Merged 2026-11-08; open test follow-ups (C3 re-review, Minor, non-blocking).** (1) The stale-bundle
+test should seed a current-term block first and assert a stale read leaves it unchanged, parsing the file
+(`get("class_search")`) as the merge test does. (2) The bad-`--today` and unknown-suffix tests should
+assert their exact named lines ("bad --today", "could not be read"), not only a line holding "class".
+
 Tests: `--class-search` writes the series file only, with no note, card or journal record; `found` rows
 carry `classsearch:` keys; `no_time` courses land in the block; the report holds counts and fixed words
 only; a bad bundle exits 0 with a named line and nothing written; it conflicts with `--confirm` and
