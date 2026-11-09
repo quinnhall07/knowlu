@@ -101,6 +101,9 @@ enum Command {
         /// The registrar's raw answer (Banner JSON). Needs `--school`.
         #[arg(long)]
         registrar: Option<PathBuf>,
+        /// Replan C3 (STUB): the class-search bundle; ignored until C3 is implemented.
+        #[arg(long = "class-search")]
+        class_search: Option<PathBuf>,
         /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
         #[arg(long)]
         school: Option<String>,
@@ -132,6 +135,10 @@ enum Command {
         /// the series and the matched rows' notes; exit 2 on an unknown school or no usable row.
         #[arg(long, conflicts_with = "confirm", requires = "school")]
         registrar: Option<PathBuf>,
+        /// Replan C3 (STUB): the app's class-search bundle. Fetches nothing; will write only the
+        /// series file. Conflicts with `--confirm` and `--registrar`.
+        #[arg(long = "class-search", conflicts_with_all = ["confirm", "registrar"], requires = "school")]
+        class_search: Option<PathBuf>,
         /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
         #[arg(long)]
         school: Option<String>,
@@ -537,7 +544,8 @@ fn main() -> ExitCode {
             println!("{}", knowlu_engine::surface::state_json(&state));
             ExitCode::SUCCESS
         }
-        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, school, tz } => {
+        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, class_search, school, tz } => {
+            let _ = class_search; // C3 stub: parsed, not read.
             // Read-only and always exit 0: a usage problem is a named line, never a failure.
             let tz = match tz.as_deref() {
                 None => cli::vault_zone(&vault),
@@ -564,7 +572,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         // commitments command: begin
-        Command::Commitments { vault, today, json, confirm, registrar, school, actor, via } => {
+        Command::Commitments { vault, today, json, confirm, registrar, class_search, school, actor, via } => {
+            if class_search.is_some() {
+                // C3 stub: parsed, and nothing more.
+                println!("commitments: stub, not implemented yet");
+                return ExitCode::SUCCESS;
+            }
             if let Some(path) = registrar {
                 let text = match std::fs::read_to_string(&path) {
                     Ok(text) => text,
