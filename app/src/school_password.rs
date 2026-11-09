@@ -17,8 +17,9 @@
 //! by `users/me` 200 in that attempt or by a new save. Each step keeps P1t's order: a rejection marks,
 //! then deletes; a save writes, then clears; a Forget deletes, then clears both marks only after a
 //! delete that succeeded (the store's own not-found clears the in-flight mark only, contract review r1,
-//! Minor 2). "Already gone" is the store's answer, never `credentials::exists`, which reads false on
-//! any error. A step that fails leaves a mark set rather than cleared, which blocks a fill (fails safe).
+//! Minor 2, and only when `credentials::exists` agrees; a not-found that `exists` contradicts clears
+//! nothing and is an error, review r3). "Already gone" starts from the store's answer; a false
+//! `credentials::exists` alone never decides it, because it reads false on any error. A step that fails leaves a mark set rather than cleared, which blocks a fill (fails safe).
 #![cfg(windows)]
 use crate::school_session::{try_take, SessionGuard};
 use serde_json::{json, Value};
@@ -169,8 +170,9 @@ const IN_FLIGHT_MARK: &str = "school-password-in-flight";
 /// The two marks (P1b): empty files in the profile's own app-data folder (`profiles\<id>\`), beside
 /// `school.json` and never inside `school-session`, which a Forget deletes whole. A file there is a set
 /// mark. They hold nothing, so no secret, and they never enter the vault. A mark whose state cannot be
-/// read reads as set, which blocks the fill (fails safe). Nothing here makes the folder: a mark written
-/// into one that is gone fails, and the fill then sends nothing.
+/// read reads as set, which blocks the fill (fails safe). Only [`FileMarks::carry_rejected`] makes the
+/// folder (the move, under the old id's lock); any other mark written into a folder that is gone fails,
+/// and the fill then sends nothing.
 pub struct FileMarks {
     dir: PathBuf,
 }
