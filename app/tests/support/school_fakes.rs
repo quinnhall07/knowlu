@@ -2,7 +2,7 @@
 //! every call in order into one log. Included by `#[path]` from `school_password.rs` and
 //! `school_fill.rs`. Invented values only; nothing here touches Credential Manager or the disk.
 #![allow(dead_code)]
-use knowlu::school_password::{SchoolMarks, SchoolStore};
+use knowlu::school_password::{DeleteError, SchoolMarks, SchoolStore};
 use knowlu::school_session::try_take;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -100,13 +100,14 @@ impl SchoolStore for Fake {
         self.note(format!("exists:{target}"));
         self.entries.borrow().contains_key(target)
     }
-    fn delete(&self, target: &str) -> Result<(), String> {
+    fn delete(&self, target: &str) -> Result<(), DeleteError> {
         self.note(format!("delete:{target}"));
         if self.fails("delete") {
-            return Err(format!("credential delete failed for {target}: 5"));
+            return Err(DeleteError::Failed(format!("credential delete failed for {target}: 5")));
         }
-        // Like `credentials::delete`: a target that is not there is an error.
-        self.entries.borrow_mut().remove(target).map(|_| ()).ok_or_else(|| format!("credential delete failed for {target}: 1168"))
+        // Like `credentials::delete`: a target that is not there is the store's own not-found, an
+        // answer of its own and never inferred from `exists` (contract review r1, Minor 2).
+        self.entries.borrow_mut().remove(target).map(|_| ()).ok_or(DeleteError::NotFound)
     }
 }
 

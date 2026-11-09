@@ -5,8 +5,10 @@
 //! secret, and cleans up with a `Drop` guard. Invented usernames, passwords and ids only.
 #![cfg(windows)]
 use knowlu::school_password::{
-    forget_with, gate_with, read_with, reject_with, retarget_with, save_with, signed_in_with, target, FileMarks, Gate,
-    RealStore, SchoolMarks, SchoolSecret, BUSY,
+    forget_with, gate_with, read_with, reject_with, retarget_with, save_with, signed_in_with, target, DeleteError,
+    FileMarks, Gate, RealStore, SchoolMarks, SchoolSecret, SchoolStore, BAD_CHARACTER, BUSY, CLEAR_BOTH_FAILED,
+    CLEAR_IN_FLIGHT_FAILED, CLEAR_REJECTED_FAILED, EMPTY_PASSWORD, EMPTY_USERNAME, PASSWORD_TOO_LONG,
+    USERNAME_TOO_LONG,
 };
 use knowlu::school_session::try_take;
 use std::path::{Path, PathBuf};
@@ -97,6 +99,98 @@ fn a_failed_mark_clear_keeps_the_old_mark_and_the_save_is_reported_not_ok() {
     assert_eq!(reply["ok"], false, "the student must hear it did not take: {reply}");
 }
 
+/// Contract review r1 (bf8ab212..807ed978), Minor 7: each mark that could not be cleared names itself.
+#[test]
+fn each_mark_that_cannot_be_cleared_has_its_own_words() {
+    let _serial = serial();
+    let cases: [(&[&'static str], &str); 3] = [
+        (&["clear_rejected"], CLEAR_REJECTED_FAILED),
+        (&["clear_in_flight"], CLEAR_IN_FLIGHT_FAILED),
+        (&["clear_rejected", "clear_in_flight"], CLEAR_BOTH_FAILED),
+    ];
+    for (failing, words) in cases {
+        let f = Fake::new(A).failing(failing);
+        f.rejected.set(true);
+        f.in_flight.set(true);
+        let reply = save_with(&f, &f, A, USER, PW);
+        assert_eq!((&reply["ok"], &reply["error"]), (&serde_json::json!(false), &serde_json::json!(words)), "{failing:?}");
+    }
+    assert_ne!(CLEAR_REJECTED_FAILED, CLEAR_IN_FLIGHT_FAILED);
+}
+
+// ---- contract review r1, Important 1: a save refuses what the store cannot hold, before the lock -----
+
+/// Refused by name, before the lock: no store call, no mark touched, so no rejection pause ends.
+fn refused(reply: &serde_json::Value, reason: &str, f: &Fake) {
+    assert_eq!((&reply["ok"], &reply["busy"]), (&serde_json::json!(false), &serde_json::json!(false)), "{reply}");
+    assert_eq!(reply["error"], reason, "{reply}");
+    assert!(f.log.borrow().is_empty(), "no store call and no mark touched: {:?}", f.log.borrow());
+    assert!(f.rejected.get(), "an empty or bad save never ends a rejection pause");
+}
+
+fn marked() -> Fake {
+    let f = Fake::new(A);
+    f.rejected.set(true);
+    f
+}
+
+#[test]
+fn an_empty_or_blank_username_or_password_is_refused_and_ends_no_pause() {
+    let _serial = serial();
+    for (user, pw, reason) in [("", PW, EMPTY_USERNAME), (" \t", PW, EMPTY_USERNAME), (USER, "", EMPTY_PASSWORD), (USER, "  \r\n", EMPTY_PASSWORD)] {
+        let f = marked();
+        refused(&save_with(&f, &f, A, user, pw), reason, &f);
+    }
+}
+
+#[test]
+fn a_nul_in_either_field_is_refused() {
+    let _serial = serial();
+    for (user, pw) in [("student\0one", PW), (USER, "hunter\02"), (USER, "\0")] {
+        let f = marked();
+        refused(&save_with(&f, &f, A, user, pw), BAD_CHARACTER, &f);
+    }
+}
+
+#[test]
+fn values_over_the_stores_limits_are_too_long_never_a_failed_write() {
+    let _serial = serial();
+    // CRED_MAX_CREDENTIAL_BLOB_SIZE is 2560 bytes, 1280 UTF-16 units; CRED_MAX_USERNAME_LENGTH is 513.
+    // Both are counted in UTF-16 units, as the store counts: one non-BMP character is two.
+    let ok = |user: &str, pw: &str| {
+        let f = Fake::new(A);
+        save_with(&f, &f, A, user, pw)["ok"] == true
+    };
+    assert!(ok(USER, &"p".repeat(1280)) && ok(USER, &"\u{1F600}".repeat(640)) && ok(&"u".repeat(513), PW));
+    let over: [(String, String, &str); 4] = [
+        (USER.to_string(), "p".repeat(1281), PASSWORD_TOO_LONG),
+        (USER.to_string(), "\u{1F600}".repeat(641), PASSWORD_TOO_LONG),
+        ("u".repeat(514), PW.to_string(), USERNAME_TOO_LONG),
+        ("\u{1F600}".repeat(257), PW.to_string(), USERNAME_TOO_LONG),
+    ];
+    for (user, pw, reason) in over {
+        let f = marked();
+        refused(&save_with(&f, &f, A, &user, &pw), reason, &f);
+    }
+}
+
+#[test]
+fn a_password_is_stored_exactly_as_typed_never_trimmed() {
+    let _serial = serial();
+    let f = Fake::new(A);
+    assert_eq!(save_with(&f, &f, A, USER, "  spaced pw\t")["ok"], true);
+    assert_eq!(f.entries.borrow().get(&t(A)).map(|e| e.1.as_str()), Some("  spaced pw\t"));
+}
+
+#[test]
+fn a_refusal_comes_before_the_lock() {
+    let _serial = serial();
+    let f = marked();
+    let held = try_take(A).expect("lock free");
+    refused(&save_with(&f, &f, A, USER, ""), EMPTY_PASSWORD, &f);
+    drop(held);
+}
+
 #[test]
 fn a_save_reply_holds_no_secret_even_when_the_stores_own_error_does() {
     let _serial = serial();
@@ -166,6 +260,25 @@ fn a_guard_for_another_profile_reads_no_secret() {
     assert!(read_with(&f, A, &other).is_err(), "A's secret is read only while A's lock is held");
     assert!(gate_with(&f, &f, A, &other).is_err(), "and so are A's marks");
     assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
+}
+
+/// Contract review r1, Minor 3: the read checks the guard it is handed, never a probe of the lock.
+/// With A's lock held by someone else, B's guard still reads nothing of A's.
+#[test]
+fn a_guard_for_another_profile_reads_nothing_even_while_that_profile_is_held_elsewhere() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    let _a_elsewhere = try_take(A).expect("lock free");
+    let b = try_take(B).expect("lock free");
+    assert!(read_with(&f, A, &b).is_err());
+    assert!(gate_with(&f, &f, A, &b).is_err());
+    assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
+}
+
+#[test]
+fn a_session_guard_names_the_profile_it_holds() {
+    let _serial = serial();
+    assert_eq!(try_take(A).expect("lock free").profile_id(), A);
 }
 
 #[test]
@@ -356,13 +469,37 @@ fn forget_deletes_the_credential_first_then_clears_both_marks() {
     assert!(!f.rejected.get() && !f.in_flight.get() && f.entries.borrow().is_empty());
 }
 
+/// Contract review r1 (bf8ab212..807ed978), Minor 2, as the coordinator revised it: "already gone" is
+/// the store's own not-found, never `credentials::exists`, which reads false on any read error (and a
+/// spurious not-found happens under load). So a not-found delete clears the in-flight mark only and
+/// keeps the rejected one, and the gate then shows the form. Both marks clear only after a delete that
+/// itself succeeded (the test above).
 #[test]
-fn forget_of_a_credential_already_gone_is_ok_and_still_clears_the_marks() {
+fn forget_of_a_credential_already_gone_is_ok_clears_the_in_flight_mark_and_keeps_the_rejected_one() {
     let _serial = serial();
     let f = Fake::new(A);
     f.rejected.set(true);
+    f.in_flight.set(true);
     forget_with(&f, &f, A).expect("already gone is success");
-    assert!(!f.rejected.get());
+    assert!(f.rejected.get(), "a not-found delete keeps the rejected mark");
+    assert!(!f.in_flight.get());
+    assert_eq!(count(&f.log, "exists:"), 0, "never decided from exists: {:?}", f.log.borrow());
+}
+
+/// The same review: a delete that failed is never "already gone", whatever `exists` would say.
+#[test]
+fn a_failed_delete_is_never_read_as_already_gone() {
+    let _serial = serial();
+    let f = Fake::new(A).failing(&["delete"]); // nothing saved, so `exists` would answer gone
+    f.rejected.set(true);
+    f.in_flight.set(true);
+    assert!(forget_with(&f, &f, A).is_err(), "a failed delete is not ok");
+    assert!(f.rejected.get() && f.in_flight.get());
+    assert_eq!(count(&f.log, "clear_"), 0, "{:?}", f.log.borrow());
+    let r = Fake::new(A).failing(&["delete"]);
+    let guard = try_take(A).unwrap();
+    assert!(reject_with(&r, &r, A, &guard).is_err(), "a rejection reports it too");
+    assert!(r.rejected.get());
 }
 
 /// The controller's ruling (P1a): Forget clears the marks, so it takes the lock a fill holds, and a
@@ -465,7 +602,7 @@ fn a_mark_into_a_missing_folder_fails_and_makes_no_folder() {
 fn retarget_writes_the_new_school_target_before_it_deletes_the_old() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
-    assert_eq!(retarget_with(&f, &f, A, B).expect("moved"), 1);
+    assert_eq!(retarget_with(&f, &f, &Fake::new(B), A, B).expect("moved"), 1);
     assert!(at(&f.log, &format!("write:{}", t(B))).unwrap() < at(&f.log, &format!("delete:{}", t(A))).unwrap());
     assert_eq!(f.entries.borrow().get(&t(B)), Some(&(USER.to_string(), PW.to_string())));
     assert!(!f.entries.borrow().contains_key(&t(A)));
@@ -475,7 +612,7 @@ fn retarget_writes_the_new_school_target_before_it_deletes_the_old() {
 fn a_failed_new_write_leaves_the_old_credential_in_place() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["write"]);
-    assert!(retarget_with(&f, &f, A, B).is_err());
+    assert!(retarget_with(&f, &f, &Fake::new(B), A, B).is_err());
     assert!(f.entries.borrow().contains_key(&t(A)), "never delete before the new one is safe");
 }
 
@@ -483,7 +620,7 @@ fn a_failed_new_write_leaves_the_old_credential_in_place() {
 fn retarget_with_nothing_saved_moves_nothing_and_is_not_a_failure() {
     let _serial = serial();
     let f = Fake::new(A);
-    assert_eq!(retarget_with(&f, &f, A, B).expect("ok"), 0);
+    assert_eq!(retarget_with(&f, &f, &Fake::new(B), A, B).expect("ok"), 0);
     assert_eq!(count(&f.log, "write:"), 0);
 }
 
@@ -492,7 +629,7 @@ fn a_rejected_password_is_never_moved_and_that_is_not_a_failure() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.rejected.set(true);
-    assert_eq!(retarget_with(&f, &f, A, B).expect("not a failure"), 0);
+    assert_eq!(retarget_with(&f, &f, &Fake::new(B), A, B).expect("not a failure"), 0);
     assert!(f.entries.borrow().is_empty(), "the old credential is deleted and the new target gets nothing");
     assert_eq!(count(&f.log, &format!("write:{}", t(B))), 0);
 }
@@ -502,7 +639,7 @@ fn an_in_flight_password_is_never_moved_either() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.in_flight.set(true);
-    assert_eq!(retarget_with(&f, &f, A, B).expect("not a failure"), 0);
+    assert_eq!(retarget_with(&f, &f, &Fake::new(B), A, B).expect("not a failure"), 0);
     assert!(f.entries.borrow().is_empty());
 }
 
@@ -513,7 +650,7 @@ fn a_retarget_while_the_old_ids_lock_is_held_is_busy_and_touches_nothing() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     let held = try_take(A).expect("lock free");
-    assert_eq!(retarget_with(&f, &f, A, B), Err(BUSY.to_string()));
+    assert_eq!(retarget_with(&f, &f, &Fake::new(B), A, B), Err(BUSY.to_string()));
     assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
     drop(held);
     assert!(try_take(A).is_some());
@@ -523,20 +660,70 @@ fn a_retarget_while_the_old_ids_lock_is_held_is_busy_and_touches_nothing() {
 fn a_retarget_onto_the_same_id_never_deletes_the_only_copy() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
-    assert_eq!(retarget_with(&f, &f, A, A).expect("nothing to move"), 0);
+    assert_eq!(retarget_with(&f, &f, &f, A, A).expect("nothing to move"), 0);
     assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
     assert!(f.entries.borrow().contains_key(&t(A)));
 }
 
+/// Contract review r1, Minor 5: the rejected mark goes with the move, set at the new id before the old
+/// password is deleted, so the new id shows the form; the password itself is never moved.
+#[test]
+fn a_rejected_passwords_mark_is_carried_to_the_new_id_and_the_password_is_not() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    f.rejected.set(true);
+    let mut to = Fake::new(B);
+    to.log = f.log.clone(); // one log, so the order across both is visible
+    assert_eq!(retarget_with(&f, &f, &to, A, B).expect("not a failure"), 0);
+    assert!(to.rejected.get(), "the new id carries the rejected mark");
+    assert!(f.entries.borrow().is_empty() && count(&f.log, &format!("write:{}", t(B))) == 0);
+    assert!(at(&f.log, "set_rejected").unwrap() < at(&f.log, &format!("delete:{}", t(A))).unwrap(), "{:?}", f.log.borrow());
+}
+
+#[test]
+fn an_in_flight_mark_alone_is_not_carried() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    f.in_flight.set(true);
+    let to = Fake::new(B);
+    assert_eq!(retarget_with(&f, &f, &to, A, B).expect("not a failure"), 0);
+    assert!(!to.rejected.get() && !to.in_flight.get() && to.log.borrow().is_empty());
+    assert!(f.entries.borrow().is_empty());
+}
+
+#[test]
+fn a_mark_that_cannot_be_carried_still_deletes_the_old_password_and_is_reported() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    f.rejected.set(true);
+    let to = Fake::new(B).failing(&["set_rejected"]);
+    assert!(retarget_with(&f, &f, &to, A, B).is_err());
+    assert!(f.entries.borrow().is_empty(), "a rejected password is never left to move later");
+}
+
 /// The wiring: the move goes through `retarget_with`, and the marks it honours are the OLD id's, read
-/// from that id's profile folder under the app-data root (where the save and the fill keep them).
+/// from that id's profile folder; a carried mark goes to the NEW id's. Both folders sit under the root
+/// `main` launches under (contract review r1, Minor 4), so no unset `LOCALAPPDATA` refuses Finish.
 #[test]
 fn the_retarget_command_reads_the_old_ids_marks_from_its_profile_folder() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/onboarding.rs")).expect("source");
     let body = src.split("pub fn retarget_credentials").nth(1).and_then(|b| b.split("\n}\n").next()).expect("the command");
     assert!(body.contains("school_password::retarget_with("), "{body}");
-    assert!(body.contains("crate::state::app_data_root()"), "{body}");
+    assert!(body.contains("crate::state::app_data_root_or_temp()"), "{body}");
+    assert!(!body.contains("no app data folder"), "{body}");
     assert!(body.contains("FileMarks::new(&profiles::profile_dir(&root, &from_id))"), "{body}");
+    assert!(body.contains("profiles::profile_dir(&root, &to_id)"), "{body}");
+}
+
+/// Contract review r1, Minor 4: one rule for the root, shared with `main`.
+#[test]
+fn with_no_localappdata_the_root_is_mains_temp_fallback() {
+    assert_eq!(knowlu::state::root_or_temp(None), std::env::temp_dir().join("knowlu"));
+    let found = PathBuf::from(r"C:\example\knowlu");
+    assert_eq!(knowlu::state::root_or_temp(Some(found.clone())), found);
+    let main = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).expect("main.rs");
+    assert!(main.contains("app_data_root_or_temp()"), "main launches under the shared rule");
+    assert!(!main.contains("temp_dir().join(\"knowlu\")"), "and keeps no copy of it");
 }
 
 #[test]
@@ -586,5 +773,8 @@ fn save_read_and_forget_through_the_real_credential_manager() {
     assert!(!knowlu::credentials::exists(&target), "gone after forget");
     let guard = try_take(&id).expect("lock free");
     assert!(read_with(&RealStore, &id, &guard).expect("read").is_none());
+    // Contract review r1, Minor 2: the store's own not-found, mapped from `credentials::delete`'s
+    // answer for a target that is not there, never from `exists`.
+    assert_eq!(RealStore.delete(&target), Err(DeleteError::NotFound));
     let _ = std::fs::remove_dir_all(&marks_dir);
 }
