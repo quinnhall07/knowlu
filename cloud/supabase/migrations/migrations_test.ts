@@ -508,9 +508,10 @@ Deno.test("the three cap-store functions are revoked, not marked — R-C2-E48 fi
 });
 
 Deno.test("a trigger function is exempt from the execute-revoke guard by kind, not by name — and the scan proves it by finding one", async () => {
-  // R-C2-E36: C1's `handle_new_user` (`returns trigger`) is SECURITY DEFINER with no execute
-  // revoke of its own, and rightly so — a trigger function cannot be called through PostgREST at
-  // all, so revoking EXECUTE from it protects nothing. The risk in exempting by kind is exempting
+  // R-C2-E36: C1's `handle_new_user` (`returns trigger`) is SECURITY DEFINER, and a trigger
+  // function cannot be called through PostgREST at all, so this guard exempts it by kind. (Its
+  // execute is revoked anyway, for the advisor: see the definer guard below and
+  // <stamp>_definer_trigger_execute.sql.) The risk in exempting by kind is exempting
   // silently: this asserts the scan actually reached and recognised `handle_new_user`, rather than
   // the exemption papering over a scan that never got that far (a schema-qualified name, for one,
   // used to be exactly that gap — see the RED evidence in the task report).
@@ -518,6 +519,83 @@ Deno.test("a trigger function is exempt from the execute-revoke guard by kind, n
   assert(
     exemptedTriggers.includes("handle_new_user"),
     `expected handle_new_user among the trigger-exempted functions, got: ${exemptedTriggers}`,
+  );
+});
+
+/**
+ * `files`, sorted: every SECURITY DEFINER function, a `returns trigger` one included, needs a
+ * `revoke execute … from …` naming both `anon` and `authenticated` in its file or a later one. The
+ * guard above exempts trigger functions by kind, and Postgres refuses a direct call to one, but the
+ * Security Advisor (lints 0028/0029) still reads a definer function that client roles may EXECUTE as
+ * exposed, so EXECUTE is not left granted to them either way. A trigger fires whatever EXECUTE says:
+ * the trigger manager does not check it. Returns every definer name it checked.
+ */
+export function assertDefinerRevoked(files: Array<[string, string]>): string[] {
+  const stripped = files.map(([name, sql]) => [name, stripLineComments(sql)] as [string, string]);
+  const checked: string[] = [];
+  for (let i = 0; i < stripped.length; i++) {
+    const [name, sql] = stripped[i];
+    for (const d of sql.matchAll(FUNCTION_DEFINITION)) {
+      if (!/security\s+definer/i.test(d[0])) continue;
+      const fn = d[2];
+      const rest = stripped.slice(i).map(([, s]) => s).join("\n");
+      const revokeRe = new RegExp(
+        `revoke\\s+execute\\s+on\\s+function\\s+${identPattern(fn)}\\s*\\([^)]*\\)\\s+from\\s+([^;]+);`,
+        "gi",
+      );
+      const ok = [...rest.matchAll(revokeRe)].some((m) => {
+        const from = m[1].toLowerCase();
+        return from.includes("anon") && from.includes("authenticated");
+      });
+      assert(ok, `${name}: SECURITY DEFINER ${fn} has no revoke of execute naming both anon and authenticated`);
+      checked.push(fn);
+    }
+  }
+  return checked;
+}
+
+Deno.test("every SECURITY DEFINER function, a trigger's included, has execute revoked from anon and authenticated", async () => {
+  const checked = assertDefinerRevoked(await everyMigrationFile());
+  // By name, so the scan is seen to reach both definer triggers rather than pass on an empty list.
+  for (const fn of ["handle_new_user", "trim_user_metadata", "delete_mail_address", "store_google_grant"]) {
+    assert(checked.includes(fn), `expected ${fn} among the definer functions checked, got: ${checked}`);
+  }
+});
+
+Deno.test("an unrevoked SECURITY DEFINER trigger function is caught by the definer guard", () => {
+  const sql = `
+create function public.leaky_trigger() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  return new;
+end;
+$$;
+revoke execute on function public.leaky_trigger() from public;
+`;
+  assertThrows(() => assertDefinerRevoked([["synthetic-definer-trigger.sql", sql]]), Error, "leaky_trigger");
+});
+
+Deno.test("the definer revoke migration revokes handle_new_user from client roles and changes nothing else", async () => {
+  // Found by suffix, never its stamp (M4), and stamped after every other file (forward-only).
+  const files = await everyMigrationFile();
+  const mine = files.filter(([n]) => /^\d{14}_definer_trigger_execute\.sql$/.test(n));
+  assertEquals(mine.length, 1, "exactly one <stamp>_definer_trigger_execute.sql");
+  const [name, sql] = mine[0];
+  assertEquals(files.at(-1)?.[0], name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+  const code = stripLineComments(sql);
+  assert(
+    /revoke\s+execute\s+on\s+function\s+public\.handle_new_user\(\)\s+from\s+public,\s*anon,\s*authenticated;/i.test(code),
+    "handle_new_user's execute is revoked from public, anon and authenticated",
+  );
+  // The trigger and its function stay exactly as they are: no redefinition, no trigger change.
+  assertEquals((code.match(RAW_FUNCTION_KEYWORD) ?? []).length, 0, "no function is created or replaced");
+  assert(!/\btrigger\b/i.test(code), "no trigger is created, dropped or altered");
+  assert(!/\bgrant\b[^;]*\bto\b[^;]*\b(anon|authenticated|public)\b/i.test(code), "nothing is granted to a client role");
+  // The belt 20260922000200 gave trim_user_metadata: GoTrue's own role holds EXECUTE explicitly,
+  // though the trigger manager never checks it.
+  assert(
+    /grant\s+execute\s+on\s+function\s+public\.handle_new_user\(\)\s+to\s+supabase_auth_admin;/i.test(code),
+    "supabase_auth_admin keeps execute explicitly",
   );
 });
 
@@ -1905,8 +1983,9 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   // Stamped after every file before it; a later migration is named here when it lands.
   // A later lane's file is named by its suffix, never its stamp (stamp rule M4); L8's testers file
   // is left out by its suffix (friends-testers §8.4, M4), so its restamp moves no line here; so is
-  // its S6 follow-up, <stamp>_comp_guards.sql, and the task-3 re-pin, <stamp>_task_effort_anchors.sql.
-  const LATER_LANES = /^\d{14}_(?:testers|comp_guards|task_effort_anchors)\.sql$/;
+  // its S6 follow-up, <stamp>_comp_guards.sql, the task-3 re-pin, <stamp>_task_effort_anchors.sql,
+  // and the definer revoke, <stamp>_definer_trigger_execute.sql.
+  const LATER_LANES = /^\d{14}_(?:testers|comp_guards|task_effort_anchors|definer_trigger_execute)\.sql$/;
   assertEquals(
     files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n))
       .map((n) => EVENT_ALLOWANCE.test(n) ? "<stamp>_event_allowance.sql" : n),
@@ -3256,12 +3335,13 @@ Deno.test("the_follow_ups_migration_is_found_by_suffix_and_stamped_after_every_o
   const { name } = await followUpsMigration();
   // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands,
   // by its suffix, never its stamp (M4): L8's testers file, restamped after this one (C1, 2026-10-20),
-  // its S6 follow-up after that, and the task-3 re-pin (effort anchors, 2026-10-23) after both.
+  // its S6 follow-up after that, the task-3 re-pin (effort anchors, 2026-10-23) after both, and the
+  // definer revoke (2026-11-09) last.
   assertEquals(
     names.filter((n) => n > name).map((n) =>
-      n.replace(/^\d{14}_(testers|comp_guards|task_effort_anchors)\.sql$/, "<stamp>_$1.sql")
+      n.replace(/^\d{14}_(testers|comp_guards|task_effort_anchors|definer_trigger_execute)\.sql$/, "<stamp>_$1.sql")
     ),
-    ["<stamp>_testers.sql", "<stamp>_comp_guards.sql", "<stamp>_task_effort_anchors.sql"],
+    ["<stamp>_testers.sql", "<stamp>_comp_guards.sql", "<stamp>_task_effort_anchors.sql", "<stamp>_definer_trigger_execute.sql"],
     `${name}: stamped after every other file but the named later ones`,
   );
   for (const applied of [MAIL_LAST_LAPSED_AT, MAIL_MAX_TOKENS_REPIN]) {
@@ -3430,10 +3510,13 @@ Deno.test("S6 follow-up: the guards file is found by suffix and stamped after ev
   const { name } = await compGuardsMigration();
   const { name: testers } = await testersMigration();
   const names = (await everyMigrationFile()).map(([n]) => n);
-  // A later migration is named here when it lands, by its suffix: the task-3 re-pin (2026-10-23).
+  // A later migration is named here when it lands, by its suffix: the task-3 re-pin (2026-10-23)
+  // and the definer revoke (2026-11-09).
   assertEquals(
-    names.filter((n) => n > name).map((n) => n.replace(/^\d{14}_(task_effort_anchors)\.sql$/, "<stamp>_$1.sql")),
-    ["<stamp>_task_effort_anchors.sql"],
+    names.filter((n) => n > name).map((n) =>
+      n.replace(/^\d{14}_(task_effort_anchors|definer_trigger_execute)\.sql$/, "<stamp>_$1.sql")
+    ),
+    ["<stamp>_task_effort_anchors.sql", "<stamp>_definer_trigger_execute.sql"],
     `${name}: stamped after every other file but the named later ones`,
   );
   assert(name > testers, `${name}: after ${testers}, which stays as applied`);
@@ -3559,7 +3642,12 @@ async function taskEffortAnchorsMigration(): Promise<{ name: string; raw: string
 Deno.test("task-3: the effort-anchors file is found by suffix and stamped after every other file", async () => {
   const { name } = await taskEffortAnchorsMigration();
   const names = (await everyMigrationFile()).map(([n]) => n);
-  assertEquals(names.at(-1), name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+  // A later migration is named here when it lands, by its suffix: the definer revoke (2026-11-09).
+  assertEquals(
+    names.filter((n) => n > name).map((n) => n.replace(/^\d{14}_(definer_trigger_execute)\.sql$/, "<stamp>_$1.sql")),
+    ["<stamp>_definer_trigger_execute.sql"],
+    `${name}: stamped after every other file but the named later ones`,
+  );
 });
 
 /** One `<field> = <value>` assignment out of a `set` list, as written. */
