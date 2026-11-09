@@ -72,7 +72,7 @@ enum Command {
     },
     /// Step 3's counts for onboarding, from raw captures, before any note is written (Wave B plan
     /// §4.4). Exactly one mode: `--preview` (`--feed`, `--courses`, optionally `--grades`, and
-    /// `--registrar` with `--school`) prints `{assignments_upcoming, class_times, classes, errors,
+    /// `--registrar` or `--class-search` with `--school`) prints `{assignments_upcoming, class_search, class_times, classes, errors,
     /// grades_courses, turned_in, by_course}`; `--tidied` prints `{effort_estimated, errors, imported_done,
     /// imported_past, live_by_source}` from the vault. Never writes, opens no
     /// socket, is never gated, and always exits 0: an unreadable input is a `null` and a line in `errors`.
@@ -101,6 +101,10 @@ enum Command {
         /// The registrar's raw answer (Banner JSON). Needs `--school`.
         #[arg(long)]
         registrar: Option<PathBuf>,
+        /// Replan C3: the class-search bundle (`commitments --class-search`'s). With `--preview` and
+        /// `--school` it fills `class_times` and `class_search`; unreadable is a `null` and a line in `errors`.
+        #[arg(long = "class-search")]
+        class_search: Option<PathBuf>,
         /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
         #[arg(long)]
         school: Option<String>,
@@ -132,6 +136,13 @@ enum Command {
         /// the series and the matched rows' notes; exit 2 on an unknown school or no usable row.
         #[arg(long, conflicts_with = "confirm", requires = "school")]
         registrar: Option<PathBuf>,
+        /// Replan C3: the app's class-search bundle. Fetches nothing; writes only the series file
+        /// (`found` rows and the no-time block), no note, card or journal record; prints
+        /// `{term, found, no_time, part_read, not_found, ambiguous, closed, paused, fetch_failed,
+        /// warnings}` and always exits 0 (a bad bundle, a missing or unknown `--school` or another
+        /// school's bundle is a named line, nothing written). Conflicts with `--confirm` and `--registrar`.
+        #[arg(long = "class-search", conflicts_with_all = ["confirm", "registrar"])]
+        class_search: Option<PathBuf>,
         /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
         #[arg(long)]
         school: Option<String>,
@@ -537,7 +548,7 @@ fn main() -> ExitCode {
             println!("{}", knowlu_engine::surface::state_json(&state));
             ExitCode::SUCCESS
         }
-        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, school, tz } => {
+        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, class_search, school, tz } => {
             // Read-only and always exit 0: a usage problem is a named line, never a failure.
             let tz = match tz.as_deref() {
                 None => cli::vault_zone(&vault),
@@ -555,7 +566,7 @@ fn main() -> ExitCode {
             };
             match (preview, tidied) {
                 (true, false) => {
-                    let files = knowlu_engine::onboarding::PreviewFiles { feed, courses, grades, registrar, school };
+                    let files = knowlu_engine::onboarding::PreviewFiles { feed, courses, grades, registrar, class_search, school };
                     println!("{}", knowlu_engine::onboarding::run_preview(&files, &tz, now));
                 }
                 (false, true) => println!("{}", knowlu_engine::onboarding::run_tidied(&vault)),
@@ -564,7 +575,19 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         // commitments command: begin
-        Command::Commitments { vault, today, json, confirm, registrar, school, actor, via } => {
+        Command::Commitments { vault, today, json, confirm, registrar, class_search, school, actor, via } => {
+            if let Some(path) = class_search {
+                // Replan C3: always exit 0; a problem is one named line and nothing written.
+                let out = match std::fs::read_to_string(&path) {
+                    Ok(text) => cli::commitments_class_search(&vault, today.as_deref(), school.as_deref(), &text),
+                    Err(_) => Err("commitments: class search: the bundle could not be read; nothing written".to_string()),
+                };
+                match out {
+                    Ok(report) => println!("{}", knowlu_engine::ledger::dumps_value(&report)),
+                    Err(line) => println!("{line}"),
+                }
+                return ExitCode::SUCCESS;
+            }
             if let Some(path) = registrar {
                 let text = match std::fs::read_to_string(&path) {
                     Ok(text) => text,

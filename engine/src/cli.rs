@@ -1101,6 +1101,62 @@ pub fn commitments_registrar(
     crate::registrar::run(vault, text, school, today, ctx, &mut journal)
 }
 
+/// Replan C3 (§6.5): `commitments --class-search`. Reads the app's bundle, fetches nothing, and writes
+/// only `state/calendar-series.json` (the `found` rows that name a vault course, and the no-time
+/// block); no note, no card, no journal record. `Ok` is the report, `{term, found, no_time, part_read,
+/// not_found, ambiguous, closed, paused, fetch_failed, warnings}`: counts per query (per course, §6.4)
+/// and fixed words, never a class, CRN, room or time. `Err` is a named line; the command always exits
+/// 0, and nothing was written. `today_iso` pins the day (the vault's zone when none is given).
+pub fn commitments_class_search(vault: &Path, today_iso: Option<&str>, school: Option<&str>, text: &str) -> Result<serde_json::Value, String> {
+    use crate::commitments as cm;
+    use crate::registrar::{self, QueryState};
+    let Some(school) = school else { return Err("commitments: class search needs --school; nothing written".to_string()) };
+    if registrar::school(school).is_none() {
+        return Err("commitments: class search: unknown school; nothing written".to_string());
+    }
+    if !vault.is_dir() {
+        return Err("commitments: class search: the vault folder was not found; nothing written".to_string());
+    }
+    let today = match today_iso {
+        Some(iso) => Date::strptime("%Y-%m-%d", iso).map_err(|_| "commitments: class search: bad --today; nothing written".to_string())?,
+        None => Timestamp::now().to_zoned(vault_zone(vault)).date(),
+    };
+    let Some(bundle) = registrar::read_class_search_bundle(text, &today.to_string()) else {
+        return Err("commitments: class search: the bundle could not be read; nothing written".to_string());
+    };
+    if bundle.school != school {
+        return Err("commitments: class search: the bundle is for another school; nothing written".to_string());
+    }
+    let resolve = cm::course_resolver(vault);
+    let mut store = cm::ClassSearchStore { school: school.to_string(), term: bundle.term.clone(), ..Default::default() };
+    let mut counts = [0usize; 8];
+    let mut warnings: std::collections::BTreeSet<String> = Default::default();
+    for q in &bundle.queries {
+        counts[QueryState::ALL.iter().position(|s| *s == q.state).unwrap_or(0)] += 1;
+        warnings.extend(q.warnings.iter().map(|w| w.to_string()));
+        // A course the vault lacks is counted above and written nowhere.
+        let Some(course) = resolve(&format!("{} {}", q.subject, q.number)) else { continue };
+        match q.state {
+            QueryState::Found => store.series.extend(q.series.iter().cloned()),
+            QueryState::NoTime => {
+                store.no_time.insert(course.clone());
+            }
+            QueryState::PartRead | QueryState::NotFound | QueryState::Ambiguous => {}
+            QueryState::Closed | QueryState::Paused | QueryState::FetchFailed => continue,
+        }
+        store.answered.insert(course);
+    }
+    let (series_warnings, _) = cm::store_class_search(vault, today, &store);
+    warnings.extend(series_warnings);
+    let mut report = serde_json::Map::new();
+    report.insert("term".into(), serde_json::json!(bundle.term));
+    for (state, count) in QueryState::ALL.iter().zip(counts) {
+        report.insert(state.word().into(), serde_json::json!(count));
+    }
+    report.insert("warnings".into(), serde_json::json!(warnings));
+    Ok(serde_json::Value::Object(report))
+}
+
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
 fn first_with_count(label: &str, warnings: &[String]) -> Option<String> {
     let first = warnings.first()?;

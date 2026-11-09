@@ -26,7 +26,10 @@ pub struct PreviewInputs<'a> {
     pub grades: Option<&'a str>,
     /// The registrar's raw answer (Banner JSON, as `commitments --registrar` reads it).
     pub registrar: Option<&'a str>,
-    /// The registrar's school key (`registrar::SCHOOLS`); `registrar` is unreadable without it.
+    /// The app's class-search bundle (replan C3, as `commitments --class-search` reads it).
+    pub class_search: Option<&'a str>,
+    /// The registrar's school key (`registrar::SCHOOLS`); `registrar` and `class_search` are
+    /// unreadable without it.
     pub school: Option<&'a str>,
 }
 
@@ -270,6 +273,56 @@ fn read_registrar(text: &str, school: Option<&str>, courses: &[Course], errors: 
     }
 }
 
+/// The class-search bundle's counts and matched class times (replan C3, §6.4, §6.5). `class_search`
+/// is `{found, no_time, part_read, not_found, ambiguous, closed, paused, fetch_failed}`, one count per
+/// query (per course, not per section), whatever the course list holds. The class times are one entry
+/// per `found` query whose subject and number name a course in the list, as the keys of every course
+/// that carries the code; a course the registrar's `already` entries hold is not counted again (each
+/// course once). `None` for an unreadable bundle: no school, an unknown school, not a bundle, or another
+/// school's, each a named `class search:` line. Nothing is written and nothing is fetched.
+fn read_class_search(
+    text: &str,
+    school: Option<&str>,
+    courses: Option<&[Course]>,
+    today: &str,
+    already: &[BTreeSet<String>],
+    errors: &mut Vec<String>,
+) -> Option<(Value, Option<Vec<BTreeSet<String>>>)> {
+    let Some(key) = school else {
+        errors.push("class search: no school given".to_string());
+        return None;
+    };
+    if crate::registrar::school(key).is_none() {
+        errors.push("class search: unknown school".to_string());
+        return None;
+    }
+    let Some(bundle) = crate::registrar::read_class_search_bundle(text, today) else {
+        errors.push("class search: not a bundle".to_string());
+        return None;
+    };
+    if bundle.school != key {
+        errors.push("class search: the bundle is for another school".to_string());
+        return None;
+    }
+    let counts: serde_json::Map<String, Value> = crate::registrar::QueryState::ALL
+        .iter()
+        .map(|state| (state.word().to_string(), json!(bundle.queries.iter().filter(|q| q.state == *state).count())))
+        .collect();
+    let times = courses.map(|list| {
+        let mut seen: Vec<BTreeSet<String>> = already.to_vec();
+        let mut out = Vec::new();
+        for q in bundle.queries.iter().filter(|q| q.state == crate::registrar::QueryState::Found) {
+            let keys = courses_with_code(list, &compact(&format!("{}{}", q.subject, q.number)));
+            if !keys.is_empty() && !seen.contains(&keys) {
+                seen.push(keys.clone());
+                out.push(keys);
+            }
+        }
+        out
+    });
+    Some((Value::Object(counts), times))
+}
+
 fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: DateTime) -> Value {
     let mut errors = Vec::new();
     let today = usize::try_from(now.date().weekday().to_monday_zero_offset()).unwrap_or(0);
@@ -282,6 +335,16 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         (Some(text), Some(list)) => read_registrar(text, inputs.school, list, &mut errors),
         _ => None,
     };
+    // Replan C3: the class-search bundle adds its found courses to the registrar's, each course once.
+    let class_search = input("class_search", inputs.class_search, unread, false, &mut errors).and_then(|text| {
+        let already = class_times.as_deref().unwrap_or(&[]);
+        read_class_search(text, inputs.school, courses.as_deref(), &now.date().to_string(), already, &mut errors)
+    });
+    let class_times = match (class_times, class_search.as_ref().and_then(|(_, times)| times.clone())) {
+        (None, None) => None,
+        (a, b) => Some(a.into_iter().chain(b).flatten().collect::<Vec<_>>()),
+    };
+    let class_search = class_search.map(|(counts, _)| counts);
     let is_done = |e: &ingest::Event| grades.as_ref().is_some_and(|g| ingest::gradable_id(&e.uid).is_some_and(|id| g.done.contains(id)));
     let turned_in = match (&feed, &grades) {
         (Some(items), Some(_)) => Some(items.iter().filter(|i| is_done(i)).count()),
@@ -348,6 +411,7 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
     let mut out = json!({
         "assignments_upcoming": feed.as_ref().map(Vec::len),
         "by_course": by_course,
+        "class_search": class_search,
         "class_times": class_times.as_ref().map(Vec::len),
         "classes": courses.as_ref().map(Vec::len),
         "errors": errors,
@@ -462,6 +526,7 @@ pub struct PreviewFiles {
     pub courses: Option<PathBuf>,
     pub grades: Option<PathBuf>,
     pub registrar: Option<PathBuf>,
+    pub class_search: Option<PathBuf>,
     pub school: Option<String>,
 }
 
@@ -481,11 +546,13 @@ pub fn run_preview(files: &PreviewFiles, tz: &TimeZone, now: DateTime) -> String
     };
     let (feed, courses) = (read("feed", &files.feed), read("courses", &files.courses));
     let (grades, registrar) = (read("grades", &files.grades), read("registrar", &files.registrar));
+    let class_search = read("class_search", &files.class_search);
     let inputs = PreviewInputs {
         feed: feed.as_deref(),
         courses: courses.as_deref(),
         grades: grades.as_deref(),
         registrar: registrar.as_deref(),
+        class_search: class_search.as_deref(),
         school: files.school.as_deref(),
     };
     crate::ledger::dumps_value(&preview_inner(&inputs, &unread, tz, now))
@@ -829,6 +896,38 @@ END:VEVENT
         assert_eq!(count(&v, "errors"), json!([]), "{v}");
     }
 
+    /// A class-search bundle, invented: SYN 110 and SYN 120 each found, one query each.
+    fn class_bundle() -> String {
+        let found = |number: &str, crn: &str| {
+            let meeting = json!({"meetingType": "CLAS", "meetingScheduleType": "LEC", "beginTime": "1300", "endTime": "1350",
+                "startDate": "08/24/2026", "endDate": "12/11/2026", "monday": true, "building": "Hall", "room": "1"});
+            let row = json!({"term": "202640", "subject": "SYN", "courseNumber": number, "sequenceNumber": "001",
+                "courseReferenceNumber": crn, "scheduleTypeDescription": "Lecture", "isSectionLinked": false,
+                "meetingsFaculty": [{"meetingTime": meeting}]});
+            let body = json!({"success": true, "totalCount": 1, "data": [row]}).to_string();
+            json!({"subject": "SYN", "number": number, "sections": ["001"], "status": "answered", "body": body})
+        };
+        json!({"school": "ua", "term": "202640", "queries": [found("110", "91001"), found("120", "91002")]}).to_string()
+    }
+
+    /// Controller ruling 7 (C3): with both sources, `class_times` counts each course once. The
+    /// registrar's SYN 110 and the class search's SYN 110 are one; the class search adds SYN 120.
+    /// Ruling 8: with no bundle, `class_search` is `null`.
+    #[test]
+    fn both_sources_count_each_course_once_and_no_bundle_is_a_null_class_search() {
+        let (c, f, b, cs) = (courses(), ics(&[]), banner(), class_bundle());
+        let both = PreviewInputs { feed: Some(&f), courses: Some(&c), registrar: Some(&b), class_search: Some(&cs), school: Some("ua"), ..Default::default() };
+        let v = preview(&both, &chicago(), now());
+        assert_eq!(count(&v, "class_times"), json!(2), "{v}");
+        assert_eq!(v["class_search"]["found"], json!(2), "{v}");
+        let alone = PreviewInputs { feed: Some(&f), courses: Some(&c), class_search: Some(&cs), school: Some("ua"), ..Default::default() };
+        assert_eq!(count(&preview(&alone, &chicago(), now()), "class_times"), json!(2));
+        let none = PreviewInputs { feed: Some(&f), courses: Some(&c), registrar: Some(&b), school: Some("ua"), ..Default::default() };
+        let v = preview(&none, &chicago(), now());
+        assert_eq!(v["class_search"], Value::Null, "{v}");
+        assert_eq!(count(&v, "class_times"), json!(1), "{v}");
+    }
+
     fn banner_rows(rows: Vec<Value>) -> String {
         json!({"data": {"registrations": rows}}).to_string()
     }
@@ -1004,7 +1103,7 @@ END:VEVENT
 
     fn full_preview(feed: &str) -> Value {
         let (c, g, r) = (courses(), bundle(), two_class_banner());
-        let inputs = PreviewInputs { feed: Some(feed), courses: Some(&c), grades: Some(&g), registrar: Some(&r), school: Some("ua") };
+        let inputs = PreviewInputs { feed: Some(feed), courses: Some(&c), grades: Some(&g), registrar: Some(&r), class_search: None, school: Some("ua") };
         preview(&inputs, &chicago(), now())
     }
 

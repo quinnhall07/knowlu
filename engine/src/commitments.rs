@@ -908,6 +908,15 @@ pub fn uncovered_courses(
         .collect()
 }
 
+/// Replan §6.7 step 1 (C3): a course code (`XYZ 100`, any spelling) to the slug of the active course
+/// note that carries it, through the vault's code table; `None` when the vault holds no such course.
+/// The table and the active courses are read once, when the resolver is built.
+pub fn course_resolver(vault: &Path) -> impl Fn(&str) -> Option<String> {
+    let (codes, _) = Codes::load(vault);
+    let active: BTreeSet<String> = active_courses(vault).into_iter().map(|(slug, _)| slug).collect();
+    move |code| codes.table.get(&compact(code)).filter(|slug| active.contains(*slug)).cloned()
+}
+
 /// The active courses (`active_courses`, slug order) whose `course_key` is one of `keys`'.
 fn listed_courses(vault: &Path, keys: &BTreeSet<String>, codes: &Codes) -> Vec<UncoveredCourse> {
     let keys: BTreeSet<String> = keys.iter().map(|course| course_key(course, codes)).collect();
@@ -2652,6 +2661,23 @@ pub fn refresh_series_held(
     today: Date,
     news: Option<&RegistrarFetch>,
 ) -> (SeriesFile, Vec<String>, bool) {
+    refresh_series_edited(vault, held, fresh, today, news, None)
+}
+
+/// A change to the no-time block ([`SeriesFile::class_search`]), made under the lock the caller holds.
+type BlockEdit<'a> = &'a dyn Fn(&mut BTreeMap<String, BTreeSet<String>>);
+
+/// [`refresh_series_held`] with `edit` applied to the no-time block after a passed block is dropped
+/// (replan C3: `commitments --class-search` writes its block in the same read-modify-write as its
+/// rows). A block the edit changed is stored even with nothing `fresh`.
+fn refresh_series_edited(
+    vault: &Path,
+    held: SeriesLock,
+    fresh: &[(String, Vec<Series>)],
+    today: Date,
+    news: Option<&RegistrarFetch>,
+    edit: Option<BlockEdit>,
+) -> (SeriesFile, Vec<String>, bool) {
     let SeriesLock(lock, lock_warning) = held;
     let (old, mut warnings, writable) = match load_series_file(vault) {
         Loaded::Read(file) => (file, Vec::new(), true),
@@ -2783,11 +2809,14 @@ pub fn refresh_series_held(
     }
 
     let mut class_search = old.class_search;
-    let blocks = class_search.len();
+    let blocks = class_search.clone();
     if lock.is_some() {
         class_search.retain(|key, _| !block_passed(key, today));
     }
-    let dropped = class_search.len() != blocks;
+    if let Some(edit) = edit {
+        edit(&mut class_search);
+    }
+    let dropped = class_search != blocks;
 
     let mut file = SeriesFile { calendars, ended, series, registrar: block, class_search };
     if let Some(news) = news {
@@ -2804,6 +2833,64 @@ pub fn refresh_series_held(
         }
     }
     (file, warnings, stored)
+}
+
+/// What one `commitments --class-search` run hands the series file (replan §6.5, §6.7, C3). Built by
+/// `cli::commitments_class_search`; nothing here names a section, a CRN or a time beyond the rows.
+#[derive(Debug, Clone, Default)]
+pub struct ClassSearchStore {
+    pub school: String,
+    /// The bundle's term (`<year><suffix>`), the one the rows were read for.
+    pub term: String,
+    /// The `found` rows that name a course the vault holds, under their `classsearch:` keys.
+    pub series: Vec<Series>,
+    /// The vault's course keys (slugs) this read answered, whatever the answer was.
+    pub answered: BTreeSet<String>,
+    /// Of those, the courses whose section is listed with no day or time.
+    pub no_time: BTreeSet<String>,
+}
+
+/// The no-time block keys a read for `term` is written under: its own term, and, when that term is
+/// still ahead of `registrar::term_for(school, today)` (the gap between one term's end and the next's
+/// month), `term_for`'s too. `no_time_courses` reads the block at `term_for`'s term, so a block under
+/// the coming term alone would not stop an ask until that term begins; and `block_passed` drops the
+/// `term_for` entry at the first `rank` of the new term, while the coming term's stays. A read for a
+/// term that is not ahead (a stale bundle) is written under its own term only, never as a claim about
+/// the current one. (C2b's review, 2026-11-08.)
+fn class_search_block_keys(school: &str, term: &str, today: Date) -> Vec<String> {
+    let mut terms = vec![term.to_string()];
+    if let Some(now) = crate::registrar::term_for(school, today).filter(|now| now != term) {
+        if matches!((term_place(school, term), term_place(school, &now)), (Some(read), Some(current)) if read > current) {
+            terms.push(now);
+        }
+    }
+    terms.into_iter().map(|t| format!("{CLASS_SEARCH_PREFIX}{school}:{t}")).collect()
+}
+
+/// Stores a class-search read in `state/calendar-series.json`, and nothing else: its rows under the
+/// calendar `classsearch:<school>:<term>` (read fresh `today`) and its no-time courses in the block
+/// ([`class_search_block_keys`]). Courses the read answered are updated in the block, others left; an
+/// entry that ends empty goes. A key whose term has passed ([`block_passed`]) is never written: the
+/// same pass drops it, so a stale read leaves no block. One read-modify-write of the file under the
+/// series lock; when the lock cannot be taken, as for every writer of the file, that is one warning
+/// and the write goes on unlocked (a concurrent writer's change may then be lost). Returns the
+/// file's warnings and whether the file now holds the result.
+pub fn store_class_search(vault: &Path, today: Date, store: &ClassSearchStore) -> (Vec<String>, bool) {
+    let calendar = format!("{CLASS_SEARCH_PREFIX}{}:{}", store.school, store.term);
+    let fresh: Vec<(String, Vec<Series>)> = if store.series.is_empty() { Vec::new() } else { vec![(calendar, store.series.clone())] };
+    let keys = class_search_block_keys(&store.school, &store.term, today);
+    let edit = |block: &mut BTreeMap<String, BTreeSet<String>>| {
+        for key in keys.iter().filter(|key| !block_passed(key, today)) {
+            let mut courses = block.remove(key).unwrap_or_default();
+            courses.retain(|course| !store.answered.contains(course));
+            courses.extend(store.no_time.iter().cloned());
+            if !courses.is_empty() {
+                block.insert(key.clone(), courses);
+            }
+        }
+    };
+    let (_, warnings, stored) = refresh_series_edited(vault, hold_series_lock(vault), &fresh, today, None, Some(&edit));
+    (warnings, stored)
 }
 
 // ---------------------------------------------------------------------------------------------
