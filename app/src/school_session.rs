@@ -317,3 +317,22 @@ pub fn grades_profile(data_dir: &Path) -> Result<PathBuf, String> {
     }
     Ok(profile)
 }
+
+// ---- Settings' one school sign-in row (S6a's seams; S6t pins them) -------------------------------
+
+/// STUB (S6t): what `school_status` answers. S6a replaces the body.
+pub fn status_with(_data_dir: &Path, _row: Option<&Curated>) -> Value {
+    json!({})
+}
+
+/// STUB (S6t): what `school_forget` does, over injected seams. `close_window` is handed each label to
+/// close. S6a replaces the body.
+pub fn school_forget_with(
+    _data_dir: &Path,
+    _profile_id: &str,
+    _store: &dyn crate::school_password::SchoolStore,
+    _marks: &dyn crate::school_password::SchoolMarks,
+    _close_window: &mut dyn FnMut(&str),
+) -> Value {
+    json!({})
+}
