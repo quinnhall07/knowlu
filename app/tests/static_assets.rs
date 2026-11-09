@@ -3657,3 +3657,16 @@ fn closed_this_week_offers_undo_only_where_the_engine_says_so() {
     assert!(js.contains("closest(\"[data-undo-close]\")"), "the click is routed");
     assert!(css.contains("#closed .ln.undo"), "the row has its fourth track");
 }
+
+#[test]
+fn console_js_dispatches_on_the_view_name_only_through_own_property_checks() {
+    // The view name comes from the URL hash. `{}["constructor"]` and `{}["__proto__"]` are truthy,
+    // so a bare table lookup would let an inherited member through (and call it).
+    let js = read("console.js");
+    assert!(!js.contains("VIEW_RENDERERS[current.view]) {"), "VIEW_RENDERERS is looked up bare");
+    assert!(js.contains("Object.prototype.hasOwnProperty.call(VIEW_RENDERERS, current.view)"), "the renderer call is guarded by an own-property check");
+    assert!(js.contains("Object.prototype.hasOwnProperty.call(listViews, current.view)"), "listViews is checked by own property");
+    assert!(!js.contains("!listViews[current.view]") && !js.contains("else if (listViews[current.view])"), "listViews is looked up bare");
+    assert!(!js.contains("}[view])"), "route() looks the requested view up in a bare literal");
+    assert!(js.contains("Object.prototype.hasOwnProperty.call(KNOWN_VIEWS, view)"), "route() checks the requested view by own property");
+}
