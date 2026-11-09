@@ -364,9 +364,9 @@ const FORGET_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// [`school_forget_with`] with its two waits injected. A window the windows' close has just destroyed
 /// holds the profile lock until its Destroyed event runs on the event loop, so both takes (P1's own, and
-/// `take` for the folder's guard) are tried again after each `pause`, up to [`FORGET_RETRIES`] pauses,
-/// before they answer Busy. The windows are closed once. A Busy at P1's step touches nothing. A Busy at
-/// the folder's step comes after the password was forgotten, and the reply says so.
+/// `take` for the folder's guard) are tried again after each `pause`, up to [`FORGET_RETRIES`] pauses
+/// shared between the two, before they answer Busy. The windows are closed once. A Busy at P1's step
+/// touches nothing. A Busy at the folder's step comes after the password was forgotten, and the reply says so.
 pub fn school_forget_retrying(
     data_dir: &Path,
     profile_id: &str,
@@ -382,11 +382,12 @@ pub fn school_forget_retrying(
         close_window(label);
     }
     let mut first_error: Option<String> = None;
-    let mut tries = 0;
+    // One budget for both takes, so the whole wait is at most FORGET_RETRIES pauses (two seconds).
+    let mut pauses_left = FORGET_RETRIES;
     loop {
         match forget_with(store, marks, profile_id) {
-            Err(e) if e == BUSY && tries < FORGET_RETRIES => {
-                tries += 1;
+            Err(e) if e == BUSY && pauses_left > 0 => {
+                pauses_left -= 1;
                 pause();
             }
             Err(e) if e == BUSY => return reply(false, Some(e)),
@@ -398,10 +399,8 @@ pub fn school_forget_retrying(
         }
     }
     let mut held = take(profile_id);
-    for _ in 0..FORGET_RETRIES {
-        if held.is_some() {
-            break;
-        }
+    while held.is_none() && pauses_left > 0 {
+        pauses_left -= 1;
         pause();
         held = take(profile_id);
     }

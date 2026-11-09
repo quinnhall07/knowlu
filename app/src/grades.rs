@@ -710,8 +710,9 @@ pub fn read_hidden(app: &tauri::AppHandle, host: &str) -> Result<Value, CaptureE
     // The jar read for the poll that answered 200, held for the capture and dropped with this call.
     let jar = std::cell::RefCell::new(None::<String>);
     let previous = std::cell::Cell::new(None::<u16>);
-    let result = read_hidden_with(
+    let result = read_hidden_with_gone(
         host,
+        || app.get_webview_window(WINDOW).is_none(),
         || w.url().ok().map(|u| u.to_string()),
         || {
             // A jar that cannot be read is no poll: `last` stays as the previous poll left it.
@@ -1000,10 +1001,13 @@ pub fn read_hidden_with(
     read_hidden_with_gone(host, || false, window_url, users_me, capture, now, pause)
 }
 
-/// STUB (re-review Minor 1): [`read_hidden_with`] plus `window_gone`; so far it ignores it.
+/// [`read_hidden_with`] plus `window_gone`, asked before every poll: a window destroyed under the read
+/// (Forget, sign-out) ends it at once as `Unreachable`, a named skip that writes no signed-out mark, and
+/// frees the profile lock within one poll. Never `SignedOut`: a gone window says nothing about the session.
+/// (`Busy` would be wrong too: it names another capture holding the window, and none does.)
 pub fn read_hidden_with_gone(
     host: &str,
-    _window_gone: impl FnMut() -> bool,
+    mut window_gone: impl FnMut() -> bool,
     mut window_url: impl FnMut() -> Option<String>,
     mut users_me: impl FnMut() -> Result<Value, Option<u16>>,
     capture: impl FnOnce(&Value) -> Result<Value, CaptureError>,
@@ -1012,6 +1016,9 @@ pub fn read_hidden_with_gone(
 ) -> Result<Value, CaptureError> {
     let mut last = LastRead::Empty;
     loop {
+        if window_gone() {
+            return Err(CaptureError::Unreachable);
+        }
         let on_host_now = window_url().is_some_and(|u| on_host(&u, host));
         if on_host_now {
             match users_me() {
