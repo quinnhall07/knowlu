@@ -141,7 +141,8 @@ is cheaper or safer; each agent's `description:` says when. Rationale: `docs/not
 student data, move money or break a release (Opus; `xhigh` on the contract list, `high` elsewhere)?
 Is a design choice open, the cause unknown, or more than about three files touched (Fable `high`, plan
 first)? Fully specified and checked by the compiler or a test (Opus `high`; Sonnet `medium` when the
-plan writes the code out in full)? Read-only (Sonnet `medium`)?
+plan writes the code out in full)? Read-only (Sonnet `medium`)? An agent with no type runs Opus at
+`xhigh` unless the dispatch passes an `effort`, so pass the level these questions give.
 The main session orchestrates; it edits only what fits on one screen. Use the closest agent rather than
 inventing one. Subagents don't see the conversation: give them the goal, the files and the
 constraints. Anything `mechanical`, `test-writer`, `console-ui`, `implementer` or `docs-keeper` changed
@@ -149,7 +150,9 @@ goes through `reviewer` before a push. Two failed attempts means one level up, e
 never straight to `max`; `max`, and Fable for a role this table does not give it, are Quinn's call.
 When the plan's Fable allowance runs out, Claude Code asks whether to switch to the default model. That
 is Opus 5.5, which runs at `xhigh` here, and `planner` and `debugger` follow the session there on their
-own. If one of them ends on a usage error first, start it again after the switch.
+own (documented, not yet seen here; the note says what was measured). If one of them ends on a usage
+error first, start it again after the switch. On a session that is on neither Fable nor Opus, dispatch
+them with `model: 'opus'`.
 
 ## Gates and conventions
 
