@@ -2429,6 +2429,18 @@ pub enum PurgeScope {
     All,
 }
 
+/// Replan §6.6 step 3 (C2c), the per-term scope beside [`PurgeScope`]: a registrar read of
+/// `calendar` (`registrar:<school>:<term>`) answers for its whole term, so that term's unconfirmed
+/// class-search rows and its `calendars` entry go, directly and never through `aged_out`, so no
+/// `ended` entry is made. Another term's rows and every no-time block stay.
+fn purge_term(file: &mut SeriesFile, calendar: &str) {
+    let Some(rest) = calendar.strip_prefix(crate::registrar::CALENDAR_PREFIX) else { return };
+    let term = format!("{CLASS_SEARCH_PREFIX}{rest}");
+    let of_term = |key: &str| key == term || key.strip_prefix(term.as_str()).is_some_and(|crn| crn.starts_with('-'));
+    file.series.retain(|s| !of_term(&s.calendar) && !of_term(&s.source_uid));
+    file.calendars.remove(&term);
+}
+
 /// What a purge did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purged {
@@ -2745,7 +2757,10 @@ pub fn refresh_series_held(
     }
     let dropped = class_search.len() != blocks;
 
-    let file = SeriesFile { calendars, ended, series, registrar: block, class_search };
+    let mut file = SeriesFile { calendars, ended, series, registrar: block, class_search };
+    if let Some(news) = news {
+        purge_term(&mut file, &news.calendar);
+    }
     let mut stored = (!fresh.is_empty() || dropped) && writable;
     if stored {
         let bytes = file_bytes(&file);

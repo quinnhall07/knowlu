@@ -67,9 +67,12 @@ fn rekeys(lab: &Lab) -> Vec<(String, String, String, Value, Value)> {
 }
 
 /// The journal without its stamps: what two identical runs must agree on.
+/// `Lab::new`'s own setup note (`archive/_migrated.md`) is left out: `create` mints its `id`, so
+/// two vaults never agree on it, and it is no part of the input a fetch reads.
 fn trail(lab: &Lab) -> Vec<(String, String, String, String, Value)> {
     lab.journal()
         .into_iter()
+        .filter(|r| r["path"] != "archive/_migrated.md")
         .map(|r| {
             let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
             (s("op"), s("path"), s("field"), s("actor"), r["new"].clone())
@@ -234,6 +237,22 @@ fn a_failed_rekey_is_a_warning_and_leaves_one_note() {
     assert_eq!(lab.loaded(LECTURE).source_uid.as_deref(), Some(CS_LECTURE));
     assert_eq!(lab.notes_with("40001"), [LECTURE], "R24 made a second note for the CRN");
     assert!(rekeys(&lab).is_empty());
+}
+
+/// Controller ruling 2 (judge once): a note whose `source_uid` the journal shows the student set
+/// is never re-keyed. Its bytes stay, no agent writes the field, the warning is in fixed words, and
+/// R24 makes no second note for the CRN.
+#[test]
+fn a_source_uid_the_student_set_is_never_rekeyed() {
+    let lab = lab_with("adopt-yours", &[("cs-100.md", lecture("cmt_00000000e1", "manual:cs-100"))]);
+    lab.hand_set(LECTURE, "source_uid", &format!("\"{CS_LECTURE}\""));
+    let before = lab.note(LECTURE);
+    let report = lab.fetch(D10, &fx());
+    assert_eq!(lab.note(LECTURE), before);
+    assert!(rekeys(&lab).iter().all(|(_, actor, _, _, _)| !actor.starts_with("agent:")), "{:?}", rekeys(&lab));
+    let warning = format!("registrar: {LECTURE}: source_uid kept yours; the class-search note was not adopted");
+    assert!(list(&report, "warnings").contains(&json!(warning)), "{report}");
+    assert_eq!(lab.notes_with("40001"), [LECTURE], "R24 made a second note for the CRN");
 }
 
 // ---- determinism, and a second run -------------------------------------------------------------
