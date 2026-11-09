@@ -16,7 +16,7 @@
 # `publish` as one uploaded artifact; `publish` deploys the site and creates the GitHub Release and
 # compiles nothing. The first release run took 40 minutes and died at the deploy on a wrong token,
 # which cost a second full build - now a publish-only failure is `gh run rerun <id> --failed` and a
-# few minutes, with the build's cache and artifact still standing. The same run spent 21 of those 40
+# few minutes, with the build's artifact still standing. The same run spent 21 of those 40
 # minutes compiling the Tauri CLI from source, so the CLI is downloaded prebuilt for the pinned
 # version and verified against a SHA-256 spelled here, never compiled.
 #
