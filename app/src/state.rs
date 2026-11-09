@@ -294,6 +294,18 @@ pub fn app_data_root() -> Option<PathBuf> {
     Some(app_data_root_in(&base))
 }
 
+/// The root the app launches under: [`app_data_root`], else `%TEMP%\knowlu` when `LOCALAPPDATA` is unset
+/// (`main`'s fallback). Anything that must find a profile's folder where the running app keeps it, such
+/// as the school password's marks, takes this, so the two can never disagree (contract review r1, Minor 4).
+pub fn app_data_root_or_temp() -> PathBuf {
+    root_or_temp(app_data_root())
+}
+
+/// [`app_data_root_or_temp`]'s rule over a root already looked up, so a test can drive the fallback.
+pub fn root_or_temp(found: Option<PathBuf>) -> PathBuf {
+    found.unwrap_or_else(|| std::env::temp_dir().join("knowlu"))
+}
+
 /// What a quit flush actually managed before its cap fired. Every field means "this completed",
 /// never "this was attempted": a vault with no account, or one that is signed out, quits
 /// `synced: false`, and that is not an error — there was nothing to push, or no session to push it

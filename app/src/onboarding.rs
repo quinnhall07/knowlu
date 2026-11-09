@@ -1214,9 +1214,7 @@ pub fn retarget_credentials(from_vault: String, to_vault: String) -> Value {
     // profile folder; with no saved password there is nothing to read them for. The new id's folder is
     // made here, as `profiles::register` would, so a carried mark has somewhere to go.
     if crate::credentials::exists(&crate::school_password::target(&from_id)) {
-        let Some(root) = crate::state::app_data_root() else {
-            return json!({ "ok": false, "error": "school: no app data folder to read its marks from", "moved": moved });
-        };
+        let root = crate::state::app_data_root_or_temp(); // `main`'s root, fallback included (review r1, Minor 4)
         let to_dir = profiles::profile_dir(&root, &to_id);
         let _ = std::fs::create_dir_all(&to_dir); // a folder that cannot be made fails the carry, by name
         let marks = crate::school_password::FileMarks::new(&profiles::profile_dir(&root, &from_id));
