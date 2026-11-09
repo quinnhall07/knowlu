@@ -321,14 +321,15 @@ pub fn grades_profile(data_dir: &Path) -> Result<PathBuf, String> {
 // ---- Settings' one school sign-in row (S6a; tests: `app/tests/school_session.rs`, S6t) -------------
 
 /// What `school_status` answers: `{ "uses": [name], "folder": bool, "label": string|null }`. The uses are
-/// [`Use`]'s names in the order recorded, `folder` whether the school folder exists, `label` the curated
+/// [`Use`]'s names in the order recorded, `folder` whether a school sign-in is kept in either form
+/// (`school-session`, or an old install's `lms-session`), `label` the curated
 /// school's own name. Never a path, a cookie or a host. A `school.json` that cannot be read answers no uses
 /// (the folder flag still tells the row there is something to Forget).
 pub fn status_with(data_dir: &Path, row: Option<&Curated>) -> Value {
     let names: Vec<&str> = uses(data_dir).unwrap_or_default().into_iter().map(Use::name).collect();
     json!({
         "uses": names,
-        "folder": session_dir(data_dir).exists(),
+        "folder": session_dir(data_dir).exists() || data_dir.join(LEGACY_GRADES_DIR).exists(),
         "label": row.map(|r| r.label),
     })
 }
@@ -370,6 +371,8 @@ pub fn school_forget_with(
     if !crate::grades::forget(data_dir) {
         first_error.get_or_insert_with(|| "the saved Blackboard sign-in could not be deleted yet; try again in a moment".to_string());
     }
+    // This row replaces grades' own Forget at a shared school, so it clears the same mark.
+    crate::grades::set_signed_out(data_dir, false);
     reply(first_error.is_none(), first_error)
 }
 
