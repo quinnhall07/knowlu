@@ -409,7 +409,8 @@ mod class_search_backup_tests {
     //! C2e (onboarding replan §6.12, RQ6, RQ14): a backup never holds class-search data, in the
     //! mirror or in a snapshot zip, and holds everything else exactly as before. Each vault is
     //! built here from invented data; no fixture is read. `restore_vault_in` (`app/`) copies a
-    //! mirror and filters nothing, so what a restore can bring back is what the mirror holds.
+    //! mirror and filters its series file the same way (`app/tests/onboarding.rs`), so a mirror
+    //! older than C2e restores clean too.
     use super::*;
     use std::collections::BTreeMap;
     use std::io::Read;
