@@ -406,10 +406,10 @@ pub fn school_forget_retrying(
         held = take(profile_id);
     }
     let Some(_held) = held else {
-        let in_use = "the school sign-in is in use right now, so it was not forgotten; try Forget again in a moment.";
+        let in_use = "the school sign-in itself is in use right now. Press Forget again in a moment to finish.";
         let said = match first_error {
             Some(e) => format!("{e} Also, {in_use}"),
-            None => format!("Knowlu forgot your saved school password, but {in_use}"),
+            None => format!("Your saved school password is forgotten, but {in_use}"),
         };
         return reply(false, Some(said));
     };
