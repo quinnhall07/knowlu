@@ -2461,6 +2461,18 @@ pub enum PurgeScope {
     All,
 }
 
+/// Replan §6.6 step 3 (C2c), the per-term scope beside [`PurgeScope`]: a registrar read of
+/// `calendar` (`registrar:<school>:<term>`) answers for its whole term, so that term's unconfirmed
+/// class-search rows and its `calendars` entry go, directly and never through `aged_out`, so no
+/// `ended` entry is made. Another term's rows and every no-time block stay.
+fn purge_term(file: &mut SeriesFile, calendar: &str) {
+    let Some(rest) = calendar.strip_prefix(crate::registrar::CALENDAR_PREFIX) else { return };
+    let term = format!("{CLASS_SEARCH_PREFIX}{rest}");
+    let of_term = |key: &str| key == term || key.strip_prefix(term.as_str()).is_some_and(|crn| crn.starts_with('-'));
+    file.series.retain(|s| !of_term(&s.calendar) && !of_term(&s.source_uid));
+    file.calendars.remove(&term);
+}
+
 /// What a purge did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purged {
@@ -2777,7 +2789,10 @@ pub fn refresh_series_held(
     }
     let dropped = class_search.len() != blocks;
 
-    let file = SeriesFile { calendars, ended, series, registrar: block, class_search };
+    let mut file = SeriesFile { calendars, ended, series, registrar: block, class_search };
+    if let Some(news) = news {
+        purge_term(&mut file, &news.calendar);
+    }
     let mut stored = (!fresh.is_empty() || dropped) && writable;
     if stored {
         let bytes = file_bytes(&file);
@@ -2971,6 +2986,21 @@ fn minutes(time: Time) -> i64 {
     i64::from(time.hour()) * 60 + i64::from(time.minute())
 }
 
+/// Replan §6.6 step 2 (C2c review; A1-F1's one predicate, so the four sites cannot drift): whether
+/// confirmed note `n`'s signature closes the question of the row keyed `key`. It always does, but
+/// for a `registrar:` note the registrar has ended (`until` before `today`; `RegistrarHold` stops
+/// counting it the same day) and a row of that note's own term calendar (`<calendar>-<crn>`), so
+/// R24 or the row's card can make the real section's note. [`proposals`], [`confirm`],
+/// [`withdrawal_reason`] and [`settle_approved`] all ask this.
+fn closes_by_signature(n: &Commitment, key: &str, today: Date) -> bool {
+    let Some(note_key) = n.source_uid.as_deref().filter(|k| k.starts_with(crate::registrar::CALENDAR_PREFIX)) else {
+        return true;
+    };
+    let ended = n.until.is_some_and(|until| until < today);
+    let of_term = |calendar: &str| key.strip_prefix(calendar).is_some_and(|crn| crn.starts_with('-'));
+    !(ended && note_key.rsplit_once('-').is_some_and(|(calendar, _)| of_term(calendar)))
+}
+
 /// §3.5's proposals, pure (no clock, no I/O, no model), in `source_uid` order, over
 /// [`SeriesFile::by_key`] so one key is one proposal whichever calendars hold it.
 ///
@@ -2978,7 +3008,7 @@ fn minutes(time: Time) -> i64 {
 /// not before `today` (P7 left that check to the caller: `classify` has no `today`), its key is
 /// not in `held` (keys a change card's `change.source_uid` carries, P12's `successor_keys`), no
 /// note has its key (a confirmed note, a decline marker, the planning day), no confirmed note has
-/// its [`Signature`], and — when `for_cards` — it is not `office-hours` (R8; the screen lists
+/// its [`Signature`] ([`closes_by_signature`]), and — when `for_cards` — it is not `office-hours` (R8; the screen lists
 /// them). A `class` or `lab` series from any calendar but the registrar is not proposed when the
 /// registrar holds that kind for that course (a confirmed `registrar:` note or a `registrar:`
 /// series of the same kind and course, either with no `until` or one not before `today`), whatever its times (phase 3 final review I1,
@@ -3010,7 +3040,10 @@ pub fn proposals(
         .filter_map(|n| n.source_uid.as_deref())
         .chain(set.declined.iter().map(String::as_str))
         .collect();
-    let mut closed: BTreeSet<Signature> = set.confirmed.iter().map(|n| n.signature(codes)).collect();
+    // A confirmed note's signature closes a row as [`closes_by_signature`] says (C2c review); the
+    // signatures of keys answered or held close it outright.
+    let note_sigs: Vec<(Signature, &Commitment)> = set.confirmed.iter().map(|n| (n.signature(codes), n)).collect();
+    let mut closed: BTreeSet<Signature> = BTreeSet::new();
     // Final review I1 (a), per kind: a `(kind, course)` the registrar holds gets no proposal of
     // that kind for that course from any other calendar, whatever its times (D7). A registrar
     // lecture leaves a Google lab of the same course proposed. One predicate ([`RegistrarHold`])
@@ -3046,7 +3079,8 @@ pub fn proposals(
     }
     let mut chosen: BTreeMap<Signature, (&Series, String, Option<String>)> = BTreeMap::new();
     for (sig, by_title, series, kind, course) in candidates {
-        if closed.contains(&sig) || closed.contains(&by_title) {
+        let by_note = |s: &Signature| note_sigs.iter().any(|(ns, n)| ns == s && closes_by_signature(n, &series.source_uid, today));
+        if closed.contains(&sig) || closed.contains(&by_title) || by_note(&sig) || by_note(&by_title) {
             continue;
         }
         if registrar_held.holds(Source::by_calendar(&series.calendar), &kind, course.as_deref(), codes) {
@@ -5196,7 +5230,7 @@ pub fn settle_approved(
             let sigs = card_signatures(meta, &codes);
             let held = set.confirmed.iter().find(|n| {
                 (!key.is_empty() && n.source_uid.as_deref() == Some(key.as_str()))
-                    || sigs.contains(&n.signature(&codes))
+                    || (sigs.contains(&n.signature(&codes)) && closes_by_signature(n, &key, today))
             });
             if let Some(note) = held {
                 if !key.is_empty() && created_by_this_card(vault, meta, Some(&key), journal) {
@@ -5280,7 +5314,7 @@ pub fn settle_rejected(
 /// - **window**: a `planning-day` note or the `window` marker exists;
 /// - **proposal**: its key is under no calendar of the series file, its series is in the file's
 ///   `ended` map or ends before `today` (fix round 1, m3), a note (confirmed, a marker,
-///   the planning day) has its key, a confirmed note has its signature, or the registrar holds
+///   the planning day) has its key, a confirmed note has its signature ([`closes_by_signature`]), or the registrar holds
 ///   its `(kind, course)` ([`RegistrarHold`], as [`proposals`] does; close-out A1-F1). "Under no calendar"
 ///   is read only from a file that knows at least one calendar: an empty file (never written,
 ///   or unreadable this run) says nothing about what left it.
@@ -5330,7 +5364,7 @@ pub fn withdrawal_reason(
                 return Some(format!("{key} was answered"));
             }
             let sigs = card_signatures(meta, codes);
-            if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
+            if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes)) && closes_by_signature(n, &key, today)) {
                 return Some(format!("{key} is already confirmed"));
             }
             // Close-out A1-F1: the registrar hold `proposals()` applies, withdrawn here too.
@@ -5491,7 +5525,7 @@ pub fn confirm(
             continue;
         };
         let sigs = proposal_signatures(p, codes);
-        if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
+        if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes)) && closes_by_signature(n, key, today)) {
             continue;
         }
         if set.declined.contains(key) || !stored.proposals.iter().any(|q| &q.source_uid == key) {

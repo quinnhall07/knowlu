@@ -571,6 +571,46 @@ pub fn run(
     run_parsed(vault, parsed, school_key, today, ctx, journal)
 }
 
+/// Replan §6.6, "When a later registrar read meets a class-search note" (C2c): every confirmed
+/// note keyed `classsearch:<school>:<term>-<crn>` of the fetched school and term, in path order, is
+/// re-keyed to `registrar:<school>:<term>-<crn>` by one `source_uid` write through `write`, journal
+/// first, as `agent`. A note whose `source_uid` the student set is never re-set (judge once), and a
+/// write that fails leaves the old key; either is a warning in fixed words, and its registrar key is
+/// returned so R24 makes no second note for that CRN. The next read tries again.
+fn adopt_class_search(
+    vault: &Path,
+    school_key: &str,
+    term: &str,
+    agent: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> (BTreeSet<String>, Vec<String>) {
+    let from = format!("{CLASS_SEARCH_PREFIX}{school_key}:{term}-");
+    let mut notes: Vec<(String, String, String)> = crate::commitments::load(vault)
+        .confirmed
+        .into_iter()
+        .filter_map(|n| {
+            let crn = n.source_uid.as_deref()?.strip_prefix(from.as_str()).filter(|crn| !crn.is_empty())?.to_string();
+            Some((n.path.to_string_lossy().replace('\\', "/"), n.id, crn))
+        })
+        .collect();
+    notes.sort();
+    let (mut skipped, mut warnings) = (BTreeSet::new(), Vec::new());
+    for (path, id, crn) in notes {
+        let key = format!("{}-{crn}", calendar_key(school_key, term));
+        if journal.human_edited(&id, "source_uid").is_some() {
+            warnings.push(format!("registrar: {path}: source_uid kept yours; the class-search note was not adopted"));
+            skipped.insert(key);
+            continue;
+        }
+        let literal = [("source_uid".to_string(), crate::write::to_literal(&serde_yaml_ng::Value::String(key.clone())))];
+        if crate::write::write_literals(vault, &path, &literal, agent, journal, &crate::write::WriteOpts::default()).is_err() {
+            warnings.push(format!("registrar: {path}: source_uid not re-keyed (the write failed)"));
+            skipped.insert(key);
+        }
+    }
+    (skipped, warnings)
+}
+
 /// [`run`] after the parse: the seam that lets a test hand it a parse made with an invented
 /// registered set ([`parse_banner_with`]), since a real school's set is data in [`SCHOOLS`]. Moved
 /// out of `run` by close-out task B2; B3a added P9's carry, `missing` and `unread`.
@@ -587,6 +627,10 @@ pub fn run_parsed(
     // B3 minors (A2 item 11): the series lock is held from before the first read to the merge's
     // write, so two fetches at once never both read one prior and end a note twice.
     let held = cm::hold_series_lock(vault);
+    let agent = ctx.with_actor(ACTOR);
+    // Replan §6.6 (C2c): adopt this term's confirmed class-search notes before `confirmed` is built,
+    // so each is then the registrar's and today's rules below run on it unchanged.
+    let (not_adopted, mut failed) = adopt_class_search(vault, school_key, &parsed.term, &agent, journal);
     // P9: how each CRN of the answer was read, by its key; the confirmed notes of this term, by key.
     let read: BTreeMap<String, Reading> = parsed.seen.iter().map(|(crn, how)| (format!("{calendar}-{crn}"), *how)).collect();
     let confirmed: BTreeMap<String, cm::Commitment> = cm::load(vault)
@@ -606,14 +650,12 @@ pub fn run_parsed(
         s.calendar == calendar && notes.contains_key(&s.source_uid) && read.get(&s.source_uid).is_some_and(|how| *how != Reading::Whole)
     });
     let input: Vec<Series> = whole.iter().cloned().chain(carried).collect();
-    let mut failed = Vec::new();
     // A2 items 8 and 9 (close-out B3b): a note whose row was read `whole` gets each changed `meets`,
     // `until` or `where` written, one field per `write`, journal first, as the registrar. A missing
     // note is item 11's (B3d) and a part-read one gets nothing. Notes in path order.
     let rows: BTreeMap<&str, &Series> = whole.iter().map(|s| (s.source_uid.as_str(), s)).collect();
     let mut order: Vec<(&String, &String)> = notes.iter().map(|(key, path)| (path, key)).collect();
     order.sort();
-    let agent = ctx.with_actor(ACTOR);
     let mut applied = Vec::new();
     for (path, key) in order {
         let (Some(note), Some(row)) = (confirmed.get(key), rows.get(key.as_str())) else { continue };
@@ -769,7 +811,8 @@ pub fn run_parsed(
     let current: BTreeSet<&str> = stored.proposals.iter().map(|p| p.source_uid.as_str()).collect();
     let (mut mine, mut proposed) = (Vec::new(), 0);
     // A2 item 10: R24 creates only from a row the fetch read `whole`.
-    for s in &whole {
+    // C2c: a CRN whose class-search note was not adopted keeps that note, and gets no second one.
+    for s in whole.iter().filter(|s| !not_adopted.contains(&s.source_uid)) {
         match cm::registrar_course(s, &stored.codes) {
             Some(_) if current.contains(s.source_uid.as_str()) => mine.push((s.source_uid.clone(), "hard".to_string())),
             Some(_) => {}
@@ -1685,3 +1728,7 @@ mod kept_tests;
 mod block_tests;
 #[cfg(test)]
 mod class_search_tests;
+#[cfg(test)]
+mod adopt_tests;
+#[cfg(test)]
+mod ended_note_tests;
