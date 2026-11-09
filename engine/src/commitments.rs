@@ -4662,13 +4662,17 @@ pub fn create_marker(
 
 /// [`create_marker`] under the context it is given (Plan ruling Q3-a): the confirm screen's
 /// markers are the student's own writes (phase-2 spec §3), a settlement's are `agent:commitments`.
+///
+/// Replan §6.7 item 4: a `classsearch:` key ([`is_class_search`]) gets no marker, ever. A marker
+/// syncs and would carry a section off the device, so this returns `Ok(None)` and writes nothing,
+/// journal included. Every marker is written here, so Not mine and a rejected card alike are covered.
 fn create_marker_as(
     vault: &Path,
     key: &str,
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<Option<PathBuf>, crate::write::WriteError> {
-    if load(vault).declined.contains(key) {
+    if is_class_search(key) || load(vault).declined.contains(key) {
         return Ok(None);
     }
     let front = front_matter(&[
@@ -5406,14 +5410,15 @@ fn proposal_signatures(p: &Proposal, codes: &Codes) -> Vec<Signature> {
 ///   by `source_uid` or by signature, is skipped silently: a second Finish is a no-op.
 /// - **`not_mine`** → [`create_marker_as`] for the key and every twin ([`twin_keys`]), as a card
 ///   rejection does. A key a confirmed note holds gets no marker. A key already declined is skipped
-///   silently.
+///   silently. A `classsearch:` key among them gets no marker: its row is removed from the series
+///   file first ([`remove_class_search_rows`], replan §6.7 item 4), and it is not counted.
 /// - **the window** → the planning day, created when there is none ([`create_confirmed_as`]).
 ///   Otherwise its one `window:` line is written through `write_literals`, a human edit that
 ///   `journal.human_set` protects. An equal window writes nothing (`unchanged`).
 ///
 /// A key that is no current proposal, or is the window proposal's, is skipped with a warning. A
 /// write that fails is reported, and the rest still run. No card is filed, so nothing is charged
-/// to the cap.
+/// to the cap. No warning prints a `classsearch:` key: it reads "a class-search row" (replan §6.12).
 pub fn confirm(
     vault: &Path,
     input: &ConfirmInput,
@@ -5436,7 +5441,9 @@ pub fn confirm(
     let stored = stored_proposals(vault, today);
     let codes = &stored.codes;
     let mut report = ConfirmReport::default();
-    let stale = |key: &str| format!("{key}: not a current proposal; skipped");
+    // Replan §6.12: no warning prints a class-search key; it is named by fixed words.
+    let shown = |key: &str| if is_class_search(key) { "a class-search row".to_string() } else { key.to_string() };
+    let stale = |key: &str| format!("{}: not a current proposal; skipped", shown(key));
 
     for (key, level) in &input.mine {
         let set = load(vault);
@@ -5456,17 +5463,17 @@ pub fn confirm(
             continue;
         }
         let Some(level) = Level::parse(level) else {
-            report.warnings.push(format!("{key}: level {level:?} is not hard, soft or optional; skipped"));
+            report.warnings.push(format!("{}: level {level:?} is not hard, soft or optional; skipped", shown(key)));
             continue;
         };
         let chosen = Proposal { level, ..p.clone() };
         let Value::Mapping(map) = to_value(proposal_commitment(&chosen)) else {
-            report.warnings.push(format!("{key}: not written (no commitment mapping)"));
+            report.warnings.push(format!("{}: not written (no commitment mapping)", shown(key)));
             continue;
         };
         match create_confirmed_as(vault, &map, key, today, ctx, journal) {
             Ok(_) => report.created += 1,
-            Err(e) => report.warnings.push(format!("{key}: not written ({e})")),
+            Err(e) => report.warnings.push(format!("{}: not written ({e})", shown(key))),
         }
     }
 
@@ -5480,14 +5487,20 @@ pub fn confirm(
             continue;
         };
         let held: BTreeSet<String> = set.confirmed.iter().filter_map(|n| n.source_uid.clone()).collect();
-        for twin in twin_keys(vault, key, proposal_signatures(p, codes), codes) {
-            if held.contains(&twin) {
-                continue;
-            }
+        let (rows, twins): (BTreeSet<String>, BTreeSet<String>) = twin_keys(vault, key, proposal_signatures(p, codes), codes)
+            .into_iter()
+            .filter(|twin| !held.contains(twin))
+            .partition(|twin| is_class_search(twin));
+        // Replan §6.7 item 4: a class-search twin gets no marker; its row leaves the series file
+        // now, before any marker is written, so a hidden same-signature twin is declined by its own.
+        if let Err(why) = remove_class_search_rows(vault, &rows) {
+            report.warnings.push(format!("a class-search row: not removed ({why})"));
+        }
+        for twin in twins {
             match create_marker_as(vault, &twin, ctx, journal) {
                 Ok(Some(_)) => report.declined += 1,
                 Ok(None) => {}
-                Err(e) => report.warnings.push(format!("{twin}: marker not written ({e})")),
+                Err(e) => report.warnings.push(format!("{}: marker not written ({e})", shown(&twin))),
             }
         }
     }
@@ -5518,6 +5531,32 @@ pub fn confirm(
         }
     }
     Ok(report)
+}
+
+/// Replan §6.7 item 4, §6.12 ("one row at once on Not mine"): removes the class-search series
+/// `keys` names from the series file, and a `classsearch:` calendar's `calendars` entry once no
+/// row is left under it. It holds [`SERIES_LOCK_FILE`] and re-reads the file under it, so nothing
+/// another writer stored is lost; it writes only the series file, through [`file_bytes`], and only
+/// when a row went. No `keys`, no lock and no write. An error is fixed words, never a key.
+fn remove_class_search_rows(vault: &Path, keys: &BTreeSet<String>) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let _lock = lock_series_file(vault).map_err(|err| format!("could not lock {SERIES_LOCK_FILE} ({})", err.kind()))?;
+    let mut file = match load_series_file(vault) {
+        Loaded::Read(file) => file,
+        Loaded::Malformed(_) => return Err(format!("{SERIES_FILE} malformed")),
+        Loaded::Unreadable(kind) => return Err(format!("{SERIES_FILE} unreadable ({kind})")),
+    };
+    let gone: BTreeSet<String> =
+        file.series.iter().filter(|s| keys.contains(&s.source_uid)).map(|s| s.calendar.clone()).collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    file.series.retain(|s| !keys.contains(&s.source_uid));
+    let still: BTreeSet<&str> = file.series.iter().map(|s| s.calendar.as_str()).collect();
+    file.calendars.retain(|calendar, _| !(is_class_search(calendar) && gone.contains(calendar) && !still.contains(calendar.as_str())));
+    write_series_file(vault, &file_bytes(&file)).map_err(|err| format!("{SERIES_FILE} could not be written ({})", err.kind()))
 }
 
 /// What the *Schedule* view and the confirm screen read (phase-2 spec §4). Built purely, with no
