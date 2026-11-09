@@ -318,21 +318,83 @@ pub fn grades_profile(data_dir: &Path) -> Result<PathBuf, String> {
     Ok(profile)
 }
 
-// ---- Settings' one school sign-in row (S6a's seams; S6t pins them) -------------------------------
+// ---- Settings' one school sign-in row (S6a; tests: `app/tests/school_session.rs`, S6t) -------------
 
-/// STUB (S6t): what `school_status` answers. S6a replaces the body.
-pub fn status_with(_data_dir: &Path, _row: Option<&Curated>) -> Value {
-    json!({})
+/// What `school_status` answers: `{ "uses": [name], "folder": bool, "label": string|null }`. The uses are
+/// [`Use`]'s names in the order recorded, `folder` whether the school folder exists, `label` the curated
+/// school's own name. Never a path, a cookie or a host. A `school.json` that cannot be read answers no uses
+/// (the folder flag still tells the row there is something to Forget).
+pub fn status_with(data_dir: &Path, row: Option<&Curated>) -> Value {
+    let names: Vec<&str> = uses(data_dir).unwrap_or_default().into_iter().map(Use::name).collect();
+    json!({
+        "uses": names,
+        "folder": session_dir(data_dir).exists(),
+        "label": row.map(|r| r.label),
+    })
 }
 
-/// STUB (S6t): what `school_forget` does, over injected seams. `close_window` is handed each label to
-/// close. S6a replaces the body.
+/// What `school_forget` does, over injected seams (`close_window` is handed each label to close). In
+/// the order the replan binds (§4.5, S6a):
+/// 1. close every window on the school folders by label ([`crate::account::SCHOOL_WINDOWS`]);
+/// 2. P1's `forget_with` (the password, then the marks), **before** this call takes its own guard,
+///    because it takes the profile's lock itself. Busy there is `ok: false` and nothing else touched;
+///    any other failure is remembered, and the rest still runs (forget as much as it can);
+/// 3. take the guard, then forget the school folder and every use ([`forget`]) and the legacy
+///    `lms-session` ([`crate::grades::forget`]), each tried whatever the other answered.
+/// Reply `{ "ok": bool, "error": string|null }`; the error names the first thing that failed and never
+/// carries the secret.
 pub fn school_forget_with(
-    _data_dir: &Path,
-    _profile_id: &str,
-    _store: &dyn crate::school_password::SchoolStore,
-    _marks: &dyn crate::school_password::SchoolMarks,
-    _close_window: &mut dyn FnMut(&str),
+    data_dir: &Path,
+    profile_id: &str,
+    store: &dyn crate::school_password::SchoolStore,
+    marks: &dyn crate::school_password::SchoolMarks,
+    close_window: &mut dyn FnMut(&str),
 ) -> Value {
-    json!({})
+    let reply = |ok: bool, error: Option<String>| json!({ "ok": ok, "error": error });
+    for label in crate::account::SCHOOL_WINDOWS {
+        close_window(label);
+    }
+    let mut first_error: Option<String> = None;
+    if let Err(e) = crate::school_password::forget_with(store, marks, profile_id) {
+        if e == crate::school_password::BUSY {
+            return reply(false, Some(e));
+        }
+        first_error = Some(e);
+    }
+    let Some(_held) = try_take(profile_id) else {
+        return reply(false, Some(crate::school_password::BUSY.to_string()));
+    };
+    if let Err(e) = forget(data_dir) {
+        first_error.get_or_insert(e);
+    }
+    if !crate::grades::forget(data_dir) {
+        first_error.get_or_insert_with(|| "the saved Blackboard sign-in could not be deleted yet; try again in a moment".to_string());
+    }
+    reply(first_error.is_none(), first_error)
+}
+
+/// The row's status for the console profile's campus. Thin: `status_with` over the profile's own folder.
+#[tauri::command(async)]
+pub fn school_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let campus = crate::grades::campus_of(&cs.vault);
+    status_with(&cs.data_dir, crate::scaffold::curated(&campus.unitid))
+}
+
+/// The row's Forget: [`school_forget_with`] over Credential Manager, the profile's marks and the real
+/// windows, destroyed by label as sign-out does ([`crate::account::SCHOOL_WINDOWS`]).
+#[tauri::command(async)]
+pub fn school_forget(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    use tauri::Manager;
+    let id = profile_key(&cs.data_dir);
+    school_forget_with(
+        &cs.data_dir,
+        &id,
+        &crate::school_password::RealStore,
+        &crate::school_password::FileMarks::new(&cs.data_dir),
+        &mut |label| {
+            if let Some(w) = app.get_webview_window(label) {
+                let _ = w.destroy();
+            }
+        },
+    )
 }
