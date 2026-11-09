@@ -624,6 +624,23 @@ Deno.test("a label carrying a double quote is escaped, not left to break the que
   assertEquals(asked[0], 'newer_than:7d -label:"Say \\"Hi\\""');
 });
 
+// A backslash is escaped before the quote, so a label ending in one cannot escape the closing
+// quote and run into the next term. A label with a backslash is quoted, as one with a quote is.
+Deno.test("a label carrying a backslash is quoted and escaped, so it cannot escape the closing quote", () => {
+  assertEquals(query(["Trail\\"]), String.raw`newer_than:7d -label:"Trail\\"`);
+  assertEquals(query(["My Label\\", "Social"]), String.raw`newer_than:7d -label:"My Label\\" -label:Social`);
+  assertEquals(query(["a\\b"]), String.raw`newer_than:7d -label:"a\\b"`);
+});
+
+Deno.test("a label carrying both a backslash and a quote escapes the backslash first", () => {
+  assertEquals(query(['a\\"b']), String.raw`newer_than:7d -label:"a\\\"b"`);
+  assertEquals(query(['end\\"', "Promotions"]), String.raw`newer_than:7d -label:"end\\\"" -label:Promotions`);
+});
+
+Deno.test("a label without a backslash reads exactly as before", () => {
+  assertEquals(query(["Promotions", "My Label", 'Say "Hi"']), String.raw`newer_than:7d -label:Promotions -label:"My Label" -label:"Say \"Hi\""`);
+});
+
 // ---------------------------------------------------------------------------------------------
 // Stream J Task T9: an LMS submission receipt is recognised BEFORE the model (tier 2 before tier 3),
 // and a device that has not declared it understands `completion` is handed `information` instead.
