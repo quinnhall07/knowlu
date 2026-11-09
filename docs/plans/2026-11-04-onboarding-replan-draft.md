@@ -1975,6 +1975,8 @@ No question is open. The setup split is ruled (RQ5's note above; checkpoint 1).
 | `CLAUDE.md` `commitments` line | Without `--confirm`, exit 0 and only the series file | C3 | C3's tests |
 | `CLAUDE.md` tests | Tests never leave the machine | C4, C8 | `127.0.0.1:0` fakes |
 | `CLAUDE.md` contract list | Only `account.rs` is edited, by `contract-engineer`; `credentials.rs` and `wincred.rs` are used, never edited, and any edit there is `contract-engineer`'s | S5, S7, F2c, P1, P2 | S9; F14 checks both files are absent from every diff |
+| Wave-B plan F2c, "every existing account test passes unedited" | Deviation, accepted (F2c contract review, 2026-11-08): two source-pin tests (`app/tests/account.rs` ~2830, ~3635) were retargeted from `sign_out`'s body to `sign_out_clean`, because the plan itself moves the clean there; every original assertion is kept and one is stricter | F2c | the two pins; F2c's review |
+| F2c contract review, Minor 1 (follow-up, open) | The other four deletes (`zybooks`, `vhl`, the two pending links) in `delete_local_data`, and `onboarding_state.rs`'s `CredPending::delete` at sign-out, still skip when `credentials::exists` reads false; move them to P1's rule (the delete's own answer; not-found only when `exists` agrees). Safe today: a leftover pending link is overwritten before it is read | follow-up: the `account.rs` part to `contract-engineer`, the `onboarding_state.rs` part to `implementer` | not yet |
 
 ## 12. Checkpoints
 
