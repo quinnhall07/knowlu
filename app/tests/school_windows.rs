@@ -420,3 +420,32 @@ fn the_registrar_never_shares_the_lms_profile() {
     }
 }
 
+
+#[test]
+fn the_lms_capture_window_holds_the_profile_lock_for_its_life_and_releases_it_with_the_window() {
+    let session = lms_link::LmsSession::default();
+    let profile = "s4b-capture-profile";
+    assert!(session.hold_school(profile), "a free profile is taken by the window being built");
+    assert!(try_take(profile).is_none(), "held while the window lives: grades' windows answer Busy");
+    assert!(!lms_link::LmsSession::default().hold_school(profile), "a second window on the profile is refused, not waited on");
+    assert!(try_take("s4b-other-profile").is_some(), "another profile is not blocked");
+    // The window's Destroyed event, or the exit: the hold goes, and the school folder is never named for a wipe.
+    assert_eq!(session.end(), None, "no throwaway folder was remembered for a school window");
+    assert!(try_take(profile).is_some(), "freed once the window is gone");
+}
+
+#[test]
+fn the_throwaway_windows_folder_is_still_handed_back_for_its_wipe() {
+    let session = lms_link::LmsSession::default();
+    let throwaway = lms_link::session_dir();
+    session.remember_dir(&throwaway);
+    assert_eq!(session.end(), Some(throwaway), "ending the throwaway window hands its folder to the wipe, once");
+    assert_eq!(session.end(), None, "and only once");
+}
+
+#[test]
+fn the_lms_capture_records_its_use_when_it_opens_and_never_clears_it_when_it_closes() {
+    let lms = src("src/lms_link.rs");
+    assert!(lms.contains("add_use("), "the school window records Use::CourseList");
+    assert!(!lms.contains("clear_use("), "the use is not cleared on close (controller ruling): grades' use and Forget govern the folder");
+}

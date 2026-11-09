@@ -63,32 +63,71 @@ fn wipe_dir(dir: &Path, tries: u32) -> bool {
     !dir.exists()
 }
 
-/// The directory the open sign-in window is using, held by the app rather than by the page.
+/// What the open sign-in window holds, held by the app rather than by the page.
 ///
 /// **The page is not the only thing that ends a capture** (R-C1-40, I1): the window's own close
 /// button, a crash of the campus page and app exit all end one too, and none of them calls a
-/// command. So the app remembers the path and wipes it from the window's `Destroyed` event and again
-/// on the way out — `take_session` empties the slot, which is what makes all three idempotent.
+/// command. So the app remembers the throwaway folder and wipes it from the window's `Destroyed`
+/// event and again on the way out — `take_dir` empties the slot, which is what makes all three
+/// idempotent.
+///
+/// **A window on the school folder holds nothing to wipe but a lock** (S4b): `school_session`'s
+/// per-profile guard, kept from the moment the window is being built until [`LmsSession::end`] (the
+/// `Destroyed` event or the exit), so no grades window opens on the folder beside it.
 #[derive(Default)]
-pub struct LmsSession(std::sync::Mutex<Option<PathBuf>>);
+pub struct LmsSession {
+    dir: std::sync::Mutex<Option<PathBuf>>,
+    hold: std::sync::Mutex<Option<crate::school_session::SessionGuard>>,
+}
 
-fn remember_session(app: &tauri::AppHandle, dir: &Path) {
-    if let Some(state) = app.try_state::<LmsSession>() {
-        if let Ok(mut held) = state.0.lock() { *held = Some(dir.to_path_buf()); }
+impl LmsSession {
+    /// Take `profile_id`'s school lock for the window about to be built. `false` when the profile is
+    /// busy or this session already holds one; nothing waits.
+    pub fn hold_school(&self, profile_id: &str) -> bool {
+        let mut hold = self.hold.lock().unwrap_or_else(|e| e.into_inner());
+        if hold.is_some() { return false; }
+        match crate::school_session::try_take(profile_id) {
+            Some(guard) => { *hold = Some(guard); true }
+            None => false,
+        }
+    }
+
+    /// Remember the throwaway folder the open window is using.
+    pub fn remember_dir(&self, dir: &Path) {
+        *self.dir.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.to_path_buf());
+    }
+
+    fn take_dir(&self) -> Option<PathBuf> {
+        self.dir.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// The window is gone (or never opened): free the school lock and hand back the throwaway
+    /// folder to wipe, once. A school window leaves no folder to hand back.
+    pub fn end(&self) -> Option<PathBuf> {
+        self.hold.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.take_dir()
     }
 }
 
-fn take_session(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let state = app.try_state::<LmsSession>()?;
-    let mut held = state.0.lock().ok()?;
-    held.take()
+fn remember_session(app: &tauri::AppHandle, dir: &Path) {
+    if let Some(state) = app.try_state::<LmsSession>() { state.remember_dir(dir); }
 }
 
-/// Wipe the session directory the app is holding, on a detached thread. This runs from a window
-/// event, and WebView2 still has the profile open at that moment — waiting three seconds on the
-/// event loop's thread would freeze the wizard behind it.
+/// The throwaway folder alone: [`close_and_wipe`]'s, which closes the window but does not end it.
+fn take_session(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.try_state::<LmsSession>()?.take_dir()
+}
+
+/// The window has ended: free its school lock and take its throwaway folder, if it had one.
+fn end_session(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.try_state::<LmsSession>()?.end()
+}
+
+/// Wipe the session directory the app is holding, on a detached thread, and free the window's school
+/// lock. This runs from a window event, and WebView2 still has the profile open at that moment —
+/// waiting three seconds on the event loop's thread would freeze the wizard behind it.
 pub fn wipe_session(app: &tauri::AppHandle) {
-    if let Some(dir) = take_session(app) {
+    if let Some(dir) = end_session(app) {
         std::thread::spawn(move || { wipe_dir(&dir, WIPE_TRIES); });
     }
 }
@@ -99,11 +138,11 @@ pub fn wipe_session(app: &tauri::AppHandle) {
 /// **The second pass is not belt and braces** (R-C1-41, M2). When `Destroyed` is delivered before
 /// `RunEvent::Exit` — which is the `app.exit(0)` path the wizard's relaunch takes — the handler has
 /// already emptied the slot and handed the path to a thread the process is about to kill, so
-/// `take_session` finds nothing here and the directory would survive until some later launch
+/// `end_session` finds nothing here and the directory would survive until some later launch
 /// happened to sweep it. Sweeping **this process's own** prefix at zero age closes that race: by the
 /// time the event loop is exiting, every session directory named for this pid is finished with.
 pub fn wipe_session_on_exit(app: &tauri::AppHandle) {
-    if let Some(dir) = take_session(app) { wipe_dir(&dir, EXIT_TRIES); }
+    if let Some(dir) = end_session(app) { wipe_dir(&dir, EXIT_TRIES); }
     sweep_stale_sessions_in(&std::env::temp_dir(), &mine_prefix(), None, SystemTime::now(), Duration::ZERO);
 }
 
@@ -162,6 +201,22 @@ pub fn sweep_stale_sessions() {
 /// them a window that vanished a moment after being told it was open. That also keeps the "one at a
 /// time" guarantee: this is the only thing that builds the window, and it never builds a second.
 pub fn open_window_at(app: &tauri::AppHandle, url: &str, data_dir: &Path) -> Result<(), String> {
+    open_window_with(app, url, &window_plan(None, data_dir), None)
+}
+
+/// [`open_window_at`] for the LMS capture on **the school folder** (S4b): non-incognito on
+/// `<app_data>\school-session`, so the sign-in is kept for grades and the course list, with the school
+/// windows' one arguments string. The registrar never comes here: it stays on [`open_window_at`]'s
+/// incognito throwaway.
+pub fn open_school_window(app: &tauri::AppHandle, url: &str, app_data: &Path) -> Result<(), String> {
+    open_window_with(app, url, &window_plan(Some(app_data), &session_dir()), Some(app_data))
+}
+
+/// The one builder of the `lms-signin` window, over a [`WindowPlan`]. A plan that records a use holds
+/// the profile's school lock first (a busy profile is refused, never waited on) and records the use
+/// before the window exists; the use is **not** cleared when the window closes, because grades' use and
+/// Forget govern the folder, not this window.
+fn open_window_with(app: &tauri::AppHandle, url: &str, plan: &WindowPlan, app_data: Option<&Path>) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(WINDOW) {
         let _ = w.show();
         let _ = w.unminimize();
@@ -169,23 +224,47 @@ pub fn open_window_at(app: &tauri::AppHandle, url: &str, data_dir: &Path) -> Res
         return Ok(());
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("{url}: {e}"))?;
-    let _ = std::fs::create_dir_all(data_dir);
-    WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(parsed))
+    let held = match (plan.records_use, app_data) {
+        (Some(used), Some(dir)) => {
+            let state = app.try_state::<LmsSession>().ok_or_else(|| "the school sign-in window is not available here".to_string())?;
+            if !state.hold_school(&crate::school_session::profile_key(dir)) {
+                return Err("another window is using your school sign-in right now; try again in a moment".to_string());
+            }
+            if let Err(e) = crate::school_session::add_use(dir, used) {
+                state.end();
+                return Err(e);
+            }
+            true
+        }
+        _ => false,
+    };
+    let _ = std::fs::create_dir_all(&plan.data_dir);
+    let mut builder = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(parsed))
         .title("Sign in to your school")
         .inner_size(1000.0, 760.0)
         .center()
-        // **Incognito** (R-C1-40, I1a): the student's campus session lives in memory and goes when
-        // the webview does. `data_directory` stays for whatever WebView2 writes regardless — a
-        // cache, a crash dump — which is what the wipe and the sweep below are for.
-        .incognito(true)
-        .data_directory(data_dir.to_path_buf())
-        .build()
-        .map(|_| ())
-        .map_err(|e| e.to_string())?;
+        // **Incognito for the throwaway** (R-C1-40, I1a): the student's campus session lives in memory
+        // and goes when the webview does. `data_directory` stays for whatever WebView2 writes
+        // regardless — a cache, a crash dump — which is what the wipe and the sweep below are for. The
+        // school folder's window is the one that is not incognito: its sign-in is the point.
+        .incognito(plan.incognito)
+        .data_directory(plan.data_dir.clone());
+    if let Some(args) = plan.browser_args {
+        builder = builder.additional_browser_args(args);
+    }
+    if let Err(e) = builder.build() {
+        if held {
+            if let Some(state) = app.try_state::<LmsSession>() { state.end(); }
+        }
+        return Err(e.to_string());
+    }
     // Only a builder that managed [`LmsSession`] can be wiped by the window's own close button; on
     // one that did not, this is a no-op and the sweep is what eventually takes the directory. Today
-    // that is `run_shell`, which is the only builder these commands are registered on.
-    remember_session(app, data_dir);
+    // that is `run_shell`, which is the only builder these commands are registered on. The school
+    // folder is never remembered for a wipe.
+    if plan.wipe_on_destroy {
+        remember_session(app, &plan.data_dir);
+    }
     Ok(())
 }
 
@@ -204,10 +283,13 @@ pub fn navigate(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
 /// directory goes to whichever of this call, the window's `Destroyed` event or `RunEvent::Exit` gets
 /// there first, because `take_session` empties the slot. The delete itself is retried on a detached
 /// thread, because WebView2 keeps the profile open for a moment after the window is gone; a wipe
-/// that still loses is swept by the next launch.
+/// that still loses is swept by the next launch. **A window on the school folder has nothing to wipe**,
+/// and its lock is freed by the `Destroyed` event, not here: the webview is still closing.
 pub fn close_and_wipe(app: &tauri::AppHandle) {
     close_window(app);
-    wipe_session(app);
+    if let Some(dir) = take_session(app) {
+        std::thread::spawn(move || { wipe_dir(&dir, WIPE_TRIES); });
+    }
 }
 
 fn close_window(app: &tauri::AppHandle) {
@@ -225,13 +307,12 @@ pub fn lms_home(unitid: &str) -> Option<String> {
 }
 
 #[tauri::command(async)]
-pub fn open_lms_window(app: tauri::AppHandle, unitid: String) -> Value {
+pub fn open_lms_window(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>, unitid: String) -> Value {
     // Before anything else: whatever a crashed run left in the temp folder (R-C1-40, I1c).
     sweep_stale_sessions();
     let Some(url) = lms_home(&unitid) else {
         return json!({ "ok": false, "error": "we do not know your school's sign-in page yet — paste your calendar link below", "opened": false });
     };
-    let dir = session_dir();
     // A visible LMS sign-in opens at the school's sign-in link when its row names one (replan §7.2). An open
     // window is only shown and focused, so the page is not fetched for it.
     let url = start_unless_open(app.get_webview_window(WINDOW).is_some(), url.clone(), || {
@@ -239,7 +320,7 @@ pub fn open_lms_window(app: tauri::AppHandle, unitid: String) -> Value {
             .map(|c| crate::grades::visible_start_url(&format!("https://{}", c.lms_host), c.lms_host, c.lms_sign_in))
             .unwrap_or(url)
     });
-    match open_window_at(&app, &url, &dir) {
+    match open_school_window(&app, &url, &cs.data_dir) {
         // **The path is not in the envelope** (R-C1-40, I2): the page has no use for it now that
         // closing takes no argument, and a temp path handed to a page is a temp path that comes back.
         Ok(()) => json!({ "ok": true, "error": Value::Null, "opened": true }),
@@ -377,9 +458,9 @@ pub fn cookie_url(window_url: Option<&str>, feed: &str) -> String {
     if a == b { here.to_string() } else { feed.to_string() }
 }
 
-/// How the LMS capture window is built (S3 test 1). **S3 stub**: S4b makes a `Some(app_data)` plan the
-/// school folder, non-incognito, with [`crate::school_session::window_args`], recording
-/// `Use::CourseList`; today's incognito throwaway stays for `None` and is the only one wiped.
+/// How the LMS capture window is built (S3 test 1). With the profile's app data it is the school
+/// folder, non-incognito, with [`crate::school_session::SCHOOL_BROWSER_ARGS`], recording
+/// `Use::CourseList`; without it, today's incognito throwaway, which alone is wiped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowPlan {
     pub data_dir: PathBuf,
@@ -390,31 +471,79 @@ pub struct WindowPlan {
     pub wipe_on_destroy: bool,
 }
 
-pub fn window_plan(_app_data: Option<&Path>, throwaway: &Path) -> WindowPlan {
-    WindowPlan { data_dir: throwaway.to_path_buf(), incognito: true, browser_args: None, records_use: None, wipe_on_destroy: true }
+pub fn window_plan(app_data: Option<&Path>, throwaway: &Path) -> WindowPlan {
+    match app_data {
+        Some(dir) => WindowPlan {
+            data_dir: crate::school_session::session_dir(dir),
+            incognito: false,
+            browser_args: Some(crate::school_session::SCHOOL_BROWSER_ARGS),
+            records_use: Some(crate::school_session::Use::CourseList),
+            wipe_on_destroy: false,
+        },
+        None => WindowPlan { data_dir: throwaway.to_path_buf(), incognito: true, browser_args: None, records_use: None, wipe_on_destroy: true },
+    }
 }
 
-/// **S3 stub: [`capture_calendar_link`]'s jar read and request behind a seam** (S3 test 3). The jar is
-/// queried for `cookie_url(window_url, feed)` and the one request goes to `feed`'s host, whatever
-/// `Domain` the cookies carry. S4b moves the real body here.
+/// **[`capture_calendar_link`]'s jar read and request** (S3 test 3). The jar is asked for
+/// `cookie_url(window_url, feed)` alone and the one request goes to `feed`, whatever `Domain` the
+/// cookies carry. `Ok` is the first feed link the body holds; `Err` is the capture's own failed answer.
+/// Validating and saving the link is the caller's ([`finish`]), so this reaches no network but `send`.
 pub fn read_feed_with(
-    _feed: &str,
-    _window_url: Option<&str>,
-    _query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
-    _send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
-) -> Value {
-    json!({ "ok": false })
+    feed: &str,
+    window_url: Option<&str>,
+    query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
+    send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+) -> Result<String, Value> {
+    if feed.parse::<tauri::Url>().is_err() {
+        return Err(capture_failed("the campus feed URL is not a URL"));
+    }
+    // The spike read them for the window's own current URL, having landed on the campus's institution
+    // page after SSO; `cookie_url` keeps that read and adds the one rule it was missing.
+    let jar = crate::school_session::cookie_header(&query_jar(&cookie_url(window_url, feed)));
+    match send(feed, &jar) {
+        Ok(text) => first_ics_link(&text).ok_or_else(|| {
+            // The commonest reason for a 200 with no link in it is a jar that does not authenticate
+            // the feed — the student is still part-way through signing in — so say that rather than
+            // "no calendar link was found", which reads as *your school has none*.
+            capture_failed("finish signing in to your school first, then try again — or paste the link below")
+        }),
+        Err(e) => Err(capture_failed(CaptureError::Unreachable(e))),
+    }
 }
 
-/// **S3 stub: [`capture_courses`]'s jar read, list request and term requests behind a seam** (S3 test
-/// 3): every request goes to the host the jar was queried for.
+/// **[`capture_courses`]'s jar read, list request and term requests** (S3 test 3): the jar is asked
+/// for `cookie_url(window_url, list_url)` alone, and the list and each term go to the host of `list_url`
+/// (`term_url` builds a term's address from the list's own origin), never to a cookie's `Domain`. Every
+/// failure is the same quiet [`no_courses`]. `send` answers within the limit its caller gives it: the
+/// list's thirty seconds, then each term's share of the budget.
 pub fn read_courses_with(
-    _list_url: &str,
-    _window_url: Option<&str>,
-    _query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
-    _send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+    list_url: &str,
+    window_url: Option<&str>,
+    query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
+    send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
 ) -> Value {
-    no_courses()
+    let jar_url = cookie_url(window_url, list_url);
+    if jar_url.parse::<tauri::Url>().is_err() {
+        return no_courses();
+    }
+    let jar = crate::school_session::cookie_header(&query_jar(&jar_url));
+    let Ok(body) = send(list_url, &jar) else { return no_courses() };
+    // A course that takes its dates from its term is current only while the term is: each distinct
+    // term of a course still standing is asked for once, within the budget above. A term that cannot
+    // be fetched, read or reached in time is a term that has not ended.
+    let now = jiff::Timestamp::now();
+    let started = std::time::Instant::now();
+    let mut ended = std::collections::BTreeMap::new();
+    for id in deferred_term_ids(&body, now).into_iter().take(TERM_FETCH_MAX) {
+        if term_fetch_limit(started.elapsed()).is_none() { break; }
+        let end = term_url(list_url, &id).and_then(|u| send(&u, &jar).ok()).and_then(|t| term_state(&t, now));
+        if let Some(end) = end { ended.insert(id, end); }
+    }
+    let courses = current_courses_from_json(&body, now, &ended);
+    if courses.is_empty() {
+        return no_courses();
+    }
+    json!({ "ok": true, "error": Value::Null, "courses": courses, "typed": false })
 }
 
 /// A capture that did not produce a link, in the **same keys `finish` uses** (R-C1-41, M4): a panel
@@ -450,34 +579,29 @@ pub fn capture_calendar_link(app: tauri::AppHandle, unitid: String) -> Value {
     };
     // The feed endpoint Task 13 recorded, fetched ONCE with the student's own session cookies. The
     // cookies live in this function's stack and nowhere else: never written, never logged, and gone
-    // when it returns.
+    // when it returns. The jar read and the request are [`read_feed_with`]'s: the jar is asked for the
+    // feed's host alone and the request goes to the feed.
     let feed = &steps[steps.len() - 1];
-    let Ok(url) = feed.parse::<tauri::Url>() else {
-        return capture_failed("the campus feed URL is not a URL");
-    };
-    // The spike read them for the window's own current URL, having landed on the campus's
-    // institution page after SSO; `cookie_url` keeps that read and adds the one rule it was missing.
-    let here = w.url().ok();
-    // Either the feed URL, which parsed above, or a window URL `cookie_url` only chose after parsing
-    // it — so the fallback here is unreachable rather than load-bearing.
-    let jar_url = cookie_url(here.as_ref().map(|u| u.as_str()), feed).parse::<tauri::Url>().unwrap_or(url);
-    let jar: String = match w.cookies_for_url(jar_url) {
-        Ok(cs) => cs.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "),
-        Err(e) => return capture_failed(format!("the sign-in could not be read ({e})")),
-    };
     let agent = session_agent();
-    let body = agent.get(feed.as_str()).header("cookie", &jar).call()
-        .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string())
-        .map_err(|e| e.to_string());
-    match body {
-        Ok(text) => match first_ics_link(&text) {
-            Some(found) => finish("lms_ics", &found),
-            // The commonest reason for a 200 with no link in it is a jar that does not authenticate
-            // the feed — the student is still part-way through signing in — so say that rather than
-            // "no calendar link was found", which reads as *your school has none*.
-            None => capture_failed("finish signing in to your school first, then try again — or paste the link below"),
+    let jar = crate::school_session::WindowJar::new(&w);
+    let here = w.url().ok();
+    let found = read_feed_with(
+        feed,
+        here.as_ref().map(|u| u.as_str()),
+        &mut |u| jar.query(u),
+        &mut |u, cookie| {
+            if jar.failed() { return Err("the sign-in could not be read".to_string()); }
+            agent.get(u).header("cookie", cookie).call()
+                .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string())
+                .map_err(|e| e.to_string())
         },
-        Err(e) => capture_failed(CaptureError::Unreachable(e)),
+    );
+    if jar.failed() {
+        return capture_failed("the sign-in could not be read");
+    }
+    match found {
+        Ok(link) => finish("lms_ics", &link),
+        Err(answer) => answer,
     }
 }
 
@@ -756,44 +880,36 @@ pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
     // The jar rule is Task 14's, not a second one (R-C1-41, I1): the window's own URL only while it
     // is on the endpoint's host, and the endpoint's otherwise — one host's live session is never
     // handed to another. The cookies live on this function's stack: never written, never logged,
-    // never formatted into an error, and gone when it returns.
-    let here = w.url().ok();
-    let Ok(jar_url) = cookie_url(here.as_ref().map(|u| u.as_str()), &url).parse::<tauri::Url>() else {
-        return no_courses();
-    };
-    let Ok(cookies) = w.cookies_for_url(jar_url) else { return no_courses() };
-    let jar: String = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
+    // never formatted into an error, and gone when it returns. [`read_courses_with`] holds that rule
+    // and sends the list and each term to the list's own host.
     let agent = session_agent();
-    // One GET through the window's own cookies, for the course list and for each term below.
-    let get = |u: &str, limit: Duration| -> Option<String> {
+    let jar = crate::school_session::WindowJar::new(&w);
+    let here = w.url().ok();
+    // One GET through the window's own cookies: the list gets thirty seconds, then each term what the
+    // term phase's budget has left (`read_courses_with` stops asking when it is spent).
+    let calls = std::cell::Cell::new(0u32);
+    let phase = std::cell::Cell::new(None::<std::time::Instant>);
+    let mut send = |u: &str, cookie: &str| -> Result<String, String> {
+        if jar.failed() { return Err("the sign-in could not be read".to_string()); }
+        let limit = if calls.get() == 0 {
+            Duration::from_secs(30)
+        } else {
+            let began = phase.get().unwrap_or_else(|| { let now = std::time::Instant::now(); phase.set(Some(now)); now });
+            term_fetch_limit(began.elapsed()).unwrap_or(Duration::from_secs(1))
+        };
+        calls.set(calls.get() + 1);
         agent
             .get(u)
             .config()
             .timeout_global(Some(limit))
             .build()
-            .header("cookie", &jar)
+            .header("cookie", cookie)
             .header("accept", "application/json")
             .call()
             .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string())
-            .ok()
+            .map_err(|e| e.to_string())
     };
-    let Some(body) = get(&url, Duration::from_secs(30)) else { return no_courses() };
-    // A course that takes its dates from its term is current only while the term is: each distinct
-    // term of a course still standing is asked for once, within the budget above. A term that cannot
-    // be fetched, read or reached in time is a term that has not ended.
-    let now = jiff::Timestamp::now();
-    let started = std::time::Instant::now();
-    let mut ended = std::collections::BTreeMap::new();
-    for id in deferred_term_ids(&body, now).into_iter().take(TERM_FETCH_MAX) {
-        let Some(limit) = term_fetch_limit(started.elapsed()) else { break };
-        let end = term_url(&url, &id).and_then(|u| get(&u, limit)).and_then(|t| term_state(&t, now));
-        if let Some(end) = end { ended.insert(id, end); }
-    }
-    let courses = current_courses_from_json(&body, now, &ended);
-    if courses.is_empty() {
-        return no_courses();
-    }
-    json!({ "ok": true, "error": Value::Null, "courses": courses, "typed": false })
+    read_courses_with(&url, here.as_ref().map(|u| u.as_str()), &mut |u| jar.query(u), &mut send)
 }
 
 /// **The account is the only writer of this URL from C3′ on** (amendment 2026-09-17, ruling 2, and
