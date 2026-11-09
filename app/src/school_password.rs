@@ -27,7 +27,22 @@ use std::path::{Path, PathBuf};
 /// A save's or a Forget's answer while this profile's lock is held: nothing was written or cleared.
 pub const BUSY: &str = "Knowlu is signing in to your school right now. Try again in a moment.";
 const WRITE_FAILED: &str = "Knowlu couldn't save your school password on this device.";
-const CLEAR_FAILED: &str = "Your school password is saved, but Knowlu couldn't clear an earlier sign-in that didn't finish, so it won't use the password yet. Save it again.";
+/// A save refused before anything is touched (contract review r1, Important 1). Fixed words: none
+/// carries any part of what was typed.
+pub const EMPTY_USERNAME: &str = "Type your school username.";
+pub const EMPTY_PASSWORD: &str = "Type your school password.";
+pub const BAD_CHARACTER: &str = "That username or password has a character Knowlu can't save.";
+pub const USERNAME_TOO_LONG: &str = "That username is too long to save on this device.";
+pub const PASSWORD_TOO_LONG: &str = "That password is too long to save on this device.";
+/// `CRED_MAX_USERNAME_LENGTH`, and `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2560 bytes) in UTF-16 units: the
+/// store's own limits, counted in its own units.
+const MAX_USERNAME_UNITS: usize = 513;
+const MAX_PASSWORD_UNITS: usize = 1280;
+/// A save whose credential was written but whose old mark could not be cleared (review r1, Minor 7):
+/// each names the mark that stays, and the password is not used until a save clears it.
+pub const CLEAR_REJECTED_FAILED: &str = "Your school password is saved, but Knowlu couldn't lift the pause from the last password that didn't sign in, so it won't use the new one yet. Save it again.";
+pub const CLEAR_IN_FLIGHT_FAILED: &str = "Your school password is saved, but Knowlu couldn't clear an earlier sign-in that never finished, so it won't use the new one yet. Save it again.";
+pub const CLEAR_BOTH_FAILED: &str = "Your school password is saved, but Knowlu couldn't lift the pause from the last password that didn't sign in or clear an earlier sign-in that never finished, so it won't use the new one yet. Save it again.";
 const READ_FAILED: &str = "Knowlu couldn't read the saved school password.";
 const NOT_HELD: &str = "the school sign-in lock handed over is another profile's";
 
@@ -203,10 +218,30 @@ fn held(profile_id: &str, lock: &SessionGuard) -> bool {
     lock.profile_id() == profile_id
 }
 
-/// Takes `school_session::try_take(profile_id)` (`busy` when `None`, nothing written), writes the
-/// credential, then clears both marks. Reply: `{"ok": bool, "busy": bool, "error": string|null}`,
+/// Why the store could not hold these values, or `None`. Blank means only whitespace (the check trims;
+/// what is stored never is), so an empty save can never end a rejection pause.
+fn refusal(username: &str, password: &str) -> Option<&'static str> {
+    let units = |s: &str| s.encode_utf16().count();
+    if username.trim().is_empty() {
+        Some(EMPTY_USERNAME)
+    } else if password.trim().is_empty() {
+        Some(EMPTY_PASSWORD)
+    } else if username.contains('\0') || password.contains('\0') {
+        Some(BAD_CHARACTER)
+    } else if units(username) > MAX_USERNAME_UNITS {
+        Some(USERNAME_TOO_LONG)
+    } else if units(password) > MAX_PASSWORD_UNITS {
+        Some(PASSWORD_TOO_LONG)
+    } else {
+        None
+    }
+}
+
+/// Refuses values the store cannot hold, by name and before the lock, touching nothing. Then takes
+/// `school_session::try_take(profile_id)` (`busy` when `None`, nothing written), writes the credential
+/// exactly as typed, then clears both marks. Reply: `{"ok": bool, "busy": bool, "error": string|null}`,
 /// never a secret. Both clears run; one that fails leaves its old mark, which blocks the new password
-/// (fails safe), and the reply is not ok, so the student is asked again.
+/// (fails safe), and the reply names that mark and is not ok, so the student is asked again.
 pub fn save_with(
     store: &dyn SchoolStore,
     marks: &dyn SchoolMarks,
@@ -215,15 +250,19 @@ pub fn save_with(
     password: &str,
 ) -> Value {
     let reply = |ok: bool, busy: bool, error: Option<&str>| json!({ "ok": ok, "busy": busy, "error": error });
+    if let Some(why) = refusal(username, password) {
+        return reply(false, false, Some(why));
+    }
     let Some(_held) = try_take(profile_id) else { return reply(false, true, Some(BUSY)) };
     if store.write(&target(profile_id), username, password).is_err() {
         return reply(false, false, Some(WRITE_FAILED));
     }
-    let (rejected, in_flight) = (marks.clear_rejected(), marks.clear_in_flight());
-    if rejected.is_err() || in_flight.is_err() {
-        return reply(false, false, Some(CLEAR_FAILED));
+    match (marks.clear_rejected().is_err(), marks.clear_in_flight().is_err()) {
+        (false, false) => reply(true, false, None),
+        (true, false) => reply(false, false, Some(CLEAR_REJECTED_FAILED)),
+        (false, true) => reply(false, false, Some(CLEAR_IN_FLIGHT_FAILED)),
+        (true, true) => reply(false, false, Some(CLEAR_BOTH_FAILED)),
     }
-    reply(true, false, None)
 }
 
 /// The secret, read only while the caller holds this profile's lock (`lock`, checked). `None` when none is
