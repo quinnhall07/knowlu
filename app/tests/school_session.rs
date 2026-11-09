@@ -489,3 +489,70 @@ fn school_forget_deletes_the_legacy_folder_and_clears_grades_signed_out_mark() {
     assert!(!d.join("grades-signed-out").exists(), "grades' signed-out mark is cleared, as grades' own Forget does");
     assert_eq!(status_with(&d, None)["folder"], serde_json::json!(false), "nothing kept afterwards");
 }
+
+// ---- review of 2ea88a20..36114ae5: Forget waits a bounded time for a window's lock (Important 2, Minor 3) ----
+//
+// The course-list window holds the profile lock until its Destroyed event runs on the event loop, so a
+// Forget that has just destroyed the windows retries Busy every 250 ms, eight times (two seconds). The
+// wait is injected, so no test sleeps.
+use knowlu::school_session::{school_forget_retrying, FORGET_RETRIES};
+use std::cell::Cell;
+
+#[test]
+fn school_forget_retries_a_busy_lock_until_the_window_lets_go() {
+    let profile = "profile_s6retry1";
+    let (d, fake) = forget_setup("forget-retry", profile);
+    let held = std::cell::RefCell::new(Some(try_take(profile).expect("free")));
+    let pauses = Cell::new(0u32);
+    let mut closed = 0;
+    let reply = school_forget_retrying(
+        &d,
+        profile,
+        &fake,
+        &fake,
+        &mut |_| closed += 1,
+        &mut || {
+            pauses.set(pauses.get() + 1);
+            if pauses.get() == 3 {
+                held.borrow_mut().take(); // the Destroyed event ran: the window's guard drops
+            }
+        },
+        &mut |id| try_take(id),
+    );
+    assert_eq!(reply["ok"], serde_json::json!(true), "the third try finds the lock free: {reply}");
+    assert_eq!(pauses.get(), 3, "it waited only as long as it had to");
+    assert_eq!(closed, 2, "the windows were closed once, not again on each try");
+    assert!(fake.entries.borrow().is_empty() && !session_dir(&d).exists(), "everything was forgotten");
+}
+
+#[test]
+fn school_forget_gives_up_after_two_seconds_of_busy_with_nothing_deleted() {
+    let profile = "profile_s6retry2";
+    let (d, fake) = forget_setup("forget-giveup", profile);
+    let _held = try_take(profile).expect("free");
+    let pauses = Cell::new(0u32);
+    let reply = school_forget_retrying(&d, profile, &fake, &fake, &mut |_| {}, &mut || pauses.set(pauses.get() + 1), &mut |id| try_take(id));
+    assert_eq!(reply["ok"], serde_json::json!(false), "{reply}");
+    assert_eq!(reply["error"], serde_json::json!(knowlu::school_password::BUSY), "plainly Busy: {reply}");
+    assert_eq!(pauses.get(), FORGET_RETRIES, "a bounded wait");
+    assert_eq!(FORGET_RETRIES, 8, "eight pauses of 250 ms is two seconds");
+    assert!(fake.entries.borrow().contains_key(&target(profile)), "the password is untouched");
+    assert!(session_dir(&d).exists(), "the folder is untouched");
+}
+
+#[test]
+fn school_forget_says_the_password_is_forgotten_when_only_the_folders_lock_stays_busy() {
+    let profile = "profile_s6retry3";
+    let (d, fake) = forget_setup("forget-second-busy", profile);
+    let pauses = Cell::new(0u32);
+    // P1's forget_with takes its own lock and succeeds; the guard for the folder is then never free.
+    let reply = school_forget_retrying(&d, profile, &fake, &fake, &mut |_| {}, &mut || pauses.set(pauses.get() + 1), &mut |_| None);
+    assert_eq!(reply["ok"], serde_json::json!(false), "{reply}");
+    let error = reply["error"].as_str().expect("an error line").to_lowercase();
+    assert!(error.contains("password") && error.contains("forgot"), "it says the password was forgotten: {reply}");
+    assert!(error.contains("in use"), "and that the sign-in is in use right now: {reply}");
+    assert_ne!(reply["error"], serde_json::json!(knowlu::school_password::BUSY), "not a plain Busy: {reply}");
+    assert_eq!(pauses.get(), FORGET_RETRIES, "the same bounded wait");
+    assert!(fake.entries.borrow().is_empty(), "the password really is gone");
+    assert!(session_dir(&d).exists(), "the folder is still there");
+}

@@ -351,6 +351,23 @@ pub fn school_forget_with(
     marks: &dyn crate::school_password::SchoolMarks,
     close_window: &mut dyn FnMut(&str),
 ) -> Value {
+    school_forget_retrying(data_dir, profile_id, store, marks, close_window, &mut || {}, &mut |id| try_take(id))
+}
+
+/// Eight pauses of 250 ms: how long Forget waits for a window's lock to drop.
+pub const FORGET_RETRIES: u32 = 8;
+
+/// STUB (review fix): [`school_forget_with`] with the wait and the folder's guard injected. The body so
+/// far does not retry.
+pub fn school_forget_retrying(
+    data_dir: &Path,
+    profile_id: &str,
+    store: &dyn crate::school_password::SchoolStore,
+    marks: &dyn crate::school_password::SchoolMarks,
+    close_window: &mut dyn FnMut(&str),
+    _pause: &mut dyn FnMut(),
+    take: &mut dyn FnMut(&str) -> Option<SessionGuard>,
+) -> Value {
     let reply = |ok: bool, error: Option<String>| json!({ "ok": ok, "error": error });
     for label in crate::account::SCHOOL_WINDOWS {
         close_window(label);
@@ -362,7 +379,7 @@ pub fn school_forget_with(
         }
         first_error = Some(e);
     }
-    let Some(_held) = try_take(profile_id) else {
+    let Some(_held) = take(profile_id) else {
         return reply(false, Some(crate::school_password::BUSY.to_string()));
     };
     if let Err(e) = forget(data_dir) {
