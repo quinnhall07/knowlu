@@ -1730,3 +1730,5 @@ mod block_tests;
 mod class_search_tests;
 #[cfg(test)]
 mod adopt_tests;
+#[cfg(test)]
+mod ended_note_tests;

@@ -26,13 +26,15 @@ const ABSENT: &str = "commitments/cs-100-absent.md";
 const SPRING_NOTE: &str = "commitments/cs-100-spring.md";
 const XX_NOTE: &str = "commitments/cs-100-xx.md";
 
-/// A confirmed note as a real `--confirm` mints it (`create_confirmed_as`): the key's line
-/// unquoted, `status` then `confirmed_at` last. [`lab_with`] gives it the student's create record.
+/// A confirmed note with the fields a real `--confirm` writes, in `create_confirmed_as`'s order:
+/// `meets`, `where`, `from` (the row's first date), `until`, then the key's line unquoted, `status`
+/// and `confirmed_at`. The quoting of the other scalars is this file's own; the engine reads either.
+/// [`lab_with`] gives it the student's create record.
 fn front(id: &str, key: &str, kind: &str, meets: &str) -> String {
     format!(
         "id: {id}\ntype: commitment\nkind: {kind}\nlevel: hard\ntitle: \"CS 100 Invented\"\ncourse: cs-100\n\
-         meets: [{meets}]\nuntil: 2026-12-04\nwhere: \"Invented Hall 101\"\nsource_uid: {key}\nstatus: confirmed\n\
-         confirmed_at: 2026-08-31\n"
+         meets: [{meets}]\nwhere: \"Invented Hall 101\"\nfrom: 2026-08-19\nuntil: 2026-12-04\nsource_uid: {key}\n\
+         status: confirmed\nconfirmed_at: 2026-08-31\n"
     )
 }
 
