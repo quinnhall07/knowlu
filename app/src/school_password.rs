@@ -64,10 +64,18 @@ pub enum DeleteError {
     Failed(String),
 }
 
-/// A delete counts as done when it removed the credential or the store answered not-found.
-fn gone(deleted: Result<(), DeleteError>) -> Result<(), String> {
-    match deleted {
-        Ok(()) | Err(DeleteError::NotFound) => Ok(()),
+/// A not-found delete that `exists` contradicts: the password is still saved.
+const STILL_SAVED: &str = "Knowlu couldn't delete the saved school password; try again in a moment.";
+
+/// Deletes `target`. It counts as done when the credential was removed, or the store answered
+/// not-found and `exists` agrees. Only a false `exists` is unreliable (`credentials::exists` reads false
+/// on any read error); a true one means the password is still there, so a not-found it contradicts is
+/// a failure and never a "forgotten" password left in use (re-review of 807ed978..a74cbe7b, Minor 3).
+fn removed(store: &dyn SchoolStore, target: &str) -> Result<(), String> {
+    match store.delete(target) {
+        Ok(()) => Ok(()),
+        Err(DeleteError::NotFound) if store.exists(target) => Err(STILL_SAVED.to_string()),
+        Err(DeleteError::NotFound) => Ok(()),
         Err(DeleteError::Failed(e)) => Err(e),
     }
 }
@@ -299,27 +307,31 @@ pub fn gate_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id: &
     Ok(read_with(store, profile_id, lock)?.map_or(Gate::NoPassword, Gate::Fill))
 }
 
-/// Sets the rejected mark, then deletes the saved password; each runs even if the other fails, and the
-/// store's own not-found is not a failure (a failed delete always is). Called only inside a fill, which
-/// holds the lock (`_lock`, the controller's ruling). It never refuses on the lock: a refused rejection
-/// would leave a rejected password saved, ready to be sent again.
+/// Sets the rejected mark, then deletes the saved password; each runs even if the other fails. A
+/// not-found is not a failure unless `exists` still finds the password ([`removed`]); a failed delete
+/// always is. Called only inside a fill, which holds the lock (`_lock`, the controller's ruling). It
+/// never refuses on the lock: a refused rejection would leave a rejected password saved, ready to be
+/// sent again.
 pub fn reject_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id: &str, _lock: &SessionGuard) -> Result<(), String> {
     let marked = marks.set_rejected();
-    both(marked, gone(store.delete(&target(profile_id))))
+    both(marked, removed(store, &target(profile_id)))
 }
 
 /// Forget (S6a's `school_forget`; it takes the lock itself, so the caller must not hold it): `Err(BUSY)`
 /// when held, nothing touched. The credential is deleted first. Only a delete that succeeded clears both
-/// marks. The store's own not-found clears the in-flight mark only and keeps the rejected one, since a
-/// spurious not-found under load may leave a password behind and the gate then shows the form. A failed
-/// delete clears nothing and is the error (`credentials::delete`'s sentence: the target, never the secret).
+/// marks. A not-found that `exists` still contradicts is a failure (the password is still there) and
+/// clears nothing. A not-found `exists` agrees with clears the in-flight mark only and keeps the
+/// rejected one, since a false `exists` is no proof and the gate then shows the form. A failed delete
+/// clears nothing and is the error (`credentials::delete`'s sentence: the target, never the secret).
 pub fn forget_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id: &str) -> Result<(), String> {
     let Some(_held) = try_take(profile_id) else { return Err(BUSY.to_string()) };
-    match store.delete(&target(profile_id)) {
+    let t = target(profile_id);
+    match store.delete(&t) {
         Ok(()) => {
             let rejected = marks.clear_rejected();
             both(rejected, marks.clear_in_flight())
         }
+        Err(DeleteError::NotFound) if store.exists(&t) => Err(STILL_SAVED.to_string()),
         Err(DeleteError::NotFound) => marks.clear_in_flight(),
         Err(DeleteError::Failed(e)) => Err(e),
     }
@@ -351,18 +363,19 @@ pub fn retarget_with(
     }
     let Some(_held) = try_take(from_id) else { return Err(BUSY.to_string()) };
     let rejected = from_marks.rejected();
-    let carried = if rejected { to_marks.set_rejected() } else { Ok(()) };
     let old = target(from_id);
-    if !store.exists(&old) {
-        return carried.map(|()| 0);
-    }
     if rejected || from_marks.in_flight() {
-        return both(carried, gone(store.delete(&old))).map(|()| 0);
+        // A marked password's delete is always tried, never skipped on `exists`: a false one is no proof.
+        let carried = if rejected { to_marks.set_rejected() } else { Ok(()) };
+        return both(carried, removed(store, &old)).map(|()| 0);
+    }
+    if !store.exists(&old) {
+        return Ok(0);
     }
     let (username, password) = store.read(&old).map_err(|_| READ_FAILED.to_string())?;
     store.write(&target(to_id), &username, &password).map_err(|_| WRITE_FAILED.to_string())?;
     // Only after the new one is safely written, as `retarget_credentials` does for the coursework logins.
-    gone(store.delete(&old))?;
+    removed(store, &old)?;
     Ok(1)
 }
 
