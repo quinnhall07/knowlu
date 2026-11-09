@@ -980,19 +980,32 @@ pub fn read_snapshot(path: &Path) -> BTreeMap<String, Vec<CalEvent>> {
         .collect()
 }
 
+/// A calendar feed URL is a bearer link to the student's calendar, and a fetch error string
+/// reaches stdout and the app's run output. Redact the link whole (raw, percent-encoded and
+/// JSON-escaped, via `zybooks::scrub`) and also its path-and-query tail, the part that carries
+/// the token, in case a message quotes it without the scheme and host.
+fn scrub_fetch_error(message: &str, url: &str) -> String {
+    let tail = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+        .filter(|t| t.len() > 1)
+        .unwrap_or("");
+    crate::zybooks::scrub(message, &[url, tail])
+}
+
 /// Fetch a calendar feed. Decoding is lossy, matching Python's `errors="replace"`.
 pub fn fetch_ics(url: &str) -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
         .into();
-    let mut response = agent.get(url).call().map_err(|e| e.to_string())?;
+    let mut response = agent.get(url).call().map_err(|e| scrub_fetch_error(&e.to_string(), url))?;
     let bytes = response
         .body_mut()
         .with_config()
         .limit(u64::MAX)
         .read_to_vec()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| scrub_fetch_error(&e.to_string(), url))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -2514,5 +2527,58 @@ mod reference {
         let (events, _) = parse_calendar_ics(&text, &tz, date(2026, 9, 7), HORIZON_DAYS);
         let restored = read_snapshot(Path::new("tests/fixtures/calendar-snapshot-gcal.md"));
         assert_eq!(restored["personal"], events);
+    }
+
+    /// A calendar feed URL is a bearer link: whatever the transport says about a failed fetch, the
+    /// link and its token never appear in the error that reaches stdout and the run output.
+    #[test]
+    fn a_failed_feed_fetch_never_names_the_feed_url_or_its_token() {
+        use std::io::{Read, Write};
+        // 1. A loopback listener that answers with an error status.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.1 404 Not Found
+Content-Length: 0
+Connection: close
+
+");
+            }
+        });
+        let status_url = format!("http://127.0.0.1:{port}/calendar/ical/SECRETTOKEN123/basic.ics?key=QUERYTOKEN456");
+        // 2. A URL ureq cannot send at all (unsupported scheme), with the token in path and query.
+        let scheme_url = "gopher://calendar.invalid/ical/SECRETTOKEN123/basic.ics?key=QUERYTOKEN456".to_string();
+        // 3. A malformed URL.
+        let bad_url = "http://[::1/ical/SECRETTOKEN123/basic.ics?key=QUERYTOKEN456".to_string();
+        for url in [&status_url, &scheme_url, &bad_url] {
+            let err = fetch_ics(url).expect_err("the fetch fails");
+            eprintln!("fetch_ics error for {url}: {err}");
+            for secret in [url.as_str(), "SECRETTOKEN123", "QUERYTOKEN456", "basic.ics"] {
+                assert!(!err.contains(secret), "the error leaks {secret:?}: {err}");
+            }
+        }
+        let _ = server.join();
+    }
+
+    /// ureq 3.4 happens not to echo the URL today; the scrub is the guarantee for the day a
+    /// transport, redirect or URL-parse error does. A message that names the link whole, as its
+    /// path and query alone, or percent-encoded loses all of it.
+    #[test]
+    fn a_feed_error_message_is_scrubbed_of_the_url_and_its_token_bearing_tail() {
+        let url = "https://calendar.example.test/ical/SECRETTOKEN123/basic.ics?key=QUERYTOKEN456";
+        for message in [
+            format!("connection failed for {url}"),
+            "bad uri: /ical/SECRETTOKEN123/basic.ics?key=QUERYTOKEN456".to_string(),
+            "redirected to https%3A%2F%2Fcalendar.example.test%2Fical%2FSECRETTOKEN123%2Fbasic.ics%3Fkey%3DQUERYTOKEN456".to_string(),
+        ] {
+            let out = scrub_fetch_error(&message, url);
+            for secret in [url, "SECRETTOKEN123", "QUERYTOKEN456"] {
+                assert!(!out.contains(secret), "{secret:?} survives in {out:?}");
+            }
+        }
+        assert_eq!(scrub_fetch_error("http status: 404", url), "http status: 404", "a message without the link is untouched");
     }
 }
