@@ -1418,6 +1418,41 @@
       return gradesStatus();
     }).catch(function () {});
   });
+  // S6b: the one school sign-in row. It shows at a curated (shared) school, where school_status
+  // returns a label; there it stands in for grades' own Forget button.
+  var SCHOOL = { uses: [] };
+  var SCHOOL_USE_WORDS = { grades: "grades", course_list: "your course list" };
+  var SCHOOL_USE_AGAIN = { grades: "Grades", course_list: "Your course list" };
+  function schoolWords(uses) {
+    var w = uses.map(function (u) { return SCHOOL_USE_WORDS[u]; }).filter(Boolean);
+    if (w.length === 2 && uses.indexOf("grades") >= 0) { return "School sign-in: kept on this computer, used for grades and your course list"; }
+    return "School sign-in: kept on this computer" + (w.length ? ", used for " + w.join(" and ") : "");
+  }
+  function schoolRow() {
+    return invoke("school_status", {}).then(function (s) {
+      var shared = !!(s && s.label), has = !!(s && s.folder);
+      SCHOOL.uses = (s && s.uses) || [];
+      EL("set-school").hidden = !shared;
+      EL("set-grades").hidden = shared;
+      EL("set-school-state").textContent = has ? schoolWords(SCHOOL.uses) : "School sign-in: not connected";
+      EL("set-school-connect").hidden = has;
+      EL("set-school-forget").hidden = !has;
+    }).catch(function () { EL("set-school").hidden = true; EL("set-grades").hidden = false; });
+  }
+  EL("set-school-connect").addEventListener("click", function () {
+    invoke("grades_connect", {}).then(function (r) {
+      EL("set-school-note").textContent = r && r.ok === false ? String(r.error || "") : "";
+      return schoolRow();
+    }).catch(function () {});
+  });
+  EL("set-school-forget").addEventListener("click", function () {
+    var uses = SCHOOL.uses, again = uses.map(function (u) { return SCHOOL_USE_AGAIN[u]; }).filter(Boolean);
+    if (!confirm("Forget your school sign-in?" + (again.length ? " You will need to sign in again for: " + again.join(", ") + "." : " You will need to sign in again."))) { return; }
+    invoke("school_forget", {}).then(function (r) {
+      EL("set-school-note").textContent = r && r.ok === false ? String(r.error || "") : "forgotten";
+      return Promise.all([schoolRow(), gradesStatus()]);
+    }).catch(function () {});
+  });
   // Hide grades (spec §2, §9): a settings row like Start with Windows, through set_settings; the
   // flag lives in grades.json, and the strip follows grades_status's `hidden`.
   EL("set-grades-hide-in").addEventListener("change", function () {
@@ -2860,7 +2895,7 @@
     maybeReconsent(); owedSettings();
     loadPrefs(); loadInterests();
     checkAccount();
-    gradesStatus();
+    gradesStatus(); schoolRow();
     mailSettingsRow();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
