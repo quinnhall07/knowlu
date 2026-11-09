@@ -26,11 +26,13 @@ const ABSENT: &str = "commitments/cs-100-absent.md";
 const SPRING_NOTE: &str = "commitments/cs-100-spring.md";
 const XX_NOTE: &str = "commitments/cs-100-xx.md";
 
-/// A confirmed note exactly as the class-search confirm would mint it: the lecture's own times.
+/// A confirmed note as a real `--confirm` mints it (`create_confirmed_as`): the key's line
+/// unquoted, `status` then `confirmed_at` last. [`lab_with`] gives it the student's create record.
 fn front(id: &str, key: &str, kind: &str, meets: &str) -> String {
     format!(
         "id: {id}\ntype: commitment\nkind: {kind}\nlevel: hard\ntitle: \"CS 100 Invented\"\ncourse: cs-100\n\
-         meets: [{meets}]\nuntil: 2026-12-04\nwhere: \"Invented Hall 101\"\nsource_uid: \"{key}\"\nstatus: confirmed\n"
+         meets: [{meets}]\nuntil: 2026-12-04\nwhere: \"Invented Hall 101\"\nsource_uid: {key}\nstatus: confirmed\n\
+         confirmed_at: 2026-08-31\n"
     )
 }
 
@@ -46,10 +48,26 @@ fn lab(id: &str, key: &str) -> String {
     front(id, key, "lab", "{days: [tue, thu], start: \"14:00\", end: \"15:50\"}")
 }
 
+/// Each note is planted as `--confirm` leaves it: the file, and a `create` record by the student
+/// via `dashboard` (`Lab::plant_note`'s is the card actor's, which no class-search note has).
+/// Written directly, as `plant_note` does, so a note `write` would refuse (the failed re-key's)
+/// is planted the same way.
 fn lab_with(name: &str, notes: &[(&str, String)]) -> Lab {
     let lab = Lab::new(name, "2026-08-31");
-    for (file, text) in notes {
-        lab.plant_note(file, text);
+    std::fs::create_dir_all(lab.path("commitments")).unwrap();
+    let student = lab.ctx();
+    for (file, front) in notes {
+        let rel = format!("commitments/{file}");
+        let text = format!("---\n{front}---\n\nFound in your school's public class search.\n");
+        crate::pystr::write_text(&lab.path(&rel), &text).unwrap();
+        let (meta, _) = crate::models::split_frontmatter(&text).unwrap();
+        let id = crate::yaml::get(&meta, "id").and_then(crate::yaml::text).unwrap();
+        let mut spec = crate::journal::NewRecord::new("create", &rel, &student.actor, &student.via);
+        spec.id = Some(&id);
+        spec.new = crate::yaml::to_json(&serde_yaml_ng::Value::Mapping(meta));
+        spec.ts = Some("2026-08-31T13:00:00.000Z".into());
+        let mut rec = crate::journal::make_record(spec).unwrap();
+        crate::journal::Journal::new(&lab.v).append(&mut rec).unwrap();
     }
     lab
 }
@@ -111,14 +129,19 @@ fn the_actor_of_a_rekey_is_an_agent() {
     assert!(actor.starts_with("agent:") && crate::provenance::is_agent(&actor), "{actor}");
 }
 
-/// Single-line surgery: with an unchanged row, the only byte of the note that moves is the
-/// `source_uid` line (same quoting), and the id and the create record's `new` are untouched.
+/// Single-line surgery: with an unchanged row, the only line of the note that moves is the
+/// `source_uid` line. Its new value goes through `write::to_literal`, which may quote it where the
+/// minted line was plain; that is a legitimate re-key. The id is untouched.
 #[test]
 fn the_rekey_changes_the_source_uid_line_and_nothing_else() {
     let lab = lab_with("adopt-surgery", &[("cs-100.md", lecture("cmt_00000000e1", CS_LECTURE))]);
     let before = lab.note(LECTURE);
     lab.fetch(D10, &fx());
-    assert_eq!(lab.note(LECTURE), before.replace(CS_LECTURE, REG_LECTURE));
+    let literal = crate::write::to_literal(&serde_yaml_ng::Value::String(REG_LECTURE.to_string()));
+    // The vault's own line ending (CRLF) follows the value either way.
+    let expected = before.replace(&format!("source_uid: {CS_LECTURE}\r"), &format!("source_uid: {literal}\r"));
+    assert_ne!(expected, before, "the minted line was found");
+    assert_eq!(lab.note(LECTURE), expected);
     assert!(!lab.note(LECTURE).contains("classsearch"));
     let others: Vec<String> =
         lab.journal().into_iter().filter(|r| r["path"] == LECTURE && r["op"] == "set").map(|r| r["field"].as_str().unwrap().to_string()).collect();
@@ -221,6 +244,7 @@ fn a_section_the_answer_lacks_is_rekeyed_then_ended_and_listed() {
     assert_eq!(of_note(&list(&report, "ended"), ABSENT).len(), 1, "{report}");
     assert!(lab.sets(ABSENT, "until").iter().all(|(actor, _, _)| actor == ACTOR));
     assert_eq!(lab.notes_with("49999"), [ABSENT]);
+    assert_eq!(lab.notes_with("40001").len(), 1, "R24 makes the real section's note");
 }
 
 // ---- a failed re-key ---------------------------------------------------------------------------
@@ -229,7 +253,8 @@ fn a_section_the_answer_lacks_is_rekeyed_then_ended_and_listed() {
 /// keeps its class-search key, R24 skips that CRN, and there is never a second note for it.
 #[test]
 fn a_failed_rekey_is_a_warning_and_leaves_one_note() {
-    let bad = format!("{}judgment: not a flow mapping\n", lecture("cmt_00000000e1", CS_LECTURE));
+    // Times unlike row 40001's, so only R24's skip (not an equal signature) stops a second note.
+    let bad = format!("{}judgment: not a flow mapping\n", front("cmt_00000000e1", CS_LECTURE, "class", MWF_ELEVEN));
     let lab = lab_with("adopt-failed", &[("cs-100.md", bad)]);
     let report = lab.fetch(D10, &fx());
     let warnings: Vec<String> = list(&report, "warnings").iter().filter_map(|w| w.as_str().map(String::from)).collect();
@@ -244,7 +269,8 @@ fn a_failed_rekey_is_a_warning_and_leaves_one_note() {
 /// R24 makes no second note for the CRN.
 #[test]
 fn a_source_uid_the_student_set_is_never_rekeyed() {
-    let lab = lab_with("adopt-yours", &[("cs-100.md", lecture("cmt_00000000e1", "manual:cs-100"))]);
+    // Times unlike row 40001's, so only R24's skip (not an equal signature) stops a second note.
+    let lab = lab_with("adopt-yours", &[("cs-100.md", front("cmt_00000000e1", "manual:cs-100", "class", MWF_ELEVEN))]);
     lab.hand_set(LECTURE, "source_uid", &format!("\"{CS_LECTURE}\""));
     let before = lab.note(LECTURE);
     let report = lab.fetch(D10, &fx());
@@ -253,6 +279,20 @@ fn a_source_uid_the_student_set_is_never_rekeyed() {
     let warning = format!("registrar: {LECTURE}: source_uid kept yours; the class-search note was not adopted");
     assert!(list(&report, "warnings").contains(&json!(warning)), "{report}");
     assert_eq!(lab.notes_with("40001"), [LECTURE], "R24 made a second note for the CRN");
+}
+
+/// A note the student created (every `--confirm` note is) is still adopted: its `create` record is
+/// the student's, which `human_set` counts and `human_edited` does not, so judge once reads only a
+/// later `set` of `source_uid` as the student's.
+#[test]
+fn a_note_the_student_created_is_still_adopted() {
+    let lab = lab_with("adopt-created", &[("cs-100.md", lecture("cmt_00000000e1", CS_LECTURE))]);
+    let mut journal = crate::journal::Journal::new(&lab.v);
+    assert!(journal.human_set("cmt_00000000e1", "source_uid").is_some(), "the create record is the student's");
+    assert!(journal.human_edited("cmt_00000000e1", "source_uid").is_none());
+    lab.fetch(D10, &fx());
+    assert_eq!(lab.loaded(LECTURE).source_uid.as_deref(), Some(REG_LECTURE));
+    assert_eq!(rekeys(&lab).len(), 1);
 }
 
 // ---- determinism, and a second run -------------------------------------------------------------

@@ -2954,6 +2954,20 @@ fn minutes(time: Time) -> i64 {
     i64::from(time.hour()) * 60 + i64::from(time.minute())
 }
 
+/// Replan §6.6 step 2 (C2c review): the term calendar of a `registrar:` note the registrar has
+/// ended (`until` before `today`; `RegistrarHold` stops counting it at the same day). Such a note
+/// closes no row of that calendar by signature, in [`proposals`] and in [`confirm`], so R24 can
+/// make the real section's note. It closes every other row as before.
+fn ended_registrar_term(n: &Commitment, today: Date) -> Option<&str> {
+    let key = n.source_uid.as_deref().filter(|k| k.starts_with(crate::registrar::CALENDAR_PREFIX))?;
+    n.until.is_some_and(|until| until < today).then(|| key.rsplit_once('-').map(|(calendar, _)| calendar))?
+}
+
+/// Whether `key` is a row of `calendar` (`<calendar>-<crn>`).
+fn of_calendar(key: &str, calendar: &str) -> bool {
+    key.strip_prefix(calendar).is_some_and(|crn| crn.starts_with('-'))
+}
+
 /// §3.5's proposals, pure (no clock, no I/O, no model), in `source_uid` order, over
 /// [`SeriesFile::by_key`] so one key is one proposal whichever calendars hold it.
 ///
@@ -2993,7 +3007,15 @@ pub fn proposals(
         .filter_map(|n| n.source_uid.as_deref())
         .chain(set.declined.iter().map(String::as_str))
         .collect();
-    let mut closed: BTreeSet<Signature> = set.confirmed.iter().map(|n| n.signature(codes)).collect();
+    // C2c review: an ended registrar note closes by signature only rows outside its own term.
+    let mut ended: BTreeMap<Signature, BTreeSet<&str>> = BTreeMap::new();
+    for n in &set.confirmed {
+        if let Some(calendar) = ended_registrar_term(n, today) {
+            ended.entry(n.signature(codes)).or_default().insert(calendar);
+        }
+    }
+    let mut closed: BTreeSet<Signature> =
+        set.confirmed.iter().filter(|n| ended_registrar_term(n, today).is_none()).map(|n| n.signature(codes)).collect();
     // Final review I1 (a), per kind: a `(kind, course)` the registrar holds gets no proposal of
     // that kind for that course from any other calendar, whatever its times (D7). A registrar
     // lecture leaves a Google lab of the same course proposed. One predicate ([`RegistrarHold`])
@@ -3030,6 +3052,10 @@ pub fn proposals(
     let mut chosen: BTreeMap<Signature, (&Series, String, Option<String>)> = BTreeMap::new();
     for (sig, by_title, series, kind, course) in candidates {
         if closed.contains(&sig) || closed.contains(&by_title) {
+            continue;
+        }
+        let ended_closes = |s: &Signature| ended.get(s).is_some_and(|terms| terms.iter().any(|t| !of_calendar(&series.source_uid, t)));
+        if ended_closes(&sig) || ended_closes(&by_title) {
             continue;
         }
         if registrar_held.holds(Source::by_calendar(&series.calendar), &kind, course.as_deref(), codes) {
@@ -5474,7 +5500,8 @@ pub fn confirm(
             continue;
         };
         let sigs = proposal_signatures(p, codes);
-        if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
+        let closes = |n: &&Commitment| ended_registrar_term(n, today).is_none_or(|term| !of_calendar(key, term));
+        if set.confirmed.iter().filter(closes).any(|n| sigs.contains(&n.signature(codes))) {
             continue;
         }
         if set.declined.contains(key) || !stored.proposals.iter().any(|q| &q.source_uid == key) {
