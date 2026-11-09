@@ -4165,4 +4165,58 @@ fn sign_out_and_deletion_delete_the_school_password_only_through_p1s_rule() {
     let wipe = body("delete_local_data");
     assert!(wipe.contains("delete_school_password(profile_id)"), "Delete my data: {wipe}");
     assert!(!wipe.contains("SCHOOL_PASSWORD_SOURCE"), "the deletion's exists-gated loop no longer names it: {wipe}");
+    // Contract review Minor 3: one that will not go is one plain line, the sentence below.
+    assert!(wipe.contains(r#"eprintln!("Knowlu: {SCHOOL_PASSWORD_MAY_REMAIN}")"#), "Delete my data's line: {wipe}");
+}
+
+/// Contract review Minor 2: an id that is not a profile id names no credential, `delete_local_data`'s rule,
+/// so the public rule refuses it by name and asks the store nothing.
+#[cfg(windows)]
+#[test]
+fn an_id_that_is_not_a_profile_id_deletes_no_school_password() {
+    let pid = std::process::id();
+    for bad in [String::new(), "../..".to_string(), format!("profile_{pid:09x}"), format!("knowlu/profile_{pid:010x}")] {
+        let store = Answering { delete: Ok(()), exists: false, asked: Default::default() };
+        let out = knowlu::account::delete_school_password_in(&store, &bad);
+        let e = out.expect_err("a bad id is never a deleted password");
+        assert!(e.contains("is not a profile id"), "{bad:?}: {e}");
+        assert!(store.asked.borrow().is_empty(), "{bad:?}: the store was asked {:?}", store.asked.borrow());
+    }
+}
+
+/// Contract review Minor 3: *Delete my data*'s line for a school password that may not have gone. The account
+/// is already gone when it prints, so it says what may be left and gives no advice, and it carries no
+/// "Knowlu" of its own, because the line's prefix is the only one.
+#[test]
+fn delete_my_datas_school_password_line_is_one_plain_statement() {
+    let line = knowlu::account::SCHOOL_PASSWORD_MAY_REMAIN;
+    assert!(line.contains("school password") && line.contains("may still be on this computer"), "{line}");
+    assert!(!line.to_ascii_lowercase().contains("knowlu"), "the prefix is the line's only Knowlu: {line}");
+    assert!(!line.to_ascii_lowercase().contains("try again"), "no retry advice after the account is gone: {line}");
+}
+
+/// Contract review Minor 5: an `on_sign_out` failure (an unreadable `onboarding.json`) never stops the clean.
+/// It returns, the line it logs says it came from sign-out and names the file, and the rest still ran: both
+/// pending links are gone, and the unreadable file is left as it was.
+#[cfg(windows)]
+#[test]
+fn an_on_sign_out_failure_is_a_named_sign_out_line_and_the_clean_returns() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, _app_root, id, dir) = signout_profile("f2c-unreadable");
+    let _cleanup = Cleanup(pending_links(&id).into_iter().chain([knowlu::account::session_target(&id)]).collect());
+    for t in pending_links(&id) {
+        knowlu::credentials::write(&t, &id, "https://feeds.example.invalid/synthetic.ics").expect("a pending link");
+    }
+    let file = knowlu::onboarding_state::state_path(&dir);
+    std::fs::write(&file, b"not an onboarding file").unwrap();
+
+    let line = knowlu::account::sign_out_clean(&dir, &id, &closed_loopback_base());
+
+    let line = line.expect("an on_sign_out failure is logged");
+    assert!(line.starts_with("Knowlu: sign-out: "), "the line says where it came from: {line}");
+    assert!(line.contains("onboarding.json"), "and names the file: {line}");
+    assert!(pending_links(&id).iter().all(|t| !knowlu::credentials::exists(t)), "the pending links still went");
+    assert_eq!(std::fs::read(&file).unwrap(), b"not an onboarding file", "an unreadable file is never rewritten");
+    let _ = std::fs::remove_dir_all(&root);
 }

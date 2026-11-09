@@ -731,7 +731,9 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
     };
     // Called only for a profile id with a folder, under the hold and before the credential is deleted.
     let id = profile_id.clone().unwrap_or_default();
-    let clean = |dir: &std::path::Path| sign_out_clean(dir, &id, &api_base());
+    let clean = |dir: &std::path::Path| {
+        let _ = sign_out_clean(dir, &id, &api_base());
+    };
     sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close, clean)
 }
 
@@ -743,13 +745,14 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
 /// built skips the mail clean, and `on_sign_out`'s collected failures are a named line on stderr, as
 /// [`delete_local_data`]'s are. `api_base` is a parameter, as `sign_out_mail_client`'s is, so a test points
 /// the clean at its own listener; `sign_out` passes `api_base()`, the host the revoke uses.
-pub fn sign_out_clean(dir: &std::path::Path, id: &str, api_base: &str) {
+pub fn sign_out_clean(dir: &std::path::Path, id: &str, api_base: &str) -> Option<String> {
     if let Ok(client) = sign_out_mail_client(api_base, &anon_key(), &session_target(id), SIGN_OUT_MAIL_CALL) {
         crate::mail::setup::clean_unfinished(dir, &client);
     }
     if let Err(e) = crate::onboarding_state::on_sign_out(dir, id) {
         eprintln!("Knowlu: {e}");
     }
+    None // stub: the review's named line comes in the next commit
 }
 
 /// [`sign_out`] without the app's handle. `close_windows` is called with the profile's folder before
@@ -859,6 +862,9 @@ fn close_school_windows(app: &tauri::AppHandle) {
 /// The saved school password's source: `knowlu/<profile_id>/school` (replan RQ17), the target P1's
 /// `school_password.rs` saves to. Sign-out and [`delete_local_data`] delete it; nothing else here reads it.
 pub const SCHOOL_PASSWORD_SOURCE: &str = "school";
+
+/// Stub: the review's sentence comes in the next commit.
+pub const SCHOOL_PASSWORD_MAY_REMAIN: &str = "";
 
 /// Step (0) of [`sign_out_with`], and [`delete_local_data`]'s: deletes `profile_id`'s saved school
 /// password (an id the caller has checked with [`is_profile_id`]) from Credential Manager, by
