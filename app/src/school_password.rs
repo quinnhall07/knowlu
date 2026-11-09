@@ -72,7 +72,8 @@ const STILL_SAVED: &str = "Knowlu couldn't delete the saved school password; try
 /// not-found and `exists` agrees. Only a false `exists` is unreliable (`credentials::exists` reads false
 /// on any read error); a true one means the password is still there, so a not-found it contradicts is
 /// a failure and never a "forgotten" password left in use (re-review of 807ed978..a74cbe7b, Minor 3).
-fn removed(store: &dyn SchoolStore, target: &str) -> Result<(), String> {
+/// Sign-out and *Delete my data* take the same rule (`account::delete_school_password_in`).
+pub(crate) fn removed(store: &dyn SchoolStore, target: &str) -> Result<(), String> {
     match store.delete(target) {
         Ok(()) => Ok(()),
         Err(DeleteError::NotFound) if store.exists(target) => Err(STILL_SAVED.to_string()),
