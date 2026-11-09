@@ -742,17 +742,20 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
 /// `mail::setup::clean_unfinished`, with [`sign_out_mail_client`]`(api_base, …)`; then
 /// `onboarding_state::on_sign_out`, which deletes the answers file and both pending feed links and rewinds an
 /// unfinished `onboarding.json` to step 2 (F2e). **Neither stops the sign-out:** a client that cannot be
-/// built skips the mail clean, and `on_sign_out`'s collected failures are a named line on stderr, as
-/// [`delete_local_data`]'s are. `api_base` is a parameter, as `sign_out_mail_client`'s is, so a test points
-/// the clean at its own listener; `sign_out` passes `api_base()`, the host the revoke uses.
+/// built skips the mail clean, and `on_sign_out`'s collected failures are one line on stderr, prefixed
+/// `sign-out:` so the log says where it came from, as [`delete_local_data`]'s lines are named. That line
+/// is also returned (`None` when `on_sign_out` succeeded), so a test can read it. `api_base` is a
+/// parameter, as `sign_out_mail_client`'s is, so a test points the clean at its own listener; `sign_out`
+/// passes `api_base()`, the host the revoke uses.
 pub fn sign_out_clean(dir: &std::path::Path, id: &str, api_base: &str) -> Option<String> {
     if let Ok(client) = sign_out_mail_client(api_base, &anon_key(), &session_target(id), SIGN_OUT_MAIL_CALL) {
         crate::mail::setup::clean_unfinished(dir, &client);
     }
-    if let Err(e) = crate::onboarding_state::on_sign_out(dir, id) {
-        eprintln!("Knowlu: {e}");
+    let line = crate::onboarding_state::on_sign_out(dir, id).err().map(|e| format!("Knowlu: sign-out: {e}"));
+    if let Some(l) = &line {
+        eprintln!("{l}");
     }
-    None // stub: the review's named line comes in the next commit
+    line
 }
 
 /// [`sign_out`] without the app's handle. `close_windows` is called with the profile's folder before
@@ -863,8 +866,9 @@ fn close_school_windows(app: &tauri::AppHandle) {
 /// `school_password.rs` saves to. Sign-out and [`delete_local_data`] delete it; nothing else here reads it.
 pub const SCHOOL_PASSWORD_SOURCE: &str = "school";
 
-/// Stub: the review's sentence comes in the next commit.
-pub const SCHOOL_PASSWORD_MAY_REMAIN: &str = "";
+/// [`delete_local_data`]'s line, after `Knowlu: `, when the saved school password's delete did not answer
+/// it gone. The account is already deleted by then, so it says what may be left and gives no advice.
+pub const SCHOOL_PASSWORD_MAY_REMAIN: &str = "the saved school password may still be on this computer";
 
 /// Step (0) of [`sign_out_with`], and [`delete_local_data`]'s: deletes `profile_id`'s saved school
 /// password (an id the caller has checked with [`is_profile_id`]) from Credential Manager, by
@@ -878,8 +882,13 @@ fn delete_school_password(profile_id: &str) -> Result<(), String> {
 /// not-found that `exists` contradicts, or any other failed delete, is `Err`, never a silent success:
 /// `credentials::exists` reads false on any error, and Windows sometimes answers not-found spuriously under
 /// load, so a false `exists` alone never decides it. The store is a parameter so a test can answer as
-/// Credential Manager does only now and then; `Err` never carries the secret.
+/// Credential Manager does only now and then; `Err` never carries the secret. An id that is not
+/// [`is_profile_id`]-shaped names no credential, [`delete_local_data`]'s rule: it is refused by name and
+/// the store is asked nothing.
 pub fn delete_school_password_in(store: &dyn crate::school_password::SchoolStore, profile_id: &str) -> Result<(), String> {
+    if !is_profile_id(profile_id) {
+        return Err(format!("{profile_id:?} is not a profile id, so no saved school password was deleted"));
+    }
     crate::school_password::removed(store, &crate::credentials::target_for(profile_id, SCHOOL_PASSWORD_SOURCE))
 }
 
@@ -1811,8 +1820,8 @@ pub fn delete_local_data(
             }
         }
     }
-    if let Err(e) = delete_school_password(profile_id) {
-        eprintln!("Knowlu: {e}");
+    if delete_school_password(profile_id).is_err() {
+        eprintln!("Knowlu: {SCHOOL_PASSWORD_MAY_REMAIN}");
     }
 }
 
