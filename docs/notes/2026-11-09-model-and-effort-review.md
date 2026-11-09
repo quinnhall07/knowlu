@@ -81,7 +81,9 @@ Checked against the Claude Code documentation for v2.1.321 on 2026-11-09.
   instead of carrying on with an older fallback model for the rest of the session.
 - `reviewer` has Write so it can file its own report. `.claude/hooks/pretool-bash.js` refuses every
   reviewer Edit or Write except a new file named `YYYY-MM-DD-<name>.md` directly under `docs/reports/`
-  of the project or one of its worktrees; it cannot overwrite an earlier report or plant a `CLAUDE.md`.
+  of the project or of a worktree under its `.claude/worktrees/`; with those tools it cannot overwrite
+  an earlier report or plant a `CLAUDE.md`. From a worktree kept anywhere else, it reports in its
+  final message.
   The hook does not guard reviewer's Bash, which only its prompt limits to `git diff`, `log` and `show`.
   That gap is older than this change.
 - The eight `Write(...)` deny rules for the frozen references are gone because they never matched:

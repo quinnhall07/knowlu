@@ -7,10 +7,13 @@ const path = require('path');
 const HOOK = path.join(__dirname, 'pretool-bash.js');
 const B = String.fromCharCode(92);
 
+// projectDir: omitted means C:/proj; null means CLAUDE_PROJECT_DIR is not set at all.
 function decision(input, projectDir) {
+  const env = Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: projectDir || 'C:/proj' });
+  if (projectDir === null) delete env.CLAUDE_PROJECT_DIR;
   const out = execFileSync('node', [HOOK], {
     input: typeof input === 'string' ? input : JSON.stringify(input),
-    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: projectDir || 'C:/proj' }),
+    env,
   }).toString();
   if (!out) return 'pass';
   return JSON.parse(out).hookSpecificOutput.permissionDecision;
@@ -92,6 +95,11 @@ const CASES = [
   ['deny', file('Write', 'C:/proj/mydocs/reports/2026-11-09-x.md', 'reviewer'), 'a folder that only ends in docs'],
   ['deny', { tool_name: 'Write', tool_input: {}, agent_type: 'reviewer' }, 'reviewer Write with no path'],
   ['deny', '{"tool_name":"Write","agent_type":"reviewer","tool_input":{"file_path":"C:/proj/docs/reports/2026-11-09-x.md"', 'broken input on a reviewer write fails closed'],
+  ['deny', file('Write', 'C:/proj/docs/reports/2026-11-09-x.md', 'reviewer'), 'reviewer report when no project dir is set', null],
+  ['pass', file('Write', 'C:/proj/docs/reports/2026-11-09-x.md', 'reviewer'), 'project dir given with a trailing slash', 'C:/proj/'],
+  ['pass', file('Write', 'C:/proj/.claude/worktrees/lane/docs/reports/2026-11-09-x.md', 'reviewer'), 'project dir is a worktree: its own reports', 'C:/proj/.claude/worktrees/lane'],
+  ['deny', file('Write', 'C:/proj/docs/reports/2026-11-09-x.md', 'reviewer'), 'project dir is a worktree: the main checkout is refused', 'C:/proj/.claude/worktrees/lane'],
+  ['deny', file('Write', 'C:/proj-other/docs/reports/2026-11-09-x.md', 'reviewer'), 'a worktree kept outside .claude/worktrees'],
   ['pass', file('Write', 'C:/proj/docs/plans/2026-11-09-lane-plan.md', 'planner'), 'another agent is not held to the reviewer rule'],
   ['pass', file('Write', 'C:/proj/docs/reports/x.md'), 'main session writes a report'],
   ['pass', bash('git diff origin/main...HEAD --stat', 'reviewer'), 'reviewer git diff'],
@@ -140,9 +148,9 @@ function check(want, input, name, projectDir) {
   const got = decision(input, projectDir);
   if (got !== want) { failed++; console.log(`FAIL ${name}: want ${want}, got ${got}`); }
 }
-for (const [want, input, name] of CASES) check(want, input, name);
+for (const [want, input, name, projectDir] of CASES) check(want, input, name, projectDir);
 
-// reviewer never overwrites a report. That needs a real file, so these two run against a temporary
+// reviewer never overwrites a report. That needs a real file, so these run against a temporary
 // project root, removed afterwards.
 {
   const fs = require('fs');
@@ -155,6 +163,12 @@ for (const [want, input, name] of CASES) check(want, input, name);
     fs.writeFileSync(earlier, 'FAIL\n');
     check('deny', file('Write', earlier, 'reviewer'), 'reviewer overwriting an existing report', root);
     check('pass', file('Write', path.join(dir, '2026-01-02-next-review.md'), 'reviewer'), 'reviewer new report beside an existing one', root);
+    // The Git Bash spelling of a Windows path (/c/Users/...) names the same file.
+    if (process.platform === 'win32') {
+      const gitBash = (p) => p.split(B).join('/').replace(/^([A-Za-z]):/, (_, d) => '/' + d.toLowerCase());
+      check('deny', file('Write', gitBash(earlier), 'reviewer'), 'reviewer overwriting an existing report by Git Bash path', root);
+      check('pass', file('Write', gitBash(path.join(dir, '2026-01-03-third-review.md')), 'reviewer'), 'reviewer new report by Git Bash path', root);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

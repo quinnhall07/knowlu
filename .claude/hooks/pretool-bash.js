@@ -144,7 +144,11 @@ function guardOutward(input) {
 // - The name must look like a report (2026-11-09-lane-review.md), so CLAUDE.md and anything else
 //   Claude Code loads as instructions cannot be planted there.
 // - An existing file is never overwritten: a new round is a new file, and an earlier verdict stays.
+//   The path is checked as given and in its drive-letter form, because Node reads the Git Bash
+//   spelling /c/x as <current drive>:\c\x and would report an existing report as absent.
 // - Any `..` segment is refused outright rather than resolved.
+// - A worktree kept outside .claude/worktrees/ is not recognized; reviewer then reports in its final
+//   message.
 const REPORT_NAME = /^\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.md$/;
 const WORKTREES = '/.claude/worktrees/';
 
@@ -156,7 +160,10 @@ function reviewerMayWrite(filePath) {
   const base = m[1];
   const ours = projectRoots().some((r) => base === r ||
     (base.startsWith(r + WORKTREES) && !base.slice((r + WORKTREES).length).includes('/')));
-  return ours && !fs.existsSync(String(filePath));
+  if (!ours) return false;
+  const given = String(filePath);
+  const driveForm = given.replace(/^[\\/]([a-zA-Z])[\\/]/, '$1:/');
+  return !fs.existsSync(given) && !fs.existsSync(driveForm);
 }
 
 function guardReviewer(input) {
@@ -165,8 +172,8 @@ function guardReviewer(input) {
   const ti = input.tool_input || {};
   if (!reviewerMayWrite(ti.file_path || ti.notebook_path || '')) {
     deny('reviewer writes only its own report: a new file named YYYY-MM-DD-<name>.md directly under docs/reports/ ' +
-      'of this project or one of its worktrees. It never overwrites a report or edits anything else. If this was ' +
-      'your report, put it in the final message instead.');
+      'of this project or of a worktree under its .claude/worktrees/. It never overwrites a report or edits ' +
+      'anything else. If this was your report, put it in the final message instead.');
   }
 }
 
