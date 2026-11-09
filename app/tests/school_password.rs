@@ -164,6 +164,7 @@ fn a_guard_for_another_profile_reads_no_secret() {
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     let other = try_take(B).expect("lock free");
     assert!(read_with(&f, A, &other).is_err(), "A's secret is read only while A's lock is held");
+    assert!(gate_with(&f, &f, A, &other).is_err(), "and so are A's marks");
     assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
 }
 
@@ -271,24 +272,28 @@ fn reading_the_secret_never_looks_at_the_in_flight_mark() {
 }
 
 // ---- rejection: mark first, then delete ---------------------------------------------------------
+// The controller's ruling (P1b): a rejection happens only inside a fill that already holds the lock,
+// so `reject_with` is handed that `&SessionGuard`; these calls are the compile-level pin.
 
 #[test]
 fn a_rejection_sets_the_rejected_mark_first_then_deletes_the_saved_password() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
-    reject_with(&f, &f, A).expect("both steps ran");
+    let guard = try_take(A).expect("lock free");
+    reject_with(&f, &f, A, &guard).expect("both steps ran");
     assert!(at(&f.log, "set_rejected").unwrap() < at(&f.log, "delete:").unwrap(), "{:?}", f.log.borrow());
     assert!(f.rejected.get());
     assert!(f.entries.borrow().is_empty());
+    assert!(f.unlocked.borrow().is_empty(), "the rejection ran under the fill's lock: {:?}", f.unlocked.borrow());
 }
 
 #[test]
 fn if_the_delete_fails_the_mark_still_blocks_every_fill() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["delete"]);
-    assert!(reject_with(&f, &f, A).is_err(), "the failed delete is reported");
-    assert!(f.rejected.get());
     let guard = try_take(A).unwrap();
+    assert!(reject_with(&f, &f, A, &guard).is_err(), "the failed delete is reported");
+    assert!(f.rejected.get());
     assert!(matches!(gate_with(&f, &f, A, &guard).expect("gate"), Gate::Form));
 }
 
@@ -296,9 +301,31 @@ fn if_the_delete_fails_the_mark_still_blocks_every_fill() {
 fn if_the_mark_cannot_be_written_the_delete_still_runs() {
     let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["set_rejected"]);
-    assert!(reject_with(&f, &f, A).is_err(), "the failed mark is reported");
+    let guard = try_take(A).unwrap();
+    assert!(reject_with(&f, &f, A, &guard).is_err(), "the failed mark is reported");
     assert!(f.entries.borrow().is_empty(), "the password was deleted anyway");
     assert!(at(&f.log, "delete:").is_some());
+}
+
+/// Refusing a rejection would leave a rejected password saved, ready to be sent again, so the guard
+/// is never a reason to skip it: unlike a read, a rejection still marks and deletes.
+#[test]
+fn a_rejection_handed_another_profiles_guard_still_marks_and_deletes() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    let other = try_take(B).expect("lock free");
+    reject_with(&f, &f, A, &other).expect("both steps ran");
+    assert!(f.rejected.get() && f.entries.borrow().is_empty());
+}
+
+#[test]
+fn a_rejection_with_no_password_saved_still_sets_the_mark_and_is_ok() {
+    // The rejected mark set with no password saved (§7.4's table): nothing is left to delete.
+    let _serial = serial();
+    let f = Fake::new(A);
+    let guard = try_take(A).unwrap();
+    reject_with(&f, &f, A, &guard).expect("already gone is not a failure");
+    assert!(f.rejected.get());
 }
 
 // ---- only a new save clears the rejected mark -----------------------------------------------------
@@ -399,6 +426,39 @@ fn the_file_marks_set_and_clear_and_outlive_the_value_that_wrote_them() {
     let _ = std::fs::remove_dir_all(&other);
 }
 
+/// The controller's ruling (P1b): the marks are the profile folder's own files, beside `school.json`
+/// and never inside `school-session`, so a Forget of that folder never loses a rejected mark before
+/// P1's forget clears it in its own order.
+#[test]
+fn the_marks_sit_beside_school_json_and_outlive_a_forget_of_the_school_folder() {
+    let d = scratch("beside");
+    std::fs::create_dir_all(knowlu::school_session::session_dir(&d)).unwrap();
+    let m = FileMarks::new(&d);
+    m.set_rejected().unwrap();
+    m.write_in_flight().unwrap();
+    m.flush_in_flight().unwrap();
+    knowlu::school_session::forget(&d).expect("the school folder is forgotten");
+    assert!(!knowlu::school_session::session_dir(&d).exists());
+    assert!(m.rejected() && m.in_flight(), "the marks outlive the folder");
+    for entry in std::fs::read_dir(&d).unwrap() {
+        assert!(entry.unwrap().file_type().unwrap().is_file(), "each mark is a file directly in the profile folder");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A mark is never written into a folder that is not there (one Delete my data removed, say): the
+/// write fails, which a fill reads as `CannotRead` and sends nothing, and no folder is made.
+#[test]
+fn a_mark_into_a_missing_folder_fails_and_makes_no_folder() {
+    let d = scratch("missing").join("gone");
+    let m = FileMarks::new(&d);
+    assert!(m.write_in_flight().is_err() && m.set_rejected().is_err());
+    assert!(m.flush_in_flight().is_err(), "a flush with no written mark is a failure, never a success");
+    assert!(!d.exists());
+    assert!(!m.rejected() && !m.in_flight());
+    let _ = std::fs::remove_dir_all(d.parent().unwrap());
+}
+
 // ---- retarget_credentials ---------------------------------------------------------------------------------
 
 #[test]
@@ -444,6 +504,39 @@ fn an_in_flight_password_is_never_moved_either() {
     f.in_flight.set(true);
     assert_eq!(retarget_with(&f, &f, A, B).expect("not a failure"), 0);
     assert!(f.entries.borrow().is_empty());
+}
+
+/// A move reads the old id's marks and secret, so it takes the old id's lock (§7.4: both marks and
+/// the secret are read only under it); held, it is `BUSY` and touches nothing.
+#[test]
+fn a_retarget_while_the_old_ids_lock_is_held_is_busy_and_touches_nothing() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    let held = try_take(A).expect("lock free");
+    assert_eq!(retarget_with(&f, &f, A, B), Err(BUSY.to_string()));
+    assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
+    drop(held);
+    assert!(try_take(A).is_some());
+}
+
+#[test]
+fn a_retarget_onto_the_same_id_never_deletes_the_only_copy() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    assert_eq!(retarget_with(&f, &f, A, A).expect("nothing to move"), 0);
+    assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
+    assert!(f.entries.borrow().contains_key(&t(A)));
+}
+
+/// The wiring: the move goes through `retarget_with`, and the marks it honours are the OLD id's, read
+/// from that id's profile folder under the app-data root (where the save and the fill keep them).
+#[test]
+fn the_retarget_command_reads_the_old_ids_marks_from_its_profile_folder() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/onboarding.rs")).expect("source");
+    let body = src.split("pub fn retarget_credentials").nth(1).and_then(|b| b.split("\n}\n").next()).expect("the command");
+    assert!(body.contains("school_password::retarget_with("), "{body}");
+    assert!(body.contains("crate::state::app_data_root()"), "{body}");
+    assert!(body.contains("FileMarks::new(&profiles::profile_dir(&root, &from_id))"), "{body}");
 }
 
 #[test]

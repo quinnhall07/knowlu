@@ -1208,6 +1208,19 @@ pub fn retarget_credentials(from_vault: String, to_vault: String) -> Value {
         }
         moved += 1;
     }
+    // P1b: the saved school password moves too, through `retarget_with`, unless the old id's rejected
+    // or in-flight mark is set: then it is deleted and never moved (review r6, Minor 3). The marks are
+    // the old id's, in its profile folder; with no saved password there is nothing to read them for.
+    if crate::credentials::exists(&crate::school_password::target(&from_id)) {
+        let Some(root) = crate::state::app_data_root() else {
+            return json!({ "ok": false, "error": "school: no app data folder to read its marks from", "moved": moved });
+        };
+        let marks = crate::school_password::FileMarks::new(&profiles::profile_dir(&root, &from_id));
+        match crate::school_password::retarget_with(&crate::school_password::RealStore, &marks, &from_id, &to_id) {
+            Ok(n) => moved += n,
+            Err(e) => return json!({ "ok": false, "error": format!("school: {e}"), "moved": moved }),
+        }
+    }
     json!({ "ok": true, "error": Value::Null, "moved": moved })
 }
 

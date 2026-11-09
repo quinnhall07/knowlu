@@ -11,6 +11,12 @@
 //! **The lock.** A save and a Forget take `school_session::try_take(profile_id)` themselves and answer
 //! [`BUSY`] while a fill holds it, so neither can clear a mark a running fill is about to set. A read
 //! is handed the caller's guard and refuses unless this profile's lock is held.
+//!
+//! **The marks (P1b), [`FileMarks`].** The rejected mark blocks every fill until a new save. The
+//! in-flight mark is written and flushed before the first credential-carrying submit and cleared only
+//! by `users/me` 200 in that attempt or by a new save. Each step keeps P1t's order: a rejection marks,
+//! then deletes; a save writes, then clears; a Forget deletes, then clears only once the credential is
+//! gone. A step that fails leaves a mark set rather than cleared, which blocks a fill (fails safe).
 #![cfg(windows)]
 use crate::school_session::{try_take, SessionGuard};
 use serde_json::{json, Value};
@@ -97,23 +103,62 @@ impl SchoolStore for RealStore {
     }
 }
 
+const REJECTED_MARK: &str = "school-password-rejected";
+const IN_FLIGHT_MARK: &str = "school-password-in-flight";
+
+/// The two marks (P1b): empty files in the profile's own app-data folder (`profiles\<id>\`), beside
+/// `school.json` and never inside `school-session`, which a Forget deletes whole. A file there is a set
+/// mark. They hold nothing, so no secret, and they never enter the vault. A mark whose state cannot be
+/// read reads as set, which blocks the fill (fails safe). Nothing here makes the folder: a mark written
+/// into one that is gone fails, and the fill then sends nothing.
 pub struct FileMarks {
-    #[allow(dead_code)]
     dir: PathBuf,
 }
 impl FileMarks {
     pub fn new(dir: &Path) -> Self {
         FileMarks { dir: dir.to_path_buf() }
     }
+    fn is_set(&self, name: &str) -> bool {
+        self.dir.join(name).try_exists().unwrap_or(true)
+    }
+    fn create(&self, name: &str) -> Result<std::fs::File, String> {
+        std::fs::File::create(self.dir.join(name)).map_err(|e| format!("{name} could not be written: {e}"))
+    }
+    fn clear(&self, name: &str) -> Result<(), String> {
+        match std::fs::remove_file(self.dir.join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(format!("{name} could not be cleared: {e}")),
+            _ => Ok(()),
+        }
+    }
 }
 impl SchoolMarks for FileMarks {
-    fn rejected(&self) -> bool { todo!("P1b") }
-    fn in_flight(&self) -> bool { todo!("P1b") }
-    fn set_rejected(&self) -> Result<(), String> { todo!("P1b") }
-    fn clear_rejected(&self) -> Result<(), String> { todo!("P1b") }
-    fn write_in_flight(&self) -> Result<(), String> { todo!("P1b") }
-    fn flush_in_flight(&self) -> Result<(), String> { todo!("P1b") }
-    fn clear_in_flight(&self) -> Result<(), String> { todo!("P1b") }
+    fn rejected(&self) -> bool {
+        self.is_set(REJECTED_MARK)
+    }
+    fn in_flight(&self) -> bool {
+        self.is_set(IN_FLIGHT_MARK)
+    }
+    /// Written and flushed in one step, so no power cut loses a rejection.
+    fn set_rejected(&self) -> Result<(), String> {
+        self.create(REJECTED_MARK)?.sync_all().map_err(|e| format!("{REJECTED_MARK} could not be flushed: {e}"))
+    }
+    fn clear_rejected(&self) -> Result<(), String> {
+        self.clear(REJECTED_MARK)
+    }
+    fn write_in_flight(&self) -> Result<(), String> {
+        self.create(IN_FLIGHT_MARK).map(drop)
+    }
+    /// `sync_all` on the written mark; with no mark written there is nothing to flush, and that fails.
+    fn flush_in_flight(&self) -> Result<(), String> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.dir.join(IN_FLIGHT_MARK))
+            .and_then(|f| f.sync_all())
+            .map_err(|e| format!("{IN_FLIGHT_MARK} could not be flushed: {e}"))
+    }
+    fn clear_in_flight(&self) -> Result<(), String> {
+        self.clear(IN_FLIGHT_MARK)
+    }
 }
 
 /// `credentials::target_for(profile_id, SCHOOL_PASSWORD_SOURCE)`: `knowlu/<profile_id>/school`.
@@ -164,19 +209,42 @@ pub fn read_with(store: &dyn SchoolStore, profile_id: &str, _lock: &SessionGuard
     Ok(Some(SchoolSecret { username, password }))
 }
 
-/// Both marks and the secret, read only under the lock; checked only before a fill.
-pub fn gate_with(
-    _store: &dyn SchoolStore,
-    _marks: &dyn SchoolMarks,
-    _profile_id: &str,
-    _lock: &SessionGuard,
-) -> Result<Gate, String> {
-    todo!("P1b")
+/// Both marks and the secret, read only while this profile's lock is held; checked only before a fill.
+/// The rejected mark first (the form, saved password or not), then the password (none: today's path,
+/// the in-flight mark alone included, since with no password nothing can be sent), then the in-flight
+/// mark (`Unconfirmed`, left set), and only then is the secret read.
+pub fn gate_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id: &str, lock: &SessionGuard) -> Result<Gate, String> {
+    if !held(profile_id) {
+        return Err(NOT_HELD.to_string());
+    }
+    if marks.rejected() {
+        return Ok(Gate::Form);
+    }
+    if !store.exists(&target(profile_id)) {
+        return Ok(Gate::NoPassword);
+    }
+    if marks.in_flight() {
+        return Ok(Gate::Unconfirmed);
+    }
+    Ok(read_with(store, profile_id, lock)?.map_or(Gate::NoPassword, Gate::Fill))
 }
 
-/// Sets the rejected mark, then deletes the saved password; each runs even if the other fails.
-pub fn reject_with(_store: &dyn SchoolStore, _marks: &dyn SchoolMarks, _profile_id: &str) -> Result<(), String> {
-    todo!("P1b")
+/// Sets the rejected mark, then deletes the saved password; each runs even if the other fails, and a
+/// password already gone is not a failure. Called only inside a fill, which holds the lock (`_lock`,
+/// the controller's ruling). It never refuses on the lock: a refused rejection would leave a rejected
+/// password saved, ready to be sent again.
+pub fn reject_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id: &str, _lock: &SessionGuard) -> Result<(), String> {
+    let marked = marks.set_rejected();
+    let t = target(profile_id);
+    let deleted = match store.delete(&t) {
+        Err(e) if store.exists(&t) => Err(e),
+        _ => Ok(()),
+    };
+    match (marked, deleted) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(m), Err(d)) => Err(format!("{m}; {d}")),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+    }
 }
 
 /// Forget (S6a's `school_forget`): takes the lock (`Err(BUSY)` when held, nothing touched), deletes the
@@ -194,21 +262,36 @@ pub fn forget_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id:
     rejected.and(in_flight)
 }
 
-/// A `users/me` 200: clears the in-flight mark and never the rejected one.
-pub fn signed_in_with(_marks: &dyn SchoolMarks) -> Result<(), String> {
-    todo!("P1b")
+/// A `users/me` 200: clears the in-flight mark and never the rejected one (only a new save does).
+pub fn signed_in_with(marks: &dyn SchoolMarks) -> Result<(), String> {
+    marks.clear_in_flight()
 }
 
 /// Moves `school` between profile ids: the new target is written before the old is deleted; a password
 /// whose rejected or in-flight mark is set (read from `from_marks`) is deleted and not moved. `Ok(1)`
-/// moved, `Ok(0)` nothing to move or one dropped.
-pub fn retarget_with(
-    _store: &dyn SchoolStore,
-    _from_marks: &dyn SchoolMarks,
-    _from_id: &str,
-    _to_id: &str,
-) -> Result<usize, String> {
-    todo!("P1b")
+/// moved, `Ok(0)` nothing to move or one dropped. It reads the old id's marks and secret, so it takes
+/// that id's lock (`BUSY` when held, nothing touched). The same id twice moves nothing: a write then a
+/// delete of one target would delete the only copy.
+pub fn retarget_with(store: &dyn SchoolStore, from_marks: &dyn SchoolMarks, from_id: &str, to_id: &str) -> Result<usize, String> {
+    if from_id == to_id {
+        return Ok(0);
+    }
+    let Some(_held) = try_take(from_id) else { return Err(BUSY.to_string()) };
+    let old = target(from_id);
+    if !store.exists(&old) {
+        return Ok(0);
+    }
+    if from_marks.rejected() || from_marks.in_flight() {
+        return match store.delete(&old) {
+            Err(e) if store.exists(&old) => Err(e),
+            _ => Ok(0),
+        };
+    }
+    let (username, password) = store.read(&old).map_err(|_| READ_FAILED.to_string())?;
+    store.write(&target(to_id), &username, &password).map_err(|_| WRITE_FAILED.to_string())?;
+    // Only after the new one is safely written, as `retarget_credentials` does for the coursework logins.
+    store.delete(&old)?;
+    Ok(1)
 }
 
 /// The one Tauri command here: saves the password typed at step 3 or in Settings, and its reply is
