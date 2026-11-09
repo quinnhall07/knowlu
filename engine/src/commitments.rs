@@ -2450,6 +2450,9 @@ thread_local! {
     /// C2b tests only: the same, for a `rank`'s drop of a passed no-time block in
     /// [`refresh_series_with`].
     pub(crate) static BEFORE_DROP_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    /// C2d tests only: called on this thread after `confirm`'s read and just before Not mine
+    /// removes a class-search row, so a test can break the series file in between.
+    pub(crate) static BEFORE_ROW_REMOVAL: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Replan §6.12 (RQ11, RQ12): deletes the unconfirmed class-search rows (`Rows`), or those and the
@@ -13688,7 +13691,8 @@ mod class_search_marker_tests {
     /// a class-search row: "a class-search row: not written (...)" with no key anywhere in it.
     /// Mine on a Google key keeps today's `<key>: not written (`. Not mine on a class-search row
     /// with a Google twin: the twin's own `marker not written` line names the Google key, and no
-    /// line holds a class-search key or section. Red now: the key is printed.
+    /// line holds a class-search key or section. The twins' markers are written first, and a failed
+    /// one keeps the row in place, so the student sees it again (C2d contract review, item 1).
     #[test]
     fn the_write_failure_warnings_on_a_class_search_key_use_fixed_words() {
         let v = vault("w-write");
@@ -13709,12 +13713,14 @@ mod class_search_marker_tests {
         let t = vault("w-write-twin");
         put(&t, vec![cs_row(), google_row(50)]);
         std::fs::write(t.join(FOLDER), "not a folder").unwrap();
+        let before = series_bytes(&t);
         let report = run(&t, &input(&[], &[CS_KEY], None));
         assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
         assert!(report.warnings[0].starts_with(&format!("{GCAL_KEY}: marker not written (")), "{:?}", report.warnings);
         let all = format!("{:?}", report.warnings);
         assert!(!all.contains("classsearch") && !all.contains("40001") && !all.contains("202640"), "{all}");
-        assert_eq!(series_keys(&t), [GCAL_KEY], "the row is removed even when the twin's marker failed");
+        assert_eq!(series_bytes(&t), before, "a twin's failed marker keeps the row, untouched");
+        assert_eq!(series_keys(&t), [CS_KEY, GCAL_KEY]);
     }
 
     /// The report's JSON holds no class-search key or section either. Red now: the warnings
@@ -13726,6 +13732,68 @@ mod class_search_marker_tests {
         let report = run(&v, &input(&[(UNKNOWN_CS, "hard"), (CS_KEY, "urgent")], &[UNKNOWN_CS, CS_KEY], None));
         let json = report.to_json().to_string();
         assert!(!json.contains("classsearch") && !json.contains("40001") && !json.contains("49999"), "{json}");
+    }
+
+    // ---- C2d contract review: rulings 1 to 3 ----
+
+    /// Ruling 1: a `classsearch:` calendar's `calendars` entry stays while another row of it
+    /// remains, and goes with its last row.
+    #[test]
+    fn the_calendars_entry_goes_with_the_last_row_of_its_calendar() {
+        const CS_KEY_2: &str = "classsearch:ua:202640-40002";
+        let v = vault("cal-entry");
+        put(&v, vec![cs_row(), row(CS_KEY_2, CS_CAL, "MATH 200", 45)]);
+        let mut proposed: Vec<String> = stored_proposals(&v, TODAY).proposals.iter().map(|p| p.source_uid.clone()).collect();
+        proposed.sort();
+        assert_eq!(proposed, [CS_KEY, CS_KEY_2], "setup: two rows of one calendar, not twins");
+        let calendars = |v: &Path| read_series_file(v).0.calendars.keys().cloned().collect::<Vec<_>>();
+        run(&v, &input(&[], &[CS_KEY], None));
+        assert_eq!(series_keys(&v), [CS_KEY_2]);
+        assert_eq!(calendars(&v), [CS_CAL], "another row of the calendar remains");
+        run(&v, &input(&[], &[CS_KEY_2], None));
+        assert!(series_keys(&v).is_empty());
+        assert!(calendars(&v).is_empty(), "the entry goes with its last row");
+        assert_no_section_key(&v);
+    }
+
+    /// Ruling 2: a class-search twin a confirmed note holds stays in the file on Not mine of its
+    /// by-title Google twin, and gets no marker; the Google key is marked. One Finish holds both
+    /// answers: `mine` runs first, so the not_mine loop finds the row held. (Across two runs the
+    /// held row's signature closes the Google twin, and Not mine on it is stale.)
+    #[test]
+    fn a_held_class_search_twin_stays_on_not_mine_of_its_google_twin() {
+        let v = vault("held");
+        put(&v, vec![row(CS_KEY, CS_CAL, "CS  100", 50), google_row(50)]);
+        let report = run(&v, &input(&[(CS_KEY, "hard")], &[GCAL_KEY], None));
+        assert_eq!((report.created, report.declined), (1, 1), "{report:?}");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let declined: Vec<String> = load(&v).declined.iter().cloned().collect();
+        assert_eq!(declined, [GCAL_KEY]);
+        assert_eq!(series_keys(&v), [CS_KEY, GCAL_KEY], "the held row stays");
+    }
+
+    /// Ruling 3: a row that cannot be removed (a folder put where the series file was, between
+    /// `confirm`'s read and the removal) is one line of fixed words, with no key, and exits 0.
+    #[test]
+    fn a_row_that_cannot_be_removed_is_named_by_fixed_words() {
+        let v = vault("not-removed");
+        put(&v, vec![cs_row()]);
+        let path = v.join(SERIES_FILE);
+        let swap = path.clone();
+        BEFORE_ROW_REMOVAL.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&swap).unwrap();
+                std::fs::create_dir(&swap).unwrap();
+            }))
+        });
+        let report = run(&v, &input(&[], &[CS_KEY], None));
+        BEFORE_ROW_REMOVAL.with(|hook| *hook.borrow_mut() = None);
+        let kind = std::fs::read_to_string(&path).unwrap_err().kind();
+        assert_eq!(report.warnings, [format!("a class-search row: not removed ({SERIES_FILE} unreadable ({kind}))")]);
+        assert_eq!(report.declined, 0);
+        let all = report.to_json().to_string();
+        assert!(!all.contains("classsearch:") && !all.contains("40001") && !all.contains("202640"), "{all}");
+        assert_no_section_key(&v);
     }
 
     // ---- determinism ----
