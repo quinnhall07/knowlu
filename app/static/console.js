@@ -1476,8 +1476,8 @@
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
     else if (Object.prototype.hasOwnProperty.call(listViews, current.view)) { renderList(state); }
     else {
-      var renderView = Object.prototype.hasOwnProperty.call(VIEW_RENDERERS, current.view) ? VIEW_RENDERERS[current.view] : null;
-      if (typeof renderView === "function") { renderView(state); }
+      // Dispatch only on the table's own keys: the name looked up never comes from the URL hash.
+      Object.keys(VIEW_RENDERERS).forEach(function (name) { if (name === current.view) { VIEW_RENDERERS[name](state); } });
     }
     watchSeen();
   }

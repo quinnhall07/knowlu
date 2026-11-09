@@ -2555,9 +2555,8 @@ Connection: close
         let bad_url = "http://[::1/ical/SECRETTOKEN123/basic.ics?key=QUERYTOKEN456".to_string();
         for url in [&status_url, &scheme_url, &bad_url] {
             let err = fetch_ics(url).expect_err("the fetch fails");
-            eprintln!("fetch_ics error for {url}: {err}");
             for secret in [url.as_str(), "SECRETTOKEN123", "QUERYTOKEN456", "basic.ics"] {
-                assert!(!err.contains(secret), "the error leaks {secret:?}: {err}");
+                assert!(!err.contains(secret), "a fetch error leaks part of the feed link");
             }
         }
         let _ = server.join();
@@ -2576,7 +2575,7 @@ Connection: close
         ] {
             let out = scrub_fetch_error(&message, url);
             for secret in [url, "SECRETTOKEN123", "QUERYTOKEN456"] {
-                assert!(!out.contains(secret), "{secret:?} survives in {out:?}");
+                assert!(!out.contains(secret), "part of the feed link survives the scrub");
             }
         }
         assert_eq!(scrub_fetch_error("http status: 404", url), "http status: 404", "a message without the link is untouched");
