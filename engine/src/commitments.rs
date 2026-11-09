@@ -2421,6 +2421,12 @@ fn purge_file(file: &mut SeriesFile, scope: PurgeScope, today: Date) -> bool {
     size(file) != before
 }
 
+/// Replan §6.12, C2e: the series file's bytes as a backup may hold them. STUB (red): copies the
+/// file whole, class-search data and all.
+pub fn series_for_backup(vault: &Path) -> Option<Vec<u8>> {
+    std::fs::read(series_path(vault)).ok()
+}
+
 /// What [`purge_class_search`] removes (replan §6.12): `Rows` the unconfirmed `classsearch:` rows,
 /// `All` those and the no-time block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13833,5 +13839,67 @@ mod class_search_marker_tests {
         assert_eq!(again.declined, 0, "{again:?}");
         assert_eq!(tree(&a).into_keys().collect::<Vec<_>>(), names);
         assert_eq!((series_bytes(&a), journal_len(&a)), (bytes, records));
+    }
+}
+
+#[cfg(test)]
+mod class_search_backup_tests {
+    //! C2e (onboarding replan §6.12): `series_for_backup`, the series file's bytes as a backup
+    //! may hold them. Every key, course and date is invented. The mirror and zip behaviour is
+    //! pinned in `backup.rs`.
+
+    use super::*;
+
+    fn vault(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-c2e-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        dir
+    }
+
+    const WITH: &str = r#"{"calendars":{"classsearch:ua:202640":"2026-09-10","registrar:ua:202640":"2026-09-10"},"class_search":{"classsearch:ua:202640":{"no_time":["cs-100"]}},"ended":{"classsearch:ua:202640-40009":{"calendar":"classsearch:ua:202640","dropped":"2026-09-10","last_instance":null,"until":null}},"series":[]}"#;
+
+    /// A file holding class-search text is parsed, stripped of it and re-emitted canonically.
+    /// Red now: the stub returns the file whole.
+    #[test]
+    fn the_filtered_copy_drops_every_class_search_part_and_keeps_the_rest() {
+        let v = vault("filtered");
+        std::fs::write(v.join(SERIES_FILE), WITH).unwrap();
+        let bytes = series_for_backup(&v).expect("a parseable file gives bytes");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("classsearch") && !text.contains("class_search"), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["calendars"], serde_json::json!({"registrar:ua:202640": "2026-09-10"}));
+        assert_eq!(value["ended"], serde_json::json!({}));
+        assert!(text.ends_with('\n'), "file_bytes' trailing newline");
+        assert_eq!(series_for_backup(&v), Some(text.into_bytes()), "deterministic");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A file with neither word is returned as the raw bytes it holds, parseable or not.
+    /// Passes against the stub and must keep passing: a parse-and-dump would change it.
+    #[test]
+    fn a_file_with_no_class_search_text_is_returned_byte_for_byte() {
+        for raw in ["{ \"series\" : [] ,\n\"extra\":1 }\n\n", "not json at all \u{0}"] {
+            let v = vault("raw");
+            std::fs::write(v.join(SERIES_FILE), raw).unwrap();
+            assert_eq!(series_for_backup(&v), Some(raw.as_bytes().to_vec()), "{raw:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+    }
+
+    /// Text that cannot be parsed, or read, gives `None`: the caller skips it. Red now.
+    #[test]
+    fn a_malformed_file_holding_class_search_text_gives_none() {
+        for raw in ["{\"classsearch:ua:202640\": ", "{\"calendars\": {\"classsearch:ua:202640\": 1}}"] {
+            let v = vault("malformed");
+            std::fs::write(v.join(SERIES_FILE), raw).unwrap();
+            assert_eq!(series_for_backup(&v), None, "{raw}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+        let v = vault("not-utf8");
+        std::fs::write(v.join(SERIES_FILE), b"{\"class_search\": \xff}").unwrap();
+        assert_eq!(series_for_backup(&v), None, "not UTF-8");
+        let _ = std::fs::remove_dir_all(&v);
     }
 }
