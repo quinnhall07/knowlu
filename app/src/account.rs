@@ -706,15 +706,22 @@ pub fn open_policy(which: String) -> Value {
 /// inherit them. The clean's client is [`sign_out_mail_client`]: every request capped at
 /// [`SIGN_OUT_MAIL_CALL`], the session read once. A client that cannot be built skips the clean, never
 /// the sign-out.
+///
+/// **…and no school sign-in** (onboarding plan §S5, spec §2.5; replan RQ17, Q-B9): the profile's saved
+/// school password, its `school-session` folder and today's grades folder `lms-session` go too, after
+/// every window on them ([`SCHOOL_WINDOWS`]) is destroyed, because another account may sign in on this
+/// profile next and must not sign in to this student's school ([`sign_out_with`], steps (0) and (4b)).
 #[tauri::command(async)]
 pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Value, String> {
     // The one mail window is this console's profile's: it closes only when that profile signs out, and
     // its hold is taken, within the bound, and kept until every mail profile is deleted, as the wipe does.
+    // The school windows are this console's too, so they close under the same test, first.
     let close = |dir: &std::path::Path| {
         use tauri::Manager;
         if !app.try_state::<crate::state::ConsoleState>().is_some_and(|cs| cs.data_dir == dir) {
             return None;
         }
+        close_school_windows(&app);
         close_mail_windows(&app);
         take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)
     };
@@ -728,45 +735,63 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
     sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close, clean)
 }
 
-/// [`sign_out`] without the app's handle. `close_mail_window` is called with the profile's folder
-/// before any mail profile in it is deleted (WebView2 holds a profile while its window is open), and
-/// what it hands back (the console's: the mail window's hold) is kept until the deletion is done, so
-/// nothing opens a mail profile in between (spec §4.13). The deletion itself is
+/// [`sign_out`] without the app's handle. `close_windows` is called with the profile's folder before
+/// any mail profile or school folder in it is deleted (WebView2 holds a profile while its window is
+/// open; the console's closes [`SCHOOL_WINDOWS`] and the mail windows), and what it hands back (the
+/// console's: the mail window's hold) is kept until the deletion is done, so nothing opens a mail
+/// profile in between (spec §4.13). The deletion itself is
 /// `mail_session::forget_all`'s, through its guard, so nothing but `mail-setup` and
 /// `mail-session-<address_id>` goes. `None` (the pending session), an id that is not
-/// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so nothing is deleted.
+/// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so no folder is deleted.
 /// `mail_profiles_left` is `true` when a mail profile is still on disk: recorded for the start-up
 /// retry, or, when `mail.json` could not record it, not.
 ///
+/// **The school sign-in** (onboarding plan §S5; replan RQ17). Step (0), for any [`is_profile_id`]-shaped
+/// id, with or without an `app_root`: the saved school password, `knowlu/<profile_id>/school`, deleted
+/// with `credentials::delete`, before anything else, so a school folder that cannot be deleted never keeps
+/// a password that signs it back in. `school_password_left` is `true` when it is still in Credential
+/// Manager afterwards; one never saved is not left. Step (4b), under the hold: `school_session::forget`,
+/// the patient delete of `school-session` and `school.json`, then `grades::forget`, the same patient
+/// delete of today's grades folder `lms-session` (Q-B9: a signed-in Blackboard folder never outlives
+/// sign-out). `school_profiles_left` is `true` when either did not finish; C5d's launch sweep owns the
+/// retry. No failure stops another step, and each folder is tried whatever the other did.
+///
 /// **The order** (L4 plan §4.7), for a profile with a folder: (1) the hold, first and once; (2) the
 /// clean, `clean_unfinished(dir)`; (3) every `pending_setups` record cleared through
-/// `MailState::update`, whatever the clean did; (4) `forget_all`; (5) the hold dropped; (6) the token
-/// read and the credential deleted; (7) the revoke. Why: the clean deletes mail profiles (`forget`), so
-/// it runs under the hold; its client reads the session from Credential Manager, so it runs before the
-/// delete, and the token revoked is the one a refresh in the clean saved; and the records are forgotten
-/// because another account may sign in on this profile next, and its start-up clean would not find
-/// these ids among its own addresses. A hold that is not given (another profile's console, or the bound
-/// passed) still runs (2) to (5), as `forget_all` always has. A clean that fails, or a `mail.json` that
-/// cannot be read, never stops the sign-out. `setups_cleared` is `true` when `mail.json` holds no record
-/// afterwards; with no profile folder (the cases above that delete nothing) nothing is read or written,
-/// neither seam is called, and it is `true`.
+/// `MailState::update`, whatever the clean did; (4) `forget_all`; (4b) the school folders; (5) the hold
+/// dropped; (6) the token read and the credential deleted; (7) the revoke. Why: the clean deletes mail
+/// profiles (`forget`), so it runs under the hold; its client reads the session from Credential Manager,
+/// so it runs before the delete, and the token revoked is the one a refresh in the clean saved; and the
+/// records are forgotten because another account may sign in on this profile next, and its start-up
+/// clean would not find these ids among its own addresses. A hold that is not given (another profile's
+/// console, or the bound passed) still runs (2) to (5), as `forget_all` always has. A clean that fails,
+/// or a `mail.json` that cannot be read, never stops the sign-out. `setups_cleared` is `true` when
+/// `mail.json` holds no record afterwards; with no profile folder (the cases above that delete no
+/// folder) no file is read or written, neither seam is called, and it is `true`.
 pub fn sign_out_with<Held>(
     profile_id: Option<String>,
     app_root: Option<&std::path::Path>,
-    close_mail_window: impl FnOnce(&std::path::Path) -> Held,
+    close_windows: impl FnOnce(&std::path::Path) -> Held,
     clean_unfinished: impl FnOnce(&std::path::Path),
 ) -> Result<Value, String> {
     let target = match &profile_id {
         Some(id) => session_target(id),
         None => PENDING_TARGET.to_string(),
     };
-    let (mut mail_profiles_left, mut setups_cleared) = (false, true);
-    if let (Some(id), Some(root)) = (profile_id.as_deref().filter(|id| is_profile_id(id)), app_root) {
+    let (mut mail_profiles_left, mut setups_cleared, mut school_profiles_left) = (false, true, false);
+    let shaped = profile_id.as_deref().filter(|id| is_profile_id(id));
+    // (0) RQ17: first, folder or none, so a folder that cannot go never keeps a password to sign it back in.
+    let school_password_left = shaped.is_some_and(|id| delete_school_password(id).is_err());
+    if let (Some(id), Some(root)) = (shaped, app_root) {
         let dir = crate::profiles::profile_dir(root, id);
-        let held = close_mail_window(&dir);
+        let held = close_windows(&dir);
         clean_unfinished(&dir);
         setups_cleared = forget_pending_setups(&dir);
         mail_profiles_left = crate::mail_session::forget_all(&dir) != Ok(true);
+        // (4b) Two statements, so the second folder is tried whatever the first answered.
+        let school_gone = crate::school_session::forget(&dir).is_ok();
+        let lms_gone = crate::grades::forget(&dir);
+        school_profiles_left = !(school_gone && lms_gone);
         drop(held);
     }
     let token = load_session(&target).ok().map(|(_, s)| s.access_token);
@@ -780,7 +805,14 @@ pub fn sign_out_with<Held>(
             .header("authorization", &format!("Bearer {t}"))
             .send_empty();
     }
-    Ok(json!({ "ok": true, "had_session": had_session, "mail_profiles_left": mail_profiles_left, "setups_cleared": setups_cleared }))
+    Ok(json!({
+        "ok": true,
+        "had_session": had_session,
+        "mail_profiles_left": mail_profiles_left,
+        "setups_cleared": setups_cleared,
+        "school_profiles_left": school_profiles_left,
+        "school_password_left": school_password_left,
+    }))
 }
 
 /// Step (3) of [`sign_out_with`]: every in-flight setup record goes, placed, shown and failed-delete ones
@@ -791,12 +823,44 @@ fn forget_pending_setups(dir: &std::path::Path) -> bool {
         .is_ok_and(|s| s.pending_setups.is_empty())
 }
 
+/// Every window that reads a school folder (onboarding plan §S5): grades' (`lms-session`, or
+/// `school-session` once S4a moves grades) and the LMS capture window. Sign-out destroys them by label,
+/// as `mail::close` destroys the mail windows, so WebView2 lets go of the folders before they are deleted.
+pub const SCHOOL_WINDOWS: [&str; 2] = [crate::grades::WINDOW, crate::lms_link::WINDOW];
+
+/// Sign-out's close of [`SCHOOL_WINDOWS`]: each one open is destroyed, and one already gone is nothing.
+fn close_school_windows(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    for label in SCHOOL_WINDOWS {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.destroy();
+        }
+    }
+}
+
+/// The saved school password's source: `knowlu/<profile_id>/school` (replan RQ17), the target P1's
+/// `school_password.rs` saves to. Sign-out and [`delete_local_data`] delete it; nothing else here reads it.
+pub const SCHOOL_PASSWORD_SOURCE: &str = "school";
+
+/// Step (0) of [`sign_out_with`]: deletes `profile_id`'s saved school password (an id the caller has
+/// checked with [`is_profile_id`]). `Ok` when none is left, one never saved included; `Err` is
+/// `credentials::delete`'s sentence, which names the target and never the secret.
+fn delete_school_password(profile_id: &str) -> Result<(), String> {
+    let target = crate::credentials::target_for(profile_id, SCHOOL_PASSWORD_SOURCE);
+    match crate::credentials::delete(&target) {
+        Err(e) if crate::credentials::exists(&target) => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Sign-out's cap on each network wait of its clean: the one session read (lock wait and refresh
 /// together) and each mail request (the list, and a delete per never-placed `pending` row: at most three,
 /// D3's live addresses). Sign-out's worst case, term by term: `MAIL_STOP_BOUND` (60 s, the hold) +
 /// `SIGN_OUT_MAIL_CALL` × (2 + deletes) + the revoke's 30 s (`TIMEOUT`), so at most 115 s of network
 /// waits; plus the local `wipe` term, about 2.75 s per mail profile WebView2 still holds (in the clean's
-/// `forget` and again in `forget_all`). Every other part is local file and Credential Manager work.
+/// `forget` and again in `forget_all`), and the two patient school-folder deletes of step (4b),
+/// `school-session` and `lms-session`, about 2.75 s each (call it 3 s) when WebView2 still holds that
+/// folder. Every other part is local file and Credential Manager work.
 pub const SIGN_OUT_MAIL_CALL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The client sign-out's clean uses ([`sign_out`], step 2): `api_base`'s mail routes, each request capped
@@ -1639,7 +1703,8 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// `app/tests/account.rs` can drive it over scratch folders and prove the list is exactly this long.
 /// **Everything it removes is named here and nowhere else**: the vault folder, THIS profile's
 /// subtree of the backups root, this profile's app-data folder, this profile's row in
-/// `profiles.json`, its session credential and its two coursework logins.
+/// `profiles.json`, its session credential, its two coursework logins and its saved school password
+/// (`knowlu/<profile_id>/school`, replan RQ17).
 ///
 /// **`backup_root` is the ROOT** — `%USERPROFILE%\Knowlu\Backups` for every profile on the machine —
 /// and `backup::tick` writes `<root>\<profile_id>\` inside it. Removing the root would destroy a
@@ -1660,7 +1725,10 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// **The kept mail profiles go first, patiently** (email-forwarding spec §4.13): the mail windows
 /// were closed a moment ago, and WebView2 lets go of a profile folder a second or so after its window
 /// is gone, so a single `remove_dir_all` could leave a signed-in mailbox behind. They are inside
-/// `data_dir`, so this names nothing new.
+/// `data_dir`, so this names nothing new. **So do the school folders** (onboarding plan §S5, Q-B9), for
+/// the same reason: `school-session` through `school_session::forget`, then `lms-session` through
+/// `grades::forget`, each tried whatever the other did. A school folder or a credential that will not go
+/// is a named line on stderr, as an id that is not one is: this has no envelope, and the next delete runs.
 pub fn delete_local_data(
     vault: &std::path::Path,
     data_dir: &std::path::Path,
@@ -1671,6 +1739,13 @@ pub fn delete_local_data(
 ) {
     let _ = std::fs::remove_dir_all(vault);
     let _ = crate::mail_session::forget_all(data_dir);
+    if let Err(e) = crate::school_session::forget(data_dir) {
+        eprintln!("Knowlu: {e}");
+    }
+    // Q-B9: today's grades folder, as patiently, whatever the school folder's delete answered.
+    if !crate::grades::forget(data_dir) {
+        eprintln!("Knowlu: the grades sign-in folder (lms-session) could not be deleted yet");
+    }
     let _ = std::fs::remove_dir_all(data_dir);
     if !session_credential_target.is_empty() {
         let _ = crate::credentials::delete(session_credential_target);
@@ -1691,11 +1766,16 @@ pub fn delete_local_data(
             let _ = crate::profiles::save(root, &left);
         }
     }
-    // The coursework logins are keyed to the PROFILE, not the account (`credentials::target_for`),
-    // and they are this machine's — deleting the account does not delete them, so this does.
-    for source in ["zybooks", "vhl"] {
+    // The coursework logins and the saved school password are keyed to the PROFILE, not the account
+    // (`credentials::target_for`), and they are this machine's — deleting the account does not delete
+    // them, so this does. One that will not go is a named line, and the next is still tried.
+    for source in ["zybooks", "vhl", SCHOOL_PASSWORD_SOURCE] {
         let t = crate::credentials::target_for(profile_id, source);
-        if crate::credentials::exists(&t) { let _ = crate::credentials::delete(&t); }
+        if crate::credentials::exists(&t) {
+            if let Err(e) = crate::credentials::delete(&t) {
+                eprintln!("Knowlu: {e}");
+            }
+        }
     }
 }
 
@@ -1808,7 +1888,8 @@ pub trait DeleteSteps {
     fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str>;
     /// [`delete_account_at`]; `Err` is the page's sentence.
     fn delete_account(&mut self) -> Result<(), String>;
-    /// Close the mail window and its popup, and stop whatever drives them.
+    /// Close the mail window and its popup, and stop whatever drives them; the console's also destroys
+    /// [`SCHOOL_WINDOWS`] first (onboarding plan §S5), so the wipe finds every kept folder let go.
     fn close_mail_windows(&mut self);
     /// [`delete_local_data`].
     fn delete_local_data(&mut self);
@@ -1886,6 +1967,8 @@ impl DeleteSteps for LiveDelete<'_> {
     }
 
     fn close_mail_windows(&mut self) {
+        // The school windows first, as sign-out's close does, so the wipe finds their folders let go.
+        close_school_windows(self.app);
         close_mail_windows(self.app);
         // Held to the end of the wipe, so nothing opens a mail window on a profile being deleted; a
         // holder still finishing its mailbox (a slot's mail step) is waited for, within the bound.
