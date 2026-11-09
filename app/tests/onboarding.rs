@@ -96,6 +96,58 @@ fn restoring_copies_the_mirror_and_never_writes_into_the_backup() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// C2e (replan §6.12): a mirror written before C2e can hold class-search data, in the series file and
+/// in a leftover `calendar-series.json.tmp<pid>`. A restore brings back none of it: the series file
+/// arrives as `commitments::series_for_backup` gives it, the leftover copy and a malformed series file
+/// holding that text do not arrive, a series file without it arrives byte for byte, and every other
+/// file and the backup itself are untouched. Every key, course and date is invented.
+#[test]
+fn restoring_an_older_mirror_brings_back_no_class_search_data() {
+    const DIRTY: &str = r#"{"calendars":{"classsearch:ua:202640":"2026-09-10","registrar:ua:202640":"2026-09-10"},"class_search":{"classsearch:ua:202640":{"no_time":["cs-100"]}},"ended":{"classsearch:ua:202640-40009":{"calendar":"classsearch:ua:202640","dropped":"2026-09-10","last_instance":null,"until":null}},"series":[]}"#;
+    const CLEAN: &str = "{ \"series\" :[ ],\n\t\"calendars\":{ },  \"ended\" : {}, \"extra_key\" : 1 }\n\n";
+    const MALFORMED: &str = "{\"calendars\": {\"classsearch:ua:202640\": ";
+    let has = |b: &[u8], n: &str| b.windows(n.len()).any(|w| w == n.as_bytes());
+    for (case, series) in [("dirty", DIRTY), ("clean", CLEAN), ("malformed", MALFORMED)] {
+        let root = tmp(&format!("restore-c2e-{case}"));
+        let mirror = root.join("backup").join("profile_1111111111").join("vault");
+        for (rel, text) in [
+            ("tasks/essay.md", "---\nid: t1\ntitle: \"Invented essay\"\n---\n"),
+            ("config/ingest.yaml", "feeds: []\n"),
+            ("state/plan.json", "{\"day\": \"2026-09-10\"}\n"),
+            ("state/calendar-series.json", series),
+            ("state/calendar-series.json.tmp4242", DIRTY),
+        ] {
+            std::fs::create_dir_all(mirror.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(mirror.join(rel), text).unwrap();
+        }
+        let before = fingerprint(&root.join("backup"));
+        let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &root.join("home"), "Fall 2026").expect("restore");
+        assert_eq!(fingerprint(&root.join("backup")), before, "{case}: the backup folder was written to");
+        let got = fingerprint(&dest);
+        for (name, bytes) in &got {
+            assert!(!has(bytes, "classsearch") && !has(bytes, "class_search"), "{case}: {name} holds class-search text");
+        }
+        let series_at = dest.join("state").join("calendar-series.json");
+        match case {
+            "dirty" => {
+                let want = knowlu_engine::commitments::series_for_backup(&mirror).expect("parseable");
+                assert_eq!(std::fs::read(&series_at).unwrap(), want, "the filtered bytes, as a backup takes them");
+                let v: serde_json::Value = serde_json::from_slice(&want).unwrap();
+                assert_eq!(v["calendars"], serde_json::json!({"registrar:ua:202640": "2026-09-10"}), "the rest is kept");
+            }
+            "clean" => assert_eq!(std::fs::read(&series_at).unwrap(), CLEAN.as_bytes(), "byte for byte"),
+            _ => assert!(!series_at.exists(), "a malformed file holding that text is not restored"),
+        }
+        assert!(!dest.join("state").join("calendar-series.json.tmp4242").exists(), "{case}: the leftover copy");
+        let rest = |t: &[(String, Vec<u8>)], strip: &str| -> Vec<(String, Vec<u8>)> {
+            t.iter().map(|(p, b)| (p.trim_start_matches(strip).replace('\\', "/"), b.clone()))
+                .filter(|(p, _)| !p.starts_with("state/calendar-series.json")).collect()
+        };
+        assert_eq!(rest(&got, ""), rest(&before, "profile_1111111111\\vault\\"), "{case}: every other file arrives whole");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 /// R-P4a-23(c): the names Windows would rewrite or refuse, caught before a credential can be keyed
 /// to a path the OS spells differently. `dest_for` is public for exactly this.
 #[test]

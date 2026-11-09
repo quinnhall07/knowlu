@@ -2411,14 +2411,38 @@ fn mentions_class_search(bytes: &[u8]) -> bool {
 fn purge_file(file: &mut SeriesFile, scope: PurgeScope, today: Date) -> bool {
     let size = |f: &SeriesFile| (f.series.len(), f.calendars.len(), f.ended.len(), f.class_search.len());
     let before = size(file);
-    file.series.retain(|s| !is_class_search(&s.source_uid) && !is_class_search(&s.calendar));
-    file.calendars.retain(|calendar, _| !is_class_search(calendar));
-    file.ended.retain(|key, e| !is_class_search(key) && !is_class_search(&e.calendar));
+    strip_class_search_rows(file);
     match scope {
         PurgeScope::Rows => file.class_search.retain(|key, _| !block_passed(key, today)),
         PurgeScope::All => file.class_search.clear(),
     }
     size(file) != before
+}
+
+/// Every `classsearch:` series (by key or calendar), `calendars` entry and `ended` entry: the rows
+/// [`purge_file`] and [`series_for_backup`] both remove. The no-time block is the caller's.
+fn strip_class_search_rows(file: &mut SeriesFile) {
+    file.series.retain(|s| !is_class_search(&s.source_uid) && !is_class_search(&s.calendar));
+    file.calendars.retain(|calendar, _| !is_class_search(calendar));
+    file.ended.retain(|key, e| !is_class_search(key) && !is_class_search(&e.calendar));
+}
+
+/// Replan §6.12, C2e: the series file's bytes as a backup may hold them. A file whose bytes hold
+/// neither `classsearch` nor `class_search` is returned raw, malformed or not, so a backup without
+/// class-search data is unchanged to the byte (`parse_file` drops unknown keys). Otherwise the file
+/// is parsed, every class-search row, `calendars` entry and `ended` key and the whole no-time block
+/// are removed, and [`file_bytes`] is returned: the same data, the same bytes. `None` when the file
+/// cannot be read, or holds that text and cannot be parsed; the caller skips it. Reads no clock and
+/// takes no lock: it only reads, and a torn read is a parse failure or a later tick's copy.
+pub fn series_for_backup(vault: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(series_path(vault)).ok()?;
+    if !mentions_class_search(&bytes) {
+        return Some(bytes);
+    }
+    let mut file = parse_file(std::str::from_utf8(&bytes).ok()?).ok()?;
+    strip_class_search_rows(&mut file);
+    file.class_search.clear();
+    Some(file_bytes(&file).into_bytes())
 }
 
 /// What [`purge_class_search`] removes (replan §6.12): `Rows` the unconfirmed `classsearch:` rows,
@@ -13833,5 +13857,67 @@ mod class_search_marker_tests {
         assert_eq!(again.declined, 0, "{again:?}");
         assert_eq!(tree(&a).into_keys().collect::<Vec<_>>(), names);
         assert_eq!((series_bytes(&a), journal_len(&a)), (bytes, records));
+    }
+}
+
+#[cfg(test)]
+mod class_search_backup_tests {
+    //! C2e (onboarding replan §6.12): `series_for_backup`, the series file's bytes as a backup
+    //! may hold them. Every key, course and date is invented. The mirror and zip behaviour is
+    //! pinned in `backup.rs`.
+
+    use super::*;
+
+    fn vault(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-c2e-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        dir
+    }
+
+    const WITH: &str = r#"{"calendars":{"classsearch:ua:202640":"2026-09-10","registrar:ua:202640":"2026-09-10"},"class_search":{"classsearch:ua:202640":{"no_time":["cs-100"]}},"ended":{"classsearch:ua:202640-40009":{"calendar":"classsearch:ua:202640","dropped":"2026-09-10","last_instance":null,"until":null}},"series":[]}"#;
+
+    /// A file holding class-search text is parsed, stripped of it and re-emitted canonically.
+    /// Red now: the stub returns the file whole.
+    #[test]
+    fn the_filtered_copy_drops_every_class_search_part_and_keeps_the_rest() {
+        let v = vault("filtered");
+        std::fs::write(v.join(SERIES_FILE), WITH).unwrap();
+        let bytes = series_for_backup(&v).expect("a parseable file gives bytes");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("classsearch") && !text.contains("class_search"), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["calendars"], serde_json::json!({"registrar:ua:202640": "2026-09-10"}));
+        assert_eq!(value["ended"], serde_json::json!({}));
+        assert!(text.ends_with('\n'), "file_bytes' trailing newline");
+        assert_eq!(series_for_backup(&v), Some(text.into_bytes()), "deterministic");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A file with neither word is returned as the raw bytes it holds, parseable or not.
+    /// Passes against the stub and must keep passing: a parse-and-dump would change it.
+    #[test]
+    fn a_file_with_no_class_search_text_is_returned_byte_for_byte() {
+        for raw in ["{ \"series\" : [] ,\n\"extra\":1 }\n\n", "not json at all \u{0}"] {
+            let v = vault("raw");
+            std::fs::write(v.join(SERIES_FILE), raw).unwrap();
+            assert_eq!(series_for_backup(&v), Some(raw.as_bytes().to_vec()), "{raw:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+    }
+
+    /// Text that cannot be parsed, or read, gives `None`: the caller skips it. Red now.
+    #[test]
+    fn a_malformed_file_holding_class_search_text_gives_none() {
+        for raw in ["{\"classsearch:ua:202640\": ", "{\"calendars\": {\"classsearch:ua:202640\": 1}}"] {
+            let v = vault("malformed");
+            std::fs::write(v.join(SERIES_FILE), raw).unwrap();
+            assert_eq!(series_for_backup(&v), None, "{raw}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+        let v = vault("not-utf8");
+        std::fs::write(v.join(SERIES_FILE), b"{\"class_search\": \xff}").unwrap();
+        assert_eq!(series_for_backup(&v), None, "not UTF-8");
+        let _ = std::fs::remove_dir_all(&v);
     }
 }

@@ -980,7 +980,8 @@ pub fn restore_vault_in(backup: &str, home: &Path, name: &str) -> Result<PathBuf
     let mirror = find_mirror(&src).ok_or_else(|| format!("{backup}: no <profile>\\vault\\ mirror in there"))?;
     let (dest, _backups) = vault_dest_in(home, name)?;
     let staging = dest.parent().unwrap_or(Path::new(".")).join(format!(".knowlu-restore-{}", knowlu_engine::ids::new_id("stage")));
-    match copy_tree(&mirror, &staging).and_then(|()| std::fs::rename(&staging, &dest).map_err(|e| e.to_string())) {
+    let staged = copy_tree(&mirror, &staging).and_then(|()| scrub_class_search(&staging));
+    match staged.and_then(|()| std::fs::rename(&staging, &dest).map_err(|e| e.to_string())) {
         Ok(()) => Ok(dest),
         Err(e) => { let _ = std::fs::remove_dir_all(&staging); Err(e) }
     }
@@ -1060,6 +1061,29 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
         if p.is_dir() { copy_tree(&p, &t)?; } else { std::fs::copy(&p, &t).map(|_| ()).map_err(|e| e.to_string())?; }
     }
     Ok(())
+}
+
+/// C2e (replan §6.12): a mirror written before C2e can hold class-search data, so the STAGED copy (never
+/// the backup) is cleaned the way a backup now takes it. Every leftover `state/calendar-series.json*`
+/// beside the series file goes; the series file becomes `commitments::series_for_backup`'s bytes,
+/// rewritten only when they differ (a file without that text is its own raw bytes), and is removed when
+/// that gives `None`: a malformed file holding that text, which the engine's next read would replace
+/// with a fresh one anyway. Fixed-word errors, no key.
+fn scrub_class_search(vault: &Path) -> Result<(), String> {
+    let state = vault.join("state");
+    let series = state.join("calendar-series.json");
+    for e in std::fs::read_dir(&state).into_iter().flatten().flatten() {
+        let leftover = e.file_name().to_str().is_some_and(|n| n.starts_with("calendar-series.json") && n != "calendar-series.json");
+        if leftover && e.path().is_file() {
+            std::fs::remove_file(e.path()).map_err(|e| format!("restore: a leftover series copy could not be removed ({})", e.kind()))?;
+        }
+    }
+    if !series.is_file() { return Ok(()); }
+    match knowlu_engine::commitments::series_for_backup(vault) {
+        Some(bytes) if std::fs::read(&series).is_ok_and(|raw| raw == bytes) => Ok(()),
+        Some(bytes) => std::fs::write(&series, bytes).map_err(|e| format!("restore: the series file could not be written ({})", e.kind())),
+        None => std::fs::remove_file(&series).map_err(|e| format!("restore: the series file could not be removed ({})", e.kind())),
+    }
 }
 
 /// A mirror inside the thing it mirrors is not a backup: it would copy itself. That is the whole
