@@ -1881,7 +1881,8 @@ pub trait DeleteSteps {
     fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str>;
     /// [`delete_account_at`]; `Err` is the page's sentence.
     fn delete_account(&mut self) -> Result<(), String>;
-    /// Close the mail window and its popup, and stop whatever drives them.
+    /// Close the mail window and its popup, and stop whatever drives them; the console's also destroys
+    /// [`SCHOOL_WINDOWS`] first (onboarding plan §S5), so the wipe finds every kept folder let go.
     fn close_mail_windows(&mut self);
     /// [`delete_local_data`].
     fn delete_local_data(&mut self);
@@ -1959,6 +1960,8 @@ impl DeleteSteps for LiveDelete<'_> {
     }
 
     fn close_mail_windows(&mut self) {
+        // The school windows first, as sign-out's close does, so the wipe finds their folders let go.
+        close_school_windows(self.app);
         close_mail_windows(self.app);
         // Held to the end of the wipe, so nothing opens a mail window on a profile being deleted; a
         // holder still finishing its mailbox (a slot's mail step) is waited for, within the bound.

@@ -3905,3 +3905,19 @@ fn sign_outs_close_destroys_every_school_window_by_label_first() {
     assert!(gate.is_some() && gate < school, "only this console's profile closes its windows: {sign_out}");
     assert!(school < mail && mail < take, "the school windows close first, then the mail windows, then the hold: {sign_out}");
 }
+
+/// *Delete my data* closes the school windows too, before its local wipe deletes the folders under them, as
+/// sign-out does: the console's `DeleteSteps::close_mail_windows` destroys [`SCHOOL_WINDOWS`] first, then
+/// closes the mail windows. Read from the source, as the mail half is, because it needs the app's handle.
+#[test]
+fn delete_my_datas_close_destroys_the_school_windows_before_the_wipe() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let at = src.find("impl DeleteSteps for LiveDelete").expect("the console's DeleteSteps");
+    let live = &src[at..at + src[at..].find("\n}\n").expect("the end of the impl")];
+    let from = live.find("fn close_mail_windows(&mut self) {").expect("its close step");
+    let close = &live[from..from + live[from..].find("\n    }\n").expect("the end of the close step")];
+    let (school, mail) = (close.find("close_school_windows(self.app);"), close.find("close_mail_windows(self.app);"));
+    assert!(school.is_some() && school < mail, "the school windows close first, then the mail windows: {close}");
+    // That the close step runs before the wipe is `delete_my_data_with`'s order, pinned at run time by
+    // `the_mail_windows_close_before_delete_local_data` (its log: "delete", "close", "local").
+}
