@@ -265,6 +265,53 @@ fn an_unknown_school_is_a_named_line_and_writes_nothing() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
+/// Controller ruling 3: a missing `--school` is a named line at exit 0 with nothing written, never
+/// clap's exit 2 (a slot must not fail for want of a flag).
+#[test]
+fn a_missing_school_is_a_named_line_and_writes_nothing() {
+    let v = scratch("no-school");
+    let before = snapshot(&v);
+    let out = run_cs(&v, &bundle_of("202640", all_states()), FALL_DAY, &[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(line.trim().lines().count() == 1 && line.to_lowercase().contains("school"), "a line naming the school: {line:?}");
+    assert_eq!(snapshot(&v), before, "wrote something");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Controller ruling 6: a bundle whose `school` is not `--school` is a named line (exit 0, nothing
+/// written): its sections were read for another school's term table.
+#[test]
+fn a_bundle_for_another_school_is_a_named_line_and_writes_nothing() {
+    let v = scratch("other-school");
+    let before = snapshot(&v);
+    let text = json!({ "school": "ub", "term": "202640", "queries": all_states() }).to_string();
+    let out = run_cs(&v, &text, FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let line = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(line.trim().lines().count() == 1 && line.to_lowercase().contains("school"), "a line naming the school: {line:?}");
+    assert_eq!(snapshot(&v), before, "wrote something");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Controller ruling 10 (§6.8: "an answer that is not JSON ... ends it as `closed`"): a query the app
+/// marked `answered` whose body is not JSON counts as `closed`, and makes no series and no block entry.
+#[test]
+fn an_answered_query_whose_body_is_not_json_counts_as_closed() {
+    let v = scratch("html-body");
+    let html = json!({ "subject": "ABC", "number": "200", "sections": ["001"], "status": "answered", "body": "<!DOCTYPE html><html>Sign in</html>" });
+    let found = answered("XYZ", "100", vec![row("XYZ", "100", "90001", vec![meeting("CLAS", "0900", "0950", &["monday"])])]);
+    let out = run_cs(&v, &bundle_of("202640", vec![found, html]), FALL_DAY, &["--school", "ua"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("stdout is a JSON report ({e}): {out:?}"));
+    assert_eq!(report["closed"], json!(1), "{report}");
+    assert_eq!(report["found"], json!(1), "{report}");
+    assert_eq!(report["not_found"], json!(0), "{report}");
+    let file = series_file(&v);
+    assert!(file.get("class_search").is_none(), "a closed query is no no-time fact: {file}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
 /// `--class-search` conflicts with `--confirm` and with `--registrar` (clap's usage error, exit 2,
 /// as `--registrar` and `--confirm` conflict), and writes nothing.
 #[test]
