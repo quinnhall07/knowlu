@@ -10,7 +10,7 @@
 //!
 //! **The lock.** A save and a Forget take `school_session::try_take(profile_id)` themselves and answer
 //! [`BUSY`] while a fill holds it, so neither can clear a mark a running fill is about to set. A read
-//! is handed the caller's guard and refuses unless this profile's lock is held.
+//! is handed the caller's guard and refuses unless that guard is this profile's.
 //!
 //! **The marks (P1b), [`FileMarks`].** The rejected mark blocks every fill until a new save. The
 //! in-flight mark is written and flushed before the first credential-carrying submit and cleared only
@@ -27,7 +27,7 @@ pub const BUSY: &str = "Knowlu is signing in to your school right now. Try again
 const WRITE_FAILED: &str = "Knowlu couldn't save your school password on this device.";
 const CLEAR_FAILED: &str = "Your school password is saved, but Knowlu couldn't clear an earlier sign-in that didn't finish, so it won't use the password yet. Save it again.";
 const READ_FAILED: &str = "Knowlu couldn't read the saved school password.";
-const NOT_HELD: &str = "the school sign-in is not held for this profile";
+const NOT_HELD: &str = "the school sign-in lock handed over is another profile's";
 
 /// The credential seam: targets are built by [`target`], never by hand.
 pub trait SchoolStore {
@@ -166,10 +166,10 @@ pub fn target(profile_id: &str) -> String {
     crate::credentials::target_for(profile_id, crate::account::SCHOOL_PASSWORD_SOURCE)
 }
 
-/// Whether `profile_id`'s lock is held right now. A caller's guard proves some lock is held; this
-/// proves it is this profile's, so a guard taken under another key reads nothing.
-fn held(profile_id: &str) -> bool {
-    try_take(profile_id).is_none()
+/// Whether the guard a caller hands over is `profile_id`'s own. It checks the guard and never probes
+/// the lock: a probe would only prove someone holds it, and could make another caller read `Busy`.
+fn held(profile_id: &str, lock: &SessionGuard) -> bool {
+    lock.profile_id() == profile_id
 }
 
 /// Takes `school_session::try_take(profile_id)` (`busy` when `None`, nothing written), writes the
@@ -195,10 +195,10 @@ pub fn save_with(
     reply(true, false, None)
 }
 
-/// The secret, read only while the caller holds this profile's lock (`_lock`). `None` when none is
+/// The secret, read only while the caller holds this profile's lock (`lock`, checked). `None` when none is
 /// saved. It never looks at a mark: the in-flight mark is checked only before a fill ([`gate_with`]).
-pub fn read_with(store: &dyn SchoolStore, profile_id: &str, _lock: &SessionGuard) -> Result<Option<SchoolSecret>, String> {
-    if !held(profile_id) {
+pub fn read_with(store: &dyn SchoolStore, profile_id: &str, lock: &SessionGuard) -> Result<Option<SchoolSecret>, String> {
+    if !held(profile_id, lock) {
         return Err(NOT_HELD.to_string());
     }
     let t = target(profile_id);
@@ -214,7 +214,7 @@ pub fn read_with(store: &dyn SchoolStore, profile_id: &str, _lock: &SessionGuard
 /// the in-flight mark alone included, since with no password nothing can be sent), then the in-flight
 /// mark (`Unconfirmed`, left set), and only then is the secret read.
 pub fn gate_with(store: &dyn SchoolStore, marks: &dyn SchoolMarks, profile_id: &str, lock: &SessionGuard) -> Result<Gate, String> {
-    if !held(profile_id) {
+    if !held(profile_id, lock) {
         return Err(NOT_HELD.to_string());
     }
     if marks.rejected() {
