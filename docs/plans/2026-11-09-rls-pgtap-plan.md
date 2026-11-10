@@ -1098,6 +1098,17 @@ Files: `cloud/supabase/tests/05_functions_test.sql`, `06_platform_test.sql` (new
     and needs no edit. A new trigger also needs the unmask set or `tests.stamp_only`.
   - **Leaks to the log:** a probe that raises can show a fixture UUID in the error CONTEXT lines
     (accepted at T5b). Descriptions and diag lines never print one.
+- **T11 whole-branch review (2026-11-10, PASS, seven Minors;
+  `docs/reports/2026-11-10-rls-pgtap-branch-review.md`).**
+  - **Fixed before merge:** M1 (the matrix comment names `tests.insert_sql`), M2 (F4 through
+    `tests.call_outcome`, with a 09 case), M3 (04's S2 to S4 through `tests.unmasked`, so C9's
+    acceptance of an AFTER trigger holds for every probing file), M4 (`tests.view_insert` re-raises a
+    42501 that is not a schema, view or table denial) and M7 (`ci.yml`'s header comment rewrapped;
+    the `cloud-rls` pin also forbids a job-level `permissions:` block and `github.token`).
+  - **Follow-up lane, not done here:** M5, one sentinel helper and one primary-key lookup in
+    `_setup.psql` in place of three copies each; M6, one text per check, read by both 01/05 and 09,
+    as `f3_calls`, `p4_client_policies` and `p5_rls_on` already are. Neither is a false pass today.
+    Until M6 lands, an edit that loosens a check in 01 or 05 must make the same edit in 09.
 
 ## 12. Out of scope
 

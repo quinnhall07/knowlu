@@ -9,7 +9,8 @@
 -- planted faults, in the same text. F3 goes through `tests.call_outcome`, which reads `denied`
 -- only for a 42501 whose message is `permission denied for function ...`, re-raises any other
 -- 42501, and reads anything else as `executed`; 09 saw both call forms below read `executed`
--- once EXECUTE was granted. F4 goes through `tests.probe`, so -1 is a refusal by a privilege.
+-- once EXECUTE was granted. F4 goes through `tests.call_outcome` the same way, and 09 saw its
+-- call read `executed` under the same grant.
 --
 -- F3's set is read from the catalog, never listed by hand (`tests.f3_calls()`, in `_setup.psql`
 -- so 09 proves the same text): every SECURITY DEFINER function in `public` or `admin`, extension
@@ -85,15 +86,13 @@ select ok((select count(*) from tests.f3_calls()) > 0,
 -- (the DO form) granted to both roles.
 select * from tests.f3_cases();
 
--- F4: account A naming account B's grant. A grant-level deny like F3, not an account-scoping
--- proof: `read_google_grant` has no `auth.uid()` binding, and its revoke is the whole defence
--- (r1 M3). B's id is read as the owner and spliced as a literal; it is never printed here.
-select is(
-  tests.probe('A', format('select count(*) from public.read_google_grant(%L::uuid, %L)',
-    (select a.id from tests.accounts a where a.who = 'B'),
-    'https://www.googleapis.com/auth/gmail.readonly')),
-  -1::bigint,
-  'F4: account A may not call public.read_google_grant naming account B''s Gmail grant (-1)');
+-- F4: account A naming account B's grant (`tests.f4_call()`, in `_setup.psql` so 09 proves the
+-- same text). A grant-level deny like F3, not an account-scoping proof: `read_google_grant` has
+-- no `auth.uid()` binding, and its revoke is the whole defence (r1 M3). Through
+-- `tests.call_outcome`, as F3, so only a refusal that names a function reads `denied`. 09: the
+-- same call under `read_google_grant` granted to both roles reads `executed`.
+select is(tests.call_outcome('A', tests.f4_call()), 'denied',
+  'F4: account A may not call public.read_google_grant naming account B''s Gmail grant');
 
 -- F5: no API role holds `usage` on `admin`. 09: the grant to each of the three roles.
 select is(

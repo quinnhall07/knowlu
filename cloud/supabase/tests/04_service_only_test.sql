@@ -88,7 +88,12 @@ create view tests.t04_slots as
 
 -- S1 to S5 slot by slot, then V2 view by view, in a fixed order. Each probe text is built as the
 -- owner before its call; an insert's text is built before the driver clears its slot, and each
--- clear empties only the probed table's own slot, never a parent's.
+-- clear empties only the probed table's own slot, never a parent's. S2, S3 and S4 (the insert and
+-- the updates) run through `_setup.psql`'s `tests.unmasked`, as 02's and 03's do (T11 review M3):
+-- a row-level AFTER INSERT or UPDATE trigger, which C9 accepts on any matrix table, is disabled
+-- for the probe, so one that writes elsewhere as the client cannot turn a hole into another
+-- table's -2. No service table has such a trigger today, so the set is empty and each check runs
+-- as written. S5 (a delete) calls the driver directly, as 02's A4 and 03's O9 and O10 do.
 create function tests.t04_cases() returns setof text language plpgsql as $$
 declare
   r record; v_read bigint; v_ins bigint; v_write text; v_slot text; v_pred text;
@@ -119,21 +124,23 @@ begin
 
     v_insert := tests.insert_sql(r.rel, r.who);
     v_clear := tests.clear_sql(r.rel, r.who);
-    return next is(tests.probe(r.who, v_insert, v_clear), v_ins,
+    return next is(
+      tests.unmasked(r.rel, format('tests.probe(%L, %L, %L)', r.who, v_insert, v_clear))::bigint,
+      v_ins,
       format('S2: %s''s insert of %s, in its cleared slot, is refused (%s grants, %s)',
         r.who, v_one, r.grants, v_ins));
 
     return next is(
-      tests.probe_write(r.who, r.rel,
-        format('update %s set %s where %s', r.rel, v_set, v_pred), v_slot)::text, v_write,
+      tests.unmasked(r.rel, format('tests.probe_write(%L, %L, %L, %L)::text', r.who, r.rel,
+        format('update %s set %s where %s', r.rel, v_set, v_pred), v_slot)), v_write,
       format('S3: %s''s update of %s (%s to the sentinel) changes nothing (%s grants, %s)',
         r.who, v_many, r.touch_col, r.grants, v_write));
 
     if r.key_col is not null then
       return next is(
-        tests.probe_write(r.who, r.rel,
+        tests.unmasked(r.rel, format('tests.probe_write(%L, %L, %L, %L)::text', r.who, r.rel,
           format('update %s set %I = %L where %s', r.rel, r.key_col,
-            tests.t04_key(r.rel, r.other), v_pred), v_slot)::text, v_write,
+            tests.t04_key(r.rel, r.other), v_pred), v_slot)), v_write,
         format('S4: %s''s move of %s to %s changes nothing (%s grants, %s)',
           r.who, v_many, r.other, r.grants, v_write));
     end if;

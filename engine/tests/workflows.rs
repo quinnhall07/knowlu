@@ -482,6 +482,28 @@ fn the_rls_job_is_shaped_to_be_required_runs_hosted_linux_and_holds_no_secret() 
     }
     assert!(regex::Regex::new(r"SUPABASE_CLI_VERSION: \d+\.\d+\.\d+\n").unwrap().is_match(job), "pin SUPABASE_CLI_VERSION");
     assert!(regex::Regex::new(r"SUPABASE_CLI_SHA256: [0-9a-f]{64}\n").unwrap().is_match(job), "pin SUPABASE_CLI_SHA256");
+    // T11 review M7: the job widens nothing. The workflow's `contents: read` is all it needs, so
+    // no job-level `permissions:`; it uses no token; and its one `env:` block, the job's, holds
+    // exactly the two CLI pins.
+    assert!(
+        !job.lines().any(|l| l.trim_start().starts_with("permissions:")),
+        "cloud-rls sets no permissions of its own; the workflow's contents: read is all it needs:\n{job}"
+    );
+    for t in ["github.token", "GITHUB_TOKEN"] {
+        assert!(!job.contains(t), "cloud-rls names `{t}`; a local database needs no token");
+    }
+    let lines: Vec<&str> = job.lines().collect();
+    let envs: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].trim_start() == "env:" || lines[i].trim_start().starts_with("env: "))
+        .collect();
+    assert_eq!(envs.len(), 1, "cloud-rls has one env block, the job's: {:?}", envs.iter().map(|&i| lines[i]).collect::<Vec<_>>());
+    assert_eq!(lines[envs[0]], "    env:", "cloud-rls's one env block is job-level, one key per line");
+    let keys: Vec<&str> = lines[envs[0] + 1..]
+        .iter()
+        .take_while(|l| l.starts_with("      "))
+        .map(|l| l.trim().split(':').next().unwrap_or(""))
+        .collect();
+    assert_eq!(keys, ["SUPABASE_CLI_VERSION", "SUPABASE_CLI_SHA256"], "cloud-rls's env holds exactly the two CLI pins");
     // Shell code only: no comment, no step name, no trailing comment.
     let trailing = regex::Regex::new(r"\s+#.*$").unwrap();
     let code: Vec<String> = job

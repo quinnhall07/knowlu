@@ -29,7 +29,9 @@
 --   `55000` for the six public views (none is updatable, and Postgres says so before it checks a
 --   privilege); `42501` for the three admin views (the schema's `usage` is checked first).
 --
--- A new table or view needs one row here, a fixture case in `_fixtures.psql` and nothing else.
+-- A new table or view needs one row here and, for a table, its case in `_setup.psql`'s
+-- `tests.insert_sql` (and, for a global table, in `tests.slot_where`), and nothing else:
+-- `_fixtures.psql` only loops over the matrix, writing each table's rows through `insert_sql`.
 
 insert into tests.matrix (rel, kind, access, key_col, touch_col, grants, policies, view_insert_code) values
   -- Owner-read tables (10): one `for select to authenticated using (<key> = auth.uid())` policy

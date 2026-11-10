@@ -293,9 +293,12 @@ end $$;
 
 -- An insert probe with its own outcome: V3 (r1 I4a, r2 note 1). `insert ... default values` into
 -- view `p_rel` as `p_who` returns the SQLSTATE: `00000` if it succeeded (then rolled back), or the
--- caught 42501, 55000 or 0A000. Any other error is re-raised.
+-- caught 42501, 55000 or 0A000. A 42501 is caught only when it is a privilege refusal of the
+-- schema, the view or a table under it (`permission denied for schema|view|table ...`, T11 review
+-- M4); any other 42501 (an RLS refusal through an updatable view, or one a trigger raised) is
+-- re-raised, as `tests.run` does, and so is every other error.
 create function tests.view_insert(p_who text, p_rel text) returns text language plpgsql as $$
-declare d text;
+declare d text; msg text;
 begin
   if p_rel is null or p_rel !~ '^(public|admin)\.[a-z_][a-z0-9_]*$' then
     raise exception 'tests.view_insert: bad relation name %', coalesce(p_rel, '<null>');
@@ -306,7 +309,12 @@ begin
       execute format('insert into %s default values', p_rel);
       d := '00000';
     exception
-      when insufficient_privilege or object_not_in_prerequisite_state or feature_not_supported then
+      when insufficient_privilege then
+        get stacked diagnostics d = returned_sqlstate, msg = message_text;
+        if msg !~ '^permission denied for (schema|view|table) ' then
+          raise;
+        end if;
+      when object_not_in_prerequisite_state or feature_not_supported then
         get stacked diagnostics d = returned_sqlstate;
     end;
     perform tests.as_owner();
@@ -425,6 +433,19 @@ language sql stable as $$
         where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
    order by 1
 $$;
+
+-- F4's call (T11 review M2; here so 09 proves the very text 05 runs): account A naming account
+-- B's Gmail grant through `read_google_grant`, in F3's select form. B's id is read here, as the
+-- owner, and spliced as a literal, since the caller cannot read `tests.accounts`; it is never
+-- printed. A grant-level deny, not an account-scoping proof: the function has no `auth.uid()`
+-- binding, and its revoke is the whole defence (r1 M3).
+create function tests.f4_call() returns text language plpgsql as $$
+declare v_b uuid;
+begin
+  select a.id into strict v_b from tests.accounts a where a.who = 'B';
+  return format('select count(*) from public.read_google_grant(%L::uuid, %L)',
+    v_b, 'https://www.googleapis.com/auth/gmail.readonly');
+end $$;
 
 -- P4 and P5 (06), each one expression over a relation, so 06 asks it of `realtime.messages` and
 -- 09 shows it failing on whatever relation the image lets this owner plant a fault on (the table

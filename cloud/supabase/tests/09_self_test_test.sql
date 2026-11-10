@@ -21,7 +21,7 @@ begin;
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(161);
+select plan(164);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -227,6 +227,12 @@ select is(:f3sel_anon, 'denied',
   'F3 control: anon''s select-form call (05''s text) is denied, naming a function');
 select is(:f3sel_a, 'denied',
   'F3 control: A''s select-form call (05''s text) is denied, naming a function');
+-- F4 (T11 review M2): account A naming account B's grant, `tests.f4_call()`, the text 05 runs,
+-- through `tests.call_outcome` under the same grant.
+select $c$tests.call_outcome('A', tests.f4_call())$c$ as f4 \gset
+select is(tests.under_fault(:'f1_fault', :'f4'), 'executed',
+  'F4 sees a planted fault: A''s call naming B''s grant (05''s text) executes');
+select is(:f4, 'denied', 'F4 control: A''s call naming B''s grant is denied, naming a function');
 
 -- F2: one SECURITY INVOKER, non-trigger function granted to anon alone. F2 lists it for anon only,
 -- and F1 does not list it, so the role and the definer flag both discriminate.
@@ -683,6 +689,22 @@ select is(tests.under_fault(:'v3_fault', :'v3_a'), '{public.zz_v:00000}',
   'V3 sees a planted fault: A''s insert into an updatable owner-run view succeeds');
 select is(:v3_anon, '{}', 'V3 control: anon''s insert into every view raises the matrix''s code');
 select is(:v3_a, '{}', 'V3 control: A''s insert into every view raises the matrix''s code');
+-- Guard rail (T11 review M4): `tests.view_insert` catches a 42501 only when it is a privilege
+-- refusal of the schema, the view or a table. A view whose insert raises some other 42501 (here
+-- an INSTEAD OF trigger's, standing in for an RLS refusal through an updatable view) makes it
+-- raise, never return `42501`. The controls above show the real refusals still read as codes:
+-- each admin view's is `permission denied for schema admin`.
+select throws_ok(
+  format('select tests.under_fault(%L, %L)',
+    $f$create view public.zz_vg as select 1 as x;
+       create function tests.zz_vg_t() returns trigger language plpgsql as $t$
+         begin raise exception using errcode = '42501', message = 'other'; end $t$;
+       create trigger zz instead of insert on public.zz_vg
+         for each row execute function tests.zz_vg_t();
+       grant insert on public.zz_vg to anon$f$,
+    $c$tests.view_insert('anon', 'public.zz_vg')$c$),
+  '42501', 'other',
+  'guard: view_insert re-raises a 42501 that is not a privilege refusal; it returns no code');
 
 -- The service-only faults (T5c), planted on `public.judgments`, a `service` table with default
 -- grants and no policy. They read the fixture rows `_fixtures.psql` writes: exactly one

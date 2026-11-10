@@ -18,9 +18,10 @@ env:
 # code change. `cloud-rls` excepted: it needs Linux containers. On the self-hosted runner, `cloud`
 # and `eval-gate` still run on Windows: `deno check` expands its own `**` globs (verified
 # 2026-09-22 with deno 2.9.6 in PowerShell, where the shell passes them literally), and the
-# `shell: bash` steps (eval-gate's own, and dtolnay/rust-toolchain's internal ones) need Git for Windows' bash.exe ahead of WSL's on the runner's PATH — a runner-setup
-# requirement, not a workflow one. release.yml never reads this switch: its signing and publish
-# secrets stay on GitHub-hosted runners.
+# `shell: bash` steps (eval-gate's own, and dtolnay/rust-toolchain's internal ones) need Git for
+# Windows' bash.exe ahead of WSL's on the runner's PATH — a runner-setup requirement, not a
+# workflow one. release.yml never reads this switch: its signing and publish secrets stay on
+# GitHub-hosted runners.
 jobs:
   # Plain git, no third-party action. `code` is `true` unless every changed file is a document
   # (`docs/**`, HANDOFF.md, VISION.md, PROVENANCE.md). Anything it cannot work out (the first push of
