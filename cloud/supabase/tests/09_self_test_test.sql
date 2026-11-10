@@ -20,7 +20,7 @@ begin;
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(104);
+select plan(118);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -585,6 +585,68 @@ select is(tests.under_fault(:'v3_fault', :'v3_a'), '{public.zz_v:00000}',
   'V3 sees a planted fault: A''s insert into an updatable owner-run view succeeds');
 select is(:v3_anon, '{}', 'V3 control: anon''s insert into every view raises the matrix''s code');
 select is(:v3_a, '{}', 'V3 control: A''s insert into every view raises the matrix''s code');
+
+-- The service-only faults (T5c), planted on `public.judgments`, a `service` table with default
+-- grants and no policy. They read the fixture rows `_fixtures.psql` writes: exactly one
+-- `judgments` row for A and one for B, so the literals 2, 1 and `(1,t)` below hold. Ids are spliced
+-- as `%L` literals, as in T5b's cases; a `probe_write` target names `tests.accounts` directly.
+
+-- C4: every service table carries exactly its matrix policies, which is none. It needs no fixture
+-- row, so it runs first.
+select $c$array(select m.rel from tests.matrix m
+   where m.access = 'service'
+     and array(select p.policyname::text from pg_policies p
+                where p.schemaname || '.' || p.tablename = m.rel order by 1)
+           is distinct from array(select x from unnest(m.policies) x order by 1)
+   order by 1)::text$c$ as c4 \gset
+select is(
+  tests.under_fault($f$create policy zz on public.judgments for select using (true)$f$, :'c4'),
+  '{public.judgments}',
+  'C4 sees a planted fault: a service table with a policy the matrix does not list is named');
+select is(:c4, '{}', 'C4 control: no service table carries a policy');
+
+-- S1 to S5: one policy for every command, open to authenticated (D6). Without it each probe is
+-- "per grants" for a default-grant table: a read sees 0 rows, an insert is an RLS refusal (-2),
+-- and an update, a move or a delete touches nothing. Under it each one lands.
+select
+  $f$create policy zz on public.judgments for all to authenticated
+       using (true) with check (true)$f$ as s_fault,
+  $c$tests.probe('A', 'select count(*) from public.judgments')$c$ as s1,
+  $c$tests.probe('A', format('select count(*) from public.judgments where account_id = %L',
+     (select id from tests.accounts where who = 'A')))$c$ as s1_keyed,
+  $c$tests.probe('A', tests.insert_sql('public.judgments', 'A'),
+     tests.clear_sql('public.judgments', 'A'))$c$ as s2,
+  $c$tests.probe_write('A', 'public.judgments',
+     format('update public.judgments set item_id = %L where account_id = %L', 'rls-probe',
+       (select id from tests.accounts where who = 'A')),
+     $w$account_id = (select id from tests.accounts where who = 'A')$w$)::text$c$ as s3,
+  $c$tests.probe_write('A', 'public.judgments',
+     format('update public.judgments set account_id = %L where account_id = %L',
+       (select id from tests.accounts where who = 'B'),
+       (select id from tests.accounts where who = 'A')),
+     $w$account_id = (select id from tests.accounts where who = 'A')$w$)::text$c$ as s4,
+  $c$tests.probe_write('A', 'public.judgments',
+     format('delete from public.judgments where account_id = %L',
+       (select id from tests.accounts where who = 'A')),
+     $w$account_id = (select id from tests.accounts where who = 'A')$w$)::text$c$ as s5 \gset
+select is(tests.under_fault(:'s_fault', :'s1')::bigint, 2::bigint,
+  'S1 sees a planted fault: A counts both fixture rows of public.judgments');
+select is(tests.under_fault(:'s_fault', :'s1_keyed')::bigint, 1::bigint,
+  'S1 sees a planted fault: A reads its own public.judgments row by its key');
+select is(tests.under_fault(:'s_fault', :'s2')::bigint, 1::bigint,
+  'S2 sees a planted fault: A inserts a public.judgments row for A');
+select is(tests.under_fault(:'s_fault', :'s3'), '(1,t)',
+  'S3 sees a planted fault: A''s update of its own public.judgments row lands');
+select is(tests.under_fault(:'s_fault', :'s4'), '(1,t)',
+  'S4 sees a planted fault: A moves its public.judgments row to B');
+select is(tests.under_fault(:'s_fault', :'s5'), '(1,t)',
+  'S5 sees a planted fault: A deletes its own public.judgments row');
+select is(:s1, 0::bigint, 'S1 control: A counts no public.judgments row');
+select is(:s1_keyed, 0::bigint, 'S1 control: A reads no public.judgments row by its own key');
+select is(:s2, -2::bigint, 'S2 control: A''s insert into public.judgments is an RLS refusal (-2)');
+select is(:s3, '(0,f)', 'S3 control: A''s update of public.judgments touches nothing');
+select is(:s4, '(0,f)', 'S4 control: A''s move of public.judgments rows to B touches nothing');
+select is(:s5, '(0,f)', 'S5 control: A''s delete of public.judgments rows touches nothing');
 
 select * from finish();
 rollback;
