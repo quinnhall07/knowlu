@@ -441,3 +441,119 @@ fn the_privacy_guard_reads_a_relative_root_from_the_powershell_location() {
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && text.contains("is past 2026-09-24"), "a relative root after Set-Location must read the tree's account.rs:\n{text}");
 }
+
+/// RLS pgTAP plan, D2 (T3): `cloud-rls` runs the pgTAP suite on a local Supabase database that the
+/// CLI builds from the migrations. It takes the required jobs' docs-only shape from day one, so
+/// making it required later can never deadlock a document-only PR. It runs on hosted Linux because
+/// it needs Linux containers, never behind the Windows self-hosted switch. It holds no secret and
+/// names no project, so a fork PR runs it with nothing to withhold. The CLI is checked before it
+/// runs, every CLI call reads `cloud/` (where `config.toml` resolves), and every `scripts/ci/` call
+/// goes through `bash`, because a script committed from Windows is not executable (r1 I5, M2, M6).
+#[test]
+fn the_rls_job_is_shaped_to_be_required_runs_hosted_linux_and_holds_no_secret() {
+    let c = workflow("ci.yml");
+    let job = job_block(&c, "cloud-rls");
+    assert!(job.lines().any(|l| l == "    needs: changes"), "cloud-rls must need `changes`:\n{job}");
+    let job_ifs: Vec<&str> = job.lines().filter(|l| l.starts_with("    if:")).collect();
+    assert_eq!(job_ifs, ["    if: ${{ !cancelled() }}"], "cloud-rls: the only job-level if is !cancelled()");
+    let steps: Vec<&str> = job.split("\n      - ").skip(1).collect();
+    let ifs = |s: &str| -> Vec<String> {
+        s.lines().map(str::trim).filter_map(|l| l.strip_prefix("if:")).map(|v| v.trim().to_string()).collect()
+    };
+    assert!(steps.len() >= 2, "cloud-rls has a no-op step and the heavy steps:\n{job}");
+    assert_eq!(ifs(steps[0]), ["needs.changes.outputs.code == 'false'"], "the first step is the no-op: {}", steps[0]);
+    assert!(steps[0].contains("run: echo"), "the no-op step only echoes: {}", steps[0]);
+    for s in &steps[1..] {
+        let i = ifs(s);
+        assert_eq!(i.len(), 1, "every later step carries exactly one if: {s}");
+        assert!(i[0].contains("needs.changes.outputs.code != 'false'"), "every later step keys on code != 'false': {s}");
+    }
+    for bad in ["== 'true'", "!= 'true'"] {
+        assert!(!job.contains(bad), "cloud-rls: `{bad}` fails open or runs the no-op when `changes` fails:\n{job}");
+    }
+    assert_eq!(job.matches("runs-on:").count(), 1, "cloud-rls: exactly one runs-on");
+    assert!(job.lines().any(|l| l == "    runs-on: ubuntu-24.04"), "cloud-rls runs on ubuntu-24.04, never ubuntu-latest");
+    assert!(!job.contains("CI_SELF_HOSTED"), "cloud-rls needs Linux containers; the self-hosted runner is Windows");
+    for f in ["secrets.", "SUPABASE_ACCESS_TOKEN", "supabase link", "db push", "--project-ref", "--linked", "functions deploy"] {
+        assert!(!job.contains(f), "cloud-rls is a local database and holds no secret, yet names `{f}`");
+    }
+    for l in job.lines().filter(|l| l.contains("SMTP_PASSWORD")) {
+        assert_eq!(l.trim(), "SMTP_PASSWORD: ci-local-unused", "SMTP_PASSWORD may only be D2's literal fallback");
+    }
+    assert!(regex::Regex::new(r"SUPABASE_CLI_VERSION: \d+\.\d+\.\d+\n").unwrap().is_match(job), "pin SUPABASE_CLI_VERSION");
+    assert!(regex::Regex::new(r"SUPABASE_CLI_SHA256: [0-9a-f]{64}\n").unwrap().is_match(job), "pin SUPABASE_CLI_SHA256");
+    // T11 review M7: the job widens nothing. The workflow's `contents: read` is all it needs, so
+    // no job-level `permissions:`; it uses no token; and its one `env:` block, the job's, holds
+    // exactly the two CLI pins.
+    assert!(
+        !job.lines().any(|l| l.trim_start().starts_with("permissions:")),
+        "cloud-rls sets no permissions of its own; the workflow's contents: read is all it needs:\n{job}"
+    );
+    for t in ["github.token", "GITHUB_TOKEN"] {
+        assert!(!job.contains(t), "cloud-rls names `{t}`; a local database needs no token");
+    }
+    let lines: Vec<&str> = job.lines().collect();
+    let envs: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].trim_start() == "env:" || lines[i].trim_start().starts_with("env: "))
+        .collect();
+    assert_eq!(envs.len(), 1, "cloud-rls has one env block, the job's: {:?}", envs.iter().map(|&i| lines[i]).collect::<Vec<_>>());
+    assert_eq!(lines[envs[0]], "    env:", "cloud-rls's one env block is job-level, one key per line");
+    let keys: Vec<&str> = lines[envs[0] + 1..]
+        .iter()
+        .take_while(|l| l.starts_with("      "))
+        .map(|l| l.trim().split(':').next().unwrap_or(""))
+        .collect();
+    assert_eq!(keys, ["SUPABASE_CLI_VERSION", "SUPABASE_CLI_SHA256"], "cloud-rls's env holds exactly the two CLI pins");
+    // Shell code only: no comment, no step name, no trailing comment.
+    let trailing = regex::Regex::new(r"\s+#.*$").unwrap();
+    let code: Vec<String> = job
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && !l.starts_with("- name:") && !l.starts_with("name:"))
+        .map(|l| trailing.replace(l, "").into_owned())
+        .collect();
+    let invokes = regex::Regex::new(r#"(?:^|[\s;&|(/"'])supabase"?(?:\s|$)"#).unwrap();
+    let calls: Vec<(usize, &String)> = code.iter().enumerate().filter(|(_, l)| invokes.is_match(l)).collect();
+    assert!(calls.len() >= 3, "expected the CLI's --version, db start and test db, found {calls:?}");
+    for (_, l) in &calls {
+        assert!(l.contains("--workdir cloud"), "every supabase call takes --workdir cloud: {l}");
+    }
+    assert!(calls.iter().any(|(_, l)| l.contains("--version")), "the CLI reports its version: {calls:?}");
+    let sha = code.iter().position(|l| l.contains("sha256sum -c")).expect("cloud-rls checks the CLI with sha256sum -c");
+    assert!(sha < calls[0].0, "sha256sum -c must come before the CLI's first use: {}", calls[0].1);
+    let scripts: Vec<usize> = job.match_indices("scripts/ci/").map(|(i, _)| i).collect();
+    assert!(scripts.len() >= 2, "cloud-rls runs scripts/ci/supabase-images.sh before and after the suite");
+    for i in scripts {
+        assert!(job[..i].ends_with("bash "), "a scripts/ci/ call is `bash scripts/ci/...`, never a bare path: {}", job[i..].lines().next().unwrap_or(""));
+    }
+    assert!(!job.contains(r"scripts\ci"), "cloud-rls is bash on Linux: no Windows paths");
+    // T4 (D2): every image is pinned by digest. `baseline` saves the runner's own images, `pull`
+    // fetches the locked digests before the CLI could pull anything, and `verify` (not `list`)
+    // fails the job when an image new since the baseline is not locked, even after a red suite.
+    let at = |needle: &str| -> usize {
+        let hits: Vec<usize> = code.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect();
+        assert_eq!(hits.len(), 1, "cloud-rls runs `{needle}` exactly once: {hits:?}");
+        hits[0]
+    };
+    let order = [
+        at("bash scripts/ci/supabase-images.sh baseline"),
+        at("bash scripts/ci/supabase-images.sh pull"),
+        at("supabase --workdir cloud db start"),
+        at("supabase --workdir cloud test db"),
+        at("bash scripts/ci/supabase-images.sh verify"),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "cloud-rls order is baseline, pull, db start, test db, verify: {order:?}");
+    assert!(!job.contains("supabase-images.sh list"), "`verify` replaces `list`: it diffs and fails, `list` only prints");
+    let verify = steps.iter().find(|s| s.contains("supabase-images.sh verify")).expect("a verify step");
+    assert_eq!(ifs(verify), ["always() && needs.changes.outputs.code != 'false'"], "verify runs even after a red suite: {verify}");
+    let lock = std::fs::read_to_string(root().join("cloud/supabase/tests/images.lock")).expect("cloud/supabase/tests/images.lock");
+    let pin = regex::Regex::new(r"^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$").unwrap();
+    let pins: Vec<&str> = lock.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).collect();
+    assert!(!pins.is_empty(), "images.lock names no image");
+    for l in &pins {
+        assert!(pin.is_match(l), "images.lock: every line is repo:tag@sha256:<digest>, got `{l}`");
+    }
+    for repo in ["supabase/postgres:", "supabase/pg_prove:"] {
+        assert!(pins.iter().any(|l| l.contains(repo)), "images.lock pins the {repo} image the suite needs");
+    }
+}

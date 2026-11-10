@@ -15,12 +15,13 @@ env:
 # The repository variable CI_SELF_HOSTED: the literal `on` sends every job below to
 # [self-hosted, windows, x64, knowlu-ci]; unset (or anything else), each job falls back to the
 # hosted image it ran on before, so going back to hosted runners is deleting the variable, never a
-# code change. On the self-hosted runner, `cloud` and `eval-gate` still run on Windows: `deno check`
-# expands its own `**` globs (verified 2026-09-22 with deno 2.9.6 in PowerShell, where the shell
-# passes them literally), and the `shell: bash` steps (eval-gate's own, and dtolnay/rust-toolchain's
-# internal ones) need Git for Windows' bash.exe ahead of WSL's on the runner's PATH — a runner-setup
-# requirement, not a workflow one. release.yml never reads this switch: its signing and publish
-# secrets stay on GitHub-hosted runners.
+# code change. `cloud-rls` excepted: it needs Linux containers. On the self-hosted runner, `cloud`
+# and `eval-gate` still run on Windows: `deno check` expands its own `**` globs (verified
+# 2026-09-22 with deno 2.9.6 in PowerShell, where the shell passes them literally), and the
+# `shell: bash` steps (eval-gate's own, and dtolnay/rust-toolchain's internal ones) need Git for
+# Windows' bash.exe ahead of WSL's on the runner's PATH — a runner-setup requirement, not a
+# workflow one. release.yml never reads this switch: its signing and publish secrets stay on
+# GitHub-hosted runners.
 jobs:
   # Plain git, no third-party action. `code` is `true` unless every changed file is a document
   # (`docs/**`, HANDOFF.md, VISION.md, PROVENANCE.md). Anything it cannot work out (the first push of
@@ -282,3 +283,58 @@ jobs:
         # not gated by Deno's runtime permissions, only by `--allow-read`/`--allow-net`'s absence
         # entirely, and this step needs to read its own source tree and thresholds.json.
         run: deno run --allow-read --allow-env=OPENROUTER_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=openrouter.ai,${{ env.STAGING_HOST }} --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
+
+  # Row-level security, proven on a real database (docs/plans/2026-11-09-rls-pgtap-plan.md, D2). The
+  # supabase CLI builds a local database from cloud/supabase/migrations (`db start`), with the
+  # platform's own `auth.uid()`, client roles and default grants, and `test db` runs the pgTAP files
+  # in cloud/supabase/tests/ against it. It is its own job, not a step of `cloud`: `cloud` follows
+  # the self-hosted switch onto Windows, where no Linux container runs, and R-X-7 keeps `cloud` the
+  # one Deno job (this is not a second one). It holds no secret and names no project. The only
+  # network it uses is setup, the CLI tarball (checked by SHA-256) and the database images, so a fork
+  # PR runs it with nothing to withhold. Not a required check yet, but it already has the required
+  # jobs' shape (engine/tests/workflows.rs), so requiring it can never deadlock a document-only PR.
+  cloud-rls:
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    env:
+      SUPABASE_CLI_VERSION: 3.1.0
+      SUPABASE_CLI_SHA256: dbe9fd66771337fc198727da86b9d3551302f87a7091cd8781be2a4cd0c8ac4d
+    steps:
+      - name: no code changed, nothing to run (this check still reports)
+        if: needs.changes.outputs.code == 'false'
+        run: echo "only documents changed; skipping the heavy steps"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: needs.changes.outputs.code != 'false'
+        with: { persist-credentials: false }
+      # The hosted image ships images of its own; the baseline lets `verify` judge only the new ones.
+      - name: images already on the runner
+        if: needs.changes.outputs.code != 'false'
+        run: bash scripts/ci/supabase-images.sh baseline
+      # Every image the CLI runs, pulled by the digest in cloud/supabase/tests/images.lock and tagged
+      # as the CLI names it, so `db start` and `test db` find them locally and pull nothing.
+      - name: the database images, pulled by digest
+        if: needs.changes.outputs.code != 'false'
+        run: bash scripts/ci/supabase-images.sh pull
+      - name: the supabase CLI, checked before it runs
+        if: needs.changes.outputs.code != 'false'
+        run: |
+          f="supabase_${SUPABASE_CLI_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/$f"
+          echo "$SUPABASE_CLI_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/supabase-cli"
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/supabase-cli"
+          echo "$RUNNER_TEMP/supabase-cli" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/supabase-cli/supabase" --workdir cloud --version
+      - name: a local database from the migrations (no project, nothing secret)
+        if: needs.changes.outputs.code != 'false'
+        run: supabase --workdir cloud db start
+      - name: pgTAP
+        if: needs.changes.outputs.code != 'false'
+        run: supabase --workdir cloud test db
+      # Fails when an image new since the baseline is not in images.lock, or a locked tag points at
+      # another digest: a CLI bump that changes an image needs images.lock in the same diff.
+      - name: nothing ran that is not locked
+        if: always() && needs.changes.outputs.code != 'false'
+        run: bash scripts/ci/supabase-images.sh verify

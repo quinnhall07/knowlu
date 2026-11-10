@@ -1,0 +1,105 @@
+-- The RLS matrix (RLS pgTAP plan, D3): one row per relation the migrations leave in `public` and
+-- `admin`, 36 tables, 6 public views and 3 admin views. Every pgTAP file includes it after
+-- `_setup.psql`, which creates `tests.matrix` and `tests.rpc_allowlist`, so it runs inside the file's
+-- own transaction and rolls back with it. pg_prove does not run it as a test.
+--
+-- Two readers, one source:
+-- - the pgTAP suite loops over `tests.matrix` (coverage C1, policies C3 and C4, grants C6, and the
+--   probes A1 to V3);
+-- - `cloud/supabase/rls_matrix_test.ts`, the static twin in the required `cloud` job, reads the rows
+--   of the one matrix insert below with a strict regex and compares them with the migration text.
+-- So the matrix is one insert with D3's column list in that order, one row per line, and nothing
+-- else inside the statement but comments.
+--
+-- The columns:
+-- - `rel`: schema-qualified.
+-- - `kind`: `table` or `view`.
+-- - `access`: `own` (an owner-read policy), `service` (no policy), `invoker_view`, `closed_view`.
+-- - `key_col`: the account key, `id` or `account_id`; `address_id` for `mail_batches` and
+--   `mail_canaries`, which reach the account through `mail_addresses`; null for a global table and
+--   for every view.
+-- - `touch_col`: the column an update probe sets to its per-type sentinel (text, number, timestamp
+--   or boolean). Never generated, identity, rewritten by a trigger, under a CHECK constraint,
+--   enum-typed or part of a foreign key. Also never a key column or a column in a unique constraint
+--   or unique index, because A3 sets every row to the same sentinel. One exception, `sync_notes`:
+--   see its row. Null for every view.
+-- - `grants`: `default` (the client roles hold Supabase's default table rights) or `revoked`.
+-- - `policies`: the exact policy names, `{}` for none.
+-- - `view_insert_code`: views only, the SQLSTATE V3 expects from `insert … default values`:
+--   `55000` for the six public views (none is updatable, and Postgres says so before it checks a
+--   privilege); `42501` for the three admin views (the schema's `usage` is checked first).
+--
+-- A new table or view needs one row here and, for a table, its case in `_setup.psql`'s
+-- `tests.insert_sql` (and, for a global table, in `tests.slot_where`), and nothing else:
+-- `_fixtures.psql` only loops over the matrix, writing each table's rows through `insert_sql`.
+
+insert into tests.matrix (rel, kind, access, key_col, touch_col, grants, policies, view_insert_code) values
+  -- Owner-read tables (10): one `for select to authenticated using (<key> = auth.uid())` policy
+  -- each, client grants at the defaults.
+  ('public.accounts',          'table', 'own',     'id',         'tos_version',         'default', '{accounts_select_own}',          null),
+  ('public.entitlements',      'table', 'own',     'account_id', 'plan',                'default', '{entitlements_select_own}',      null),
+  ('public.sources',           'table', 'own',     'account_id', 'url_iv',              'default', '{sources_select_own}',           null),
+  ('public.billing_reminders', 'table', 'own',     'account_id', 'last_reminded_at',    'default', '{billing_reminders_select_own}', null),
+  ('public.telemetry_events',  'table', 'own',     'account_id', 'object_kind',         'default', '{telemetry_events_select_own}',  null),
+  ('public.corrections',       'table', 'own',     'account_id', 'ours',                'default', '{corrections_select_own}',       null),
+  ('public.issues',            'table', 'own',     'account_id', 'app_version',         'default', '{issues_select_own}',            null),
+  -- `received_at` is the one column left: `keep` is generated, `seq` identity, the rest checked.
+  ('public.sync_records',      'table', 'own',     'account_id', 'received_at',         'default', '{sync_records_select_own}',      null),
+  -- Every `sync_notes` column is excluded by some rule: `rev` and `updated_at` are rewritten by
+  -- `sync_notes_stamp_rev`, `path`, `device`, `deleted` and `body` are checked, `account_id` is the
+  -- key. `body` is the one whose checks the text sentinel satisfies (1 to 131072 bytes, and the
+  -- tombstone check holds while the fixture rows are live notes, not tombstones), so it is used.
+  ('public.sync_notes',        'table', 'own',     'account_id', 'body',                'default', '{sync_notes_select_own}',        null),
+  ('public.sync_usage',        'table', 'own',     'account_id', 'bytes',               'default', '{sync_usage_select_own}',        null),
+  -- Service-only tables, no policy, client grants at the defaults (15). RLS with no policy is the
+  -- whole defence; the six with a null key are global.
+  ('public.consents',          'table', 'service', 'account_id', 'version',             'default', '{}',                             null),
+  ('public.webhook_events',    'table', 'service', null,         'event_type',          'default', '{}',                             null),
+  ('public.deleted_accounts',  'table', 'service', null,         'deleted_at',          'default', '{}',                             null),
+  ('public.models',            'table', 'service', null,         'prompt_version',      'default', '{}',                             null),
+  ('public.judgments',         'table', 'service', 'account_id', 'item_id',             'default', '{}',                             null),
+  -- Not `value`: it is in `rules_one_active_per_feature`.
+  ('public.rules',             'table', 'service', 'account_id', 'decided_at',          'default', '{}',                             null),
+  ('public.rule_evidence',     'table', 'service', null,         'agrees',              'default', '{}',                             null),
+  ('public.usage_daily',       'table', 'service', 'account_id', 'calls',               'default', '{}',                             null),
+  ('public.budget_alerts',     'table', 'service', 'account_id', 'usd',                 'default', '{}',                             null),
+  ('public.google_accounts',   'table', 'service', 'account_id', 'email_hint',          'default', '{}',                             null),
+  ('public.gmail_seen',        'table', 'service', 'account_id', 'seen_at',             'default', '{}',                             null),
+  ('public.gmail_queue',       'table', 'service', 'account_id', 'delivered_at',        'default', '{}',                             null),
+  ('public.google_state',      'table', 'service', 'account_id', 'issued_at',           'default', '{}',                             null),
+  -- Not `seed_id`: it is in `eval_cases_seed_id`.
+  ('public.eval_cases',        'table', 'service', null,         'added_at',            'default', '{}',                             null),
+  ('public.eval_runs',         'table', 'service', null,         'model',               'default', '{}',                             null),
+  -- Service-only tables, no policy, client grants revoked (11).
+  ('public.mail_accounts',     'table', 'service', 'account_id', 'fp_key_ciphertext',   'revoked', '{}',                             null),
+  ('public.mail_addresses',    'table', 'service', 'account_id', 'mailbox_hint',        'revoked', '{}',                             null),
+  ('public.mail_batches',      'table', 'service', 'address_id', 'closed_at',           'revoked', '{}',                             null),
+  ('public.mail_canaries',     'table', 'service', 'address_id', 'arrived_at',          'revoked', '{}',                             null),
+  ('public.mail_seen',         'table', 'service', 'account_id', 'seen_at',             'revoked', '{}',                             null),
+  ('public.mail_work',         'table', 'service', 'account_id', 'next_attempt_at',     'revoked', '{}',                             null),
+  -- Not `uid`: it is in `mail_claims_uid`.
+  ('public.mail_claims',       'table', 'service', 'account_id', 'sender_name',         'revoked', '{}',                             null),
+  ('public.judge_allowances',  'table', 'service', 'account_id', 'opened_at',           'revoked', '{}',                             null),
+  -- Not `ended_at`: it is under a CHECK and in `comp_grants_one_open`.
+  ('public.comp_grants',       'table', 'service', 'account_id', 'granted_at',          'revoked', '{}',                             null),
+  ('public.comp_audit',        'table', 'service', 'account_id', 'db_role',             'revoked', '{}',                             null),
+  ('public.route_daily',       'table', 'service', 'account_id', 'calls',               'revoked', '{}',                             null),
+  -- Public views (6). `billing_subscribers` is `security_invoker`, at the default grants: a client
+  -- reads it through its tables' own policies. The other five run as their owner and are revoked
+  -- from `anon` and `authenticated`.
+  ('public.billing_subscribers',    'view', 'invoker_view', null, null, 'default', '{}', '55000'),
+  ('public.telemetry_daily',        'view', 'closed_view',  null, null, 'revoked', '{}', '55000'),
+  ('public.correction_rates',       'view', 'closed_view',  null, null, 'revoked', '{}', '55000'),
+  ('public.monthly_spend',          'view', 'closed_view',  null, null, 'revoked', '{}', '55000'),
+  ('public.sync_limits',            'view', 'closed_view',  null, null, 'revoked', '{}', '55000'),
+  ('public.effective_entitlements', 'view', 'closed_view',  null, null, 'revoked', '{}', '55000'),
+  -- Admin views (3), in a schema every API role has lost `usage` on.
+  ('admin.testers',                 'view', 'closed_view',  null, null, 'revoked', '{}', '42501'),
+  ('admin.tester_usage_daily',      'view', 'closed_view',  null, null, 'revoked', '{}', '42501'),
+  ('admin.tester_spend_monthly',    'view', 'closed_view',  null, null, 'revoked', '{}', '42501');
+
+-- The RPC allowlist (Q3, F2): the client-executable non-trigger functions in `public` and `admin`
+-- that are so by design. Empty today, because every function is revoked from the client roles.
+-- This insert adds no rows and names no column, so it holds whatever columns `_setup.psql` gives
+-- the table; a function that becomes an RPC by design replaces it with a `values` insert naming it.
+insert into tests.rpc_allowlist select * from tests.rpc_allowlist where false;
