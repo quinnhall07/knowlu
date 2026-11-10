@@ -28,7 +28,7 @@ const LINE_BREAKS_ABOVE_C0: ReadonlySet<number> = new Set([0x85, 0x2028, 0x2029]
  * U+2215, the fraction slash U+2044, the big solidus U+29F8 and the box-drawing diagonal U+2571 are
  * mapped to "/" beside the dots (T2b review and re-review rulings).
  */
-function matchingForm(text: string): string {
+export function matchingForm(text: string): string {
   return text
     .normalize("NFKC")
     .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
