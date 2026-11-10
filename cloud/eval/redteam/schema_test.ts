@@ -550,6 +550,23 @@ Deno.test("a goal predicate of another kind fails validateFixture, naming it", (
   }
 });
 
+Deno.test("a padded known_courses slug or course_not fails validateFixture, naming it", () => {
+  const padded = withRequest(TASK_DECISION_ATTACK, "heuristics_seed", {
+    ...TASK_SEED,
+    known_courses: [" xx-101 ", "xx-102"],
+  });
+  const violations = validateFixture({ ...padded, goal: { course_not: " xx-101 " } });
+  expectViolation(violations, "known_courses", "padded known_courses");
+  expectViolation(violations, "course_not", "padded course_not");
+});
+
+Deno.test("absent_strings empty or repeated on the matching form fails validateFixture", () => {
+  for (const strings of [["\u200b"], ["Foo", "foo"]]) {
+    const record = { ...EVENT_ATTACK, goal: { verdict_not: "obligation", absent_strings: strings } };
+    expectViolation(validateFixture(record), "absent_strings", JSON.stringify(strings));
+  }
+});
+
 Deno.test("a goal predicate's argument outside its vocabulary fails validateFixture, naming it", () => {
   const record = { ...EVENT_ATTACK, goal: { verdict_not: "mandatory" } };
   expectViolation(validateFixture(record), "mandatory", "verdict_not outside EVENT_VERDICTS");
@@ -645,6 +662,124 @@ Deno.test("a non-reserved domain however it is spelled fails hygieneViolations",
     const record = withItem(TASK_TWIN, "body", `Your grade is posted at ${spelling} today.`);
     assertEquals(validateFixture(record), [], `${JSON.stringify(spelling)}: still structurally valid`);
     expectFoldedViolation(hygiene(record), "notexample", JSON.stringify(spelling));
+  }
+});
+
+// T3b fix round 1: what a browser, URL parser or mail client decodes in one step is read as it decodes.
+
+Deno.test("a numeric host after a special scheme with no or one slash is a URL host", () => {
+  // Each reads as 192.0.20.1 to a WHATWG URL parser (Deno's `new URL`).
+  for (const url of ["http:/3221230593/", "http:3221230593", "http:\\3221230593", "https:0xc0001401/"]) {
+    const record = withItem(EVENT_TWIN, "url", url);
+    assertEquals(validateFixture(record), [], `${url}: still structurally valid`);
+    expectViolation(hygiene(record), "192.0.20.1", url);
+  }
+});
+
+Deno.test("an IPv6 literal glued to a word or followed by a colon is still an IP literal", () => {
+  const texts = [
+    "Write to prof@[IPv6:2001:db9::1] today.",
+    "The relay addr:2001:db9::1 is up.",
+    "The relay is 2001:db9::1: down.",
+  ];
+  for (const text of texts) {
+    const record = withItem(CLAIM_TWIN, "text", text);
+    assertEquals(validateFixture(record), [], `${text}: still structurally valid`);
+    expectViolation(hygiene(record), "2001:db9::1", text);
+  }
+});
+
+Deno.test("a host behind a one-step escape fails hygieneViolations", () => {
+  const spellings = [
+    "notexample&#46com", // a decimal reference without its semicolon
+    "notexample&#x2ecom", // a hex reference without its semicolon
+    "notexample&#00000000046;com", // leading zeros
+    "http://notexample%E3%80%82com/", // a percent-encoded UTF-8 ideographic full stop
+    "http://notexample%EF%BC%8Ecom/", // a percent-encoded UTF-8 full-width full stop
+    "notexample&amp;#46;com", // an escaped escape
+    "notexample%252Ecom", // a percent-encoded percent escape
+  ];
+  for (const spelling of spellings) {
+    const record = withItem(TASK_TWIN, "body", `Your grade is posted at ${spelling} today.`);
+    assertEquals(validateFixture(record), [], `${spelling}: still structurally valid`);
+    expectFoldedViolation(hygiene(record), "notexample", spelling);
+  }
+});
+
+Deno.test("a host with a hyphen or underscore glued after its TLD fails hygieneViolations", () => {
+  for (
+    const text of ["See notexample.com--it is fast.", "Try notexample.com-based tutors.", "notexample.com_"]
+  ) {
+    const record = withItem(TASK_TWIN, "body", text);
+    assertEquals(validateFixture(record), [], `${text}: still structurally valid`);
+    expectViolation(hygiene(record), "notexample.com", text);
+  }
+});
+
+Deno.test("a base64 host behind a glued prefix fails hygieneViolations", () => {
+  // Both carry base64 of `https://notexample.com/x`, one at a 4-character offset and one at 1.
+  for (const token of ["ref_aHR0cHM6Ly9ub3RleGFtcGxlLmNvbS94", "xaHR0cHM6Ly9ub3RleGFtcGxlLmNvbS94"]) {
+    const record = withItem(TASK_TWIN, "body", `See ${token} for details.`);
+    assertEquals(validateFixture(record), [], `${token}: still structurally valid`);
+    expectFoldedViolation(hygiene(record), "notexample", token);
+  }
+});
+
+Deno.test("a dot with whitespace on one side only reads as a dot", () => {
+  for (const spelling of ["notexample .com", "notexample. com", "notexample\n.com"]) {
+    const record = withItem(TASK_TWIN, "body", `Your grade is posted at ${spelling} today.`);
+    assertEquals(validateFixture(record), [], `${JSON.stringify(spelling)}: still structurally valid`);
+    expectFoldedViolation(hygiene(record), "notexample", JSON.stringify(spelling));
+  }
+  // Sentences still end at a dot: a capital after it, or an abbreviation before it, joins nothing.
+  const prose = withItem(
+    TASK_TWIN,
+    "body",
+    "Lab is due Friday. Community night follows. See the lab. App day is today, e.g. the fair.",
+  );
+  assertEquals(hygiene(prose), [], "honest prose with sentence dots");
+});
+
+Deno.test("an escaped, look-alike-hyphenated or base64 'seed-' id or UUID fails, naming the rule", () => {
+  const uuid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const cases: Array<[string, string, string]> = [
+    ["percent-escaped hyphens", "Ref 0f8fad5b%2Dd9cb%2D469f%2Da165%2D70867728950e.", "UUID"],
+    ["U+2010 hyphens", "Ref 0f8fad5b\u2010d9cb\u2010469f\u2010a165\u201070867728950e.", "UUID"],
+    ["base64 of a UUID", `Ref ${btoa(uuid)} here.`, "UUID"],
+    ["a percent-escaped seed- id", "Ref seed%2D0042 here.", "seed-"],
+    ["base64 of a seed- id", `Ref ${btoa("seed-0042")} here.`, "seed-"],
+  ];
+  for (const [what, body, needle] of cases) {
+    expectViolation(allViolations(withItem(TASK_TWIN, "body", body)), needle, what);
+  }
+});
+
+Deno.test("a dotted quad glued to a word is still an IP literal", () => {
+  for (const host of ["relay-192.0.20.1", "relay_192.0.20.1", "v192.0.20.1"]) {
+    const record = withItem(CLAIM_TWIN, "text", `Mail goes through ${host} now.`);
+    assertEquals(validateFixture(record), [], `${host}: still structurally valid`);
+    expectViolation(hygiene(record), "192.0.20.1", host);
+  }
+});
+
+Deno.test("a string over the bound is reported once, and no other check runs on it", () => {
+  const record = withItem(EMAIL_TWIN, "text", "a." + "a".repeat(80_000 - 2));
+  const started = performance.now();
+  const violations = hygiene(record);
+  const elapsed = performance.now() - started;
+  assertEquals(violations.length, 1, JSON.stringify(violations));
+  assert(/2,?000/.test(violations[0]), violations[0]);
+  assert(elapsed < 1000, `hygiene took ${elapsed.toFixed(0)} ms on an 80,000-character string`);
+});
+
+Deno.test("a final label that is both a file extension and a TLD is a host", () => {
+  for (const name of ["notexample.ai", "lab.zip", "main.py", "notes.md"]) {
+    const record = withItem(TASK_TWIN, "body", `Read ${name} first.`);
+    assertEquals(validateFixture(record), [], `${name}: still structurally valid`);
+    expectViolation(hygiene(record), name, name);
+  }
+  for (const name of ["essay.docx", "report.pdf", "notes.txt"]) {
+    assertEquals(hygiene(withItem(TASK_TWIN, "body", `Read ${name} first.`)), [], name);
   }
 });
 
@@ -840,6 +975,31 @@ Deno.test("loadFixtures throws on a repeated id, naming the second line", async 
     await writeValidSet(dir);
     await writeLines(dir, "event.jsonl", [EVENT_TWIN, EVENT_ATTACK, EVENT_TWIN]);
     await expectLoadError(dir, "event.jsonl", 3, "rt-event-twin-1");
+  });
+});
+
+Deno.test("loadFixtures throws on a key repeated at any depth, naming the file and line", async () => {
+  await withTempDir(async (dir) => {
+    await writeValidSet(dir);
+    // JSON.parse keeps the last `text`, so the first would sit in the file unseen by every check.
+    const twin = JSON.stringify(CLAIM_TWIN).replace(
+      '"text":',
+      '"text":"see notexample.com and 192.0.20.1","text":',
+    );
+    await writeLines(dir, "mail_claim.jsonl", [twin, CLAIM_ATTACK]);
+    await expectLoadError(dir, "mail_claim.jsonl", 1, 'duplicate key "text"');
+  });
+});
+
+Deno.test("loadFixtures throws on a byte-order mark, naming the file and line 1", async () => {
+  await withTempDir(async (dir) => {
+    await writeValidSet(dir);
+    const bom = String.fromCharCode(0xfeff);
+    await Deno.writeTextFile(
+      new URL("event.jsonl", dir),
+      `${bom}${JSON.stringify(EVENT_ATTACK)}\n${JSON.stringify(EVENT_TWIN)}\n`,
+    );
+    await expectLoadError(dir, "event.jsonl", 1, "byte-order mark");
   });
 });
 

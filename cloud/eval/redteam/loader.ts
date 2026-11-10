@@ -5,7 +5,9 @@
 // loader.ts` does for the seed. Unlike the seed, an absent or empty directory throws too: the red-team suite
 // is never empty by design, and an empty suite would pass for nothing.
 //
-// Per line: valid JSON, `validateFixture`, `hygieneViolations`, a file named for the record's kind, an id
+// Per file: strict UTF-8 with no byte-order mark. Per line: LF only, valid JSON with no key repeated at any
+// depth (`JSON.parse` would hide all but the last), `validateFixture`, `hygieneViolations`, a file named for
+// the record's kind, an id
 // no earlier line holds, and canaries no earlier record holds (nor one a prefix of the other, which an echo
 // check would confuse). Over the set: every attack's `twin_of` names a twin of its own kind with the same
 // `heuristics_seed` (and, for mail_resolve, the same candidates), since the attacker controls the item and
@@ -41,6 +43,43 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * The first key an object in `line` repeats, at any depth, or null. `JSON.parse` keeps a repeated key's last
+ * value, so an earlier one would sit in the public file unseen by every check. One pass over a line that has
+ * already parsed: a string is skipped whole, and only a string in an object's key position is read as a key.
+ */
+function duplicateKey(line: string): string | null {
+  const stack: Array<Set<string> | null> = [];
+  let expectKey = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '"') j += line[j] === "\\" ? 2 : 1;
+      const keys = stack[stack.length - 1];
+      if (expectKey && keys) {
+        const key = JSON.parse(line.slice(i, j + 1)) as string;
+        if (keys.has(key)) return key;
+        keys.add(key);
+        expectKey = false;
+      }
+      i = j;
+    } else if (c === "{") {
+      stack.push(new Set());
+      expectKey = true;
+    } else if (c === "[") {
+      stack.push(null);
+      expectKey = false;
+    } else if (c === "}" || c === "]") {
+      stack.pop();
+      expectKey = false;
+    } else if (c === ",") {
+      expectKey = stack[stack.length - 1] instanceof Set;
+    }
+  }
+  return null;
+}
+
 function where(at: Located): string {
   return `${at.file}:${at.line}`;
 }
@@ -72,7 +111,19 @@ export async function loadFixtures(dir: URL = new URL("./fixtures/", import.meta
         `${name}: not a fixture file; each is named for its kind (${FIXTURE_KINDS.join(", ")})`,
       );
     }
-    const text = await Deno.readTextFile(new URL(name, dir));
+    // Decoded strictly and with any byte-order mark kept, so neither a mark nor a bad byte passes unnamed.
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+        await Deno.readFile(new URL(name, dir)),
+      );
+    } catch (e) {
+      if (e instanceof TypeError) throw new Error(`${name}: not valid UTF-8`);
+      throw e;
+    }
+    if (text.charCodeAt(0) === 0xfeff) {
+      throw new Error(`${name}:1: a byte-order mark; fixture files are UTF-8 without one`);
+    }
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -86,6 +137,8 @@ export async function loadFixtures(dir: URL = new URL("./fixtures/", import.meta
       } catch (e) {
         throw new Error(`${at}: not valid JSON (${e instanceof Error ? e.message : String(e)})`);
       }
+      const repeated = duplicateKey(line);
+      if (repeated !== null) throw new Error(`${at}: duplicate key ${JSON.stringify(repeated)}`);
 
       const shape = validateFixture(parsed);
       if (shape.length > 0) throw new Error(`${at}: ${shape.join("; ")}`);

@@ -10,11 +10,14 @@
 // so the two never disagree on what a host is. The eval seed's scrub rules (`cloud/eval/schema.ts`) do not
 // apply: a fixture carries URLs, bodies and senders, and never enters `eval_cases`.
 //
-// Pure and deterministic: no I/O, no clock, no network. Every regular expression runs in time linear in its
-// input: every unbounded quantifier is over one character class, and no quantified group holds one (the one
-// quantified group, `URL_TAIL`'s optional port, holds a bounded `{1,5}` and reads at most eight characters).
+// Pure and deterministic: no I/O, no clock, no network. This file's own regular expressions run in time
+// linear in their input: every unbounded quantifier is over one character class, and a quantified group
+// holds at most a fixed-width body. The oracle's `policyBreaches`, which decides TLDs, is not linear on a
+// long token, so it runs only on strings within the length bound: a string over it is reported and nothing
+// else is checked.
 import { matchingForm, policyBreaches } from "./detect.ts";
 import { MAIL_TEXT_CHARS } from "../../supabase/functions/_shared/judge_prompts.ts";
+import { IANA_TLDS, IDN_TLDS } from "../../supabase/functions/_shared/tlds.ts";
 import {
   EMAIL_ITEM_FIELDS,
   EMAIL_TIERS,
@@ -303,10 +306,13 @@ function checkRequest(request: unknown, kind: FixtureKind | null, violations: st
   if ("known_courses" in seed) {
     const known = seed.known_courses;
     if (
-      !Array.isArray(known) || !known.every((c) => typeof c === "string" && c.trim() !== "") ||
+      !Array.isArray(known) || !known.every((c) => typeof c === "string" && c !== "" && c === c.trim()) ||
       new Set(known).size !== known.length
     ) {
-      violations.push("request.heuristics_seed.known_courses must be an array of distinct, non-empty slugs");
+      violations.push(
+        "request.heuristics_seed.known_courses must be an array of distinct, non-empty slugs, each " +
+          "without leading or trailing whitespace",
+      );
     }
   }
   if (kind === "mail_resolve" && Object.keys(seed).length > 0) {
@@ -379,11 +385,8 @@ function checkAttack(record: Record<string, unknown>, kind: FixtureKind | null, 
   if (!Array.isArray(planted) || planted.length === 0) {
     violations.push("an attack needs planted: a non-empty array of the strings its payload carries");
   } else {
-    planted.forEach((p, i) => {
-      if (typeof p !== "string" || p.trim() === "") {
-        violations.push(`planted[${i}] must be a non-empty string`);
-      } else if (planted.indexOf(p) !== i) violations.push(`planted[${i}] repeats ${show(p)}`);
-    });
+    const problem = stringListProblem(planted);
+    if (problem !== null) violations.push(`planted: ${problem}`);
   }
 
   const goal = record.goal;
@@ -460,7 +463,9 @@ function argumentProblem(
     case "importance_not_in":
       return subsetProblem(argument, IMPORTANCES, "a whole number 1 to 5");
     case "course_not":
-      if (typeof argument !== "string" || argument.trim() === "") return "must be a non-empty course slug";
+      if (typeof argument !== "string" || argument === "" || argument !== argument.trim()) {
+        return `${show(argument)} must be a non-empty course slug without leading or trailing whitespace`;
+      }
       return known.includes(argument) ? null : `${show(argument)} is not in this record's ` +
         "heuristics_seed.known_courses; validation nulls any other slug, so the goal could never fail";
     case "due_not":
@@ -468,21 +473,44 @@ function argumentProblem(
         ? null
         : `${show(argument)} must be a real calendar day, YYYY-MM-DD`;
     case "absent_strings":
-      if (!Array.isArray(argument) || argument.length === 0) return "must be a non-empty array of strings";
-      if (!argument.every((a) => typeof a === "string" && a.trim() !== "")) {
-        return "every entry must be a non-empty string";
-      }
-      return new Set(argument).size === argument.length ? null : `${show(argument)} repeats a string`;
+      return stringListProblem(argument);
   }
+}
+
+/**
+ * A non-empty array of strings, each non-empty and all distinct on the matching form: the form outputs are
+ * compared on, so a zero-width-only entry (empty there, and so found in every output) or `Foo` beside `foo`
+ * is refused. `planted` and `absent_strings` share it.
+ */
+function stringListProblem(list: unknown): string | null {
+  if (!Array.isArray(list) || list.length === 0) return "must be a non-empty array of strings";
+  const seen = new Set<string>();
+  for (const [i, entry] of list.entries()) {
+    if (typeof entry !== "string") return `entry ${i} must be a string`;
+    const form = matchingForm(entry).trim();
+    if (form === "") return `entry ${i}, ${show(entry)}, is empty on the matching form`;
+    if (seen.has(form)) return `entry ${i}, ${show(entry)}, repeats another on the matching form`;
+    seen.add(form);
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Hygiene.
 // ---------------------------------------------------------------------------------------------
+//
+// The threat is an honest author's slip, or a C8 fixture's deliberate obfuscation, that a browser, a URL
+// parser or a mail client decodes in one step (T3b fix-round ruling). So each string is read as those
+// decode it: escapes to a fixed point (at most three rounds), half-spaced and spelled-out dots joined,
+// hyphen look-alikes folded, a host glued to a word or a separator cut free, and base64 decoded at each
+// alignment. A host split across two strings is out of reach: nothing per string can see it.
 
 const RESERVED_TEXT = "example, example.com, example.org or example.net, a name under one, or a name under " +
   ".test or .invalid";
 const IP_RANGES = "192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 or 2001:db8::/32";
+
+/** Every root-zone TLD, each IDN in both its forms: `tlds.ts`, the enforcement's list, read as data. */
+const ROOT_TLDS: ReadonlySet<string> = new Set([...IANA_TLDS, ...IDN_TLDS.flat()]);
 
 /** §5's reserved names (RFC 2606): `example`, `example.com`, `example.org`, `example.net`, a name under one
  * of them, or a name under `.test` or `.invalid`. */
@@ -502,32 +530,141 @@ function documentationV4(octets: readonly number[]): boolean {
 }
 
 function codePoint(n: number): string | null {
-  return n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : null;
+  return Number.isFinite(n) && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : null;
 }
 
-/** Percent escapes (byte by byte), numeric HTML entities and the named ones for a dot, an at and a slash,
- * decoded. */
-function decodeEscapes(text: string): string {
-  return text
-    .replace(/%([0-9a-fA-F]{2})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/&#([0-9]{1,7});/g, (whole, dec: string) => codePoint(Number(dec)) ?? whole)
-    .replace(/&#[xX]([0-9a-fA-F]{1,6});/g, (whole, hex: string) => codePoint(parseInt(hex, 16)) ?? whole)
-    .replace(/&period;/gi, ".")
-    .replace(/&commat;/gi, "@")
-    .replace(/&sol;/gi, "/");
+/** The hyphen look-alikes U+2010 to U+2015 and the minus sign U+2212, folded to `-` before the id rules.
+ * Built from code points, so no look-alike sits raw in this file. */
+const HYPHEN_LOOKALIKES = new RegExp(
+  `[${String.fromCharCode(0x2010)}-${String.fromCharCode(0x2015)}${String.fromCharCode(0x2212)}]`,
+  "g",
+);
+
+function foldHyphens(text: string): string {
+  return text.replace(HYPHEN_LOOKALIKES, "-");
+}
+
+/** A run of percent escapes: decoded together as UTF-8, so `%E3%80%82` is one ideographic full stop. */
+const PERCENT_RUN = /(?:%[0-9a-fA-F][0-9a-fA-F])+/g;
+/** A numeric character reference, its semicolon optional (as an HTML parser reads one), any length. */
+const DECIMAL_REF = /&#([0-9]+)(;?)/g;
+const HEX_REF = /&#[xX]([0-9a-fA-F]+)(;?)/g;
+const NAMED_REF = /&(amp|period|commat|sol|colon|num);/gi;
+const NAMED: Readonly<Record<string, string>> = {
+  amp: "&",
+  period: ".",
+  commat: "@",
+  sol: "/",
+  colon: ":",
+  num: "#",
+};
+
+function decodePercentRun(run: string): string {
+  try {
+    return decodeURIComponent(run);
+  } catch {
+    // Not UTF-8: byte by byte, as Latin-1.
+    let out = "";
+    for (let i = 0; i < run.length; i += 3) out += String.fromCharCode(parseInt(run.slice(i + 1, i + 3), 16));
+    return out;
+  }
 }
 
 /**
- * The form hosts are read on: escapes decoded, then the matching form, then whitespace runs folded to one
- * space, then the spelled-out dots (`[dot]`, `(dot)`, `{dot}`, `<dot>`, `[.]` and the like, ` dot `, ` . `)
- * read as `.` and the bracketed ats (`[at]`, `(at)`) as `@`. Case is already folded, so `DOT` is ` dot `.
+ * A numeric reference's text. With its semicolon, or read greedily, every digit counts. Without one, the
+ * ASCII-first reading (`asciiFirst`) takes the longest prefix of digits whose value is ASCII and leaves the
+ * rest as text: `&#x2ecom` is greedily U+02EC then `om`, but an author who meant `.com` wrote `.` then `com`.
  */
-function hostForm(text: string): string {
-  return matchingForm(decodeEscapes(text))
+function referenceText(digits: string, radix: number, semicolon: string, asciiFirst: boolean): string | null {
+  if (semicolon === "" && asciiFirst) {
+    let value = 0;
+    let used = 0;
+    for (const digit of digits) {
+      const next = value * radix + parseInt(digit, radix);
+      if (next > 0x7f) break;
+      value = next;
+      used++;
+    }
+    const head = used === 0 ? null : codePoint(value);
+    return head === null ? null : head + digits.slice(used);
+  }
+  return codePoint(parseInt(digits, radix));
+}
+
+function decodeOnce(text: string, asciiFirst: boolean): string {
+  return text
+    .replace(PERCENT_RUN, decodePercentRun)
+    .replace(DECIMAL_REF, (whole, d: string, semi: string) => referenceText(d, 10, semi, asciiFirst) ?? whole)
+    .replace(HEX_REF, (whole, h: string, semi: string) => referenceText(h, 16, semi, asciiFirst) ?? whole)
+    .replace(NAMED_REF, (_, name: string) => NAMED[name.toLowerCase()]);
+}
+
+/** Percent escapes, numeric references and a few named ones, decoded to a fixed point in at most three
+ * rounds: `%252E` and `&amp;#46;` are a dot after two. */
+function decodeEscapes(text: string, asciiFirst: boolean): string {
+  let out = text;
+  for (let round = 0; round < 3; round++) {
+    const next = decodeOnce(out, asciiFirst);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+const LABEL_CHAR = /[\p{L}\p{M}\p{N}_\-]/u;
+
+/** How many label characters (at most two) sit right before `index` in `text`. */
+function labelCharsBefore(text: string, index: number): number {
+  let count = 0;
+  while (count < 2 && index - count - 1 >= 0 && LABEL_CHAR.test(text[index - count - 1])) count++;
+  return count;
+}
+
+/** Whether `label`, cut at its first `-` or `_` and lower-cased, is a root-zone TLD. */
+function isRootTld(label: string): boolean {
+  return ROOT_TLDS.has(cutAtFirstSeparator(label).toLowerCase());
+}
+
+/**
+ * A dot with whitespace on one side only, joined when the label after it is a root-zone TLD: `notexample
+ * .com`, `notexample. com`. Read before case is folded, so `. ` joins only before a lower-case label after a
+ * label of two or more characters: a sentence's next word is capitalised (`Friday. Community`), and `e.g.
+ * the` follows a one-letter label.
+ */
+function joinHalfSpacedDots(text: string): string {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(
+      / \.([\p{L}\p{N}][\p{L}\p{M}\p{N}_\-]*)/gu,
+      (whole, label: string, offset: number, all: string) =>
+        labelCharsBefore(all, offset) >= 1 && isRootTld(label) ? `.${label}` : whole,
+    )
+    .replace(
+      /\. (\p{Ll}[\p{L}\p{M}\p{N}_\-]*)/gu,
+      (whole, label: string, offset: number, all: string) =>
+        labelCharsBefore(all, offset) >= 2 && isRootTld(label) ? `.${label}` : whole,
+    );
+}
+
+/**
+ * The form hosts are read on: escapes decoded, half-spaced dots joined, then the matching form, hyphen
+ * look-alikes folded, whitespace runs folded to one space, then the spelled-out dots (`[dot]`, `(dot)`,
+ * `{dot}`, `<dot>`, `[.]` and the like, ` dot `, ` . `) read as `.` and the bracketed ats (`[at]`, `(at)`)
+ * as `@`. Case is folded by then, so `DOT` is ` dot `.
+ */
+function hostForm(text: string, asciiFirst: boolean): string {
+  return foldHyphens(matchingForm(joinHalfSpacedDots(decodeEscapes(text, asciiFirst))))
     .replace(/\s+/g, " ")
     .replace(/ ?[\[({<] ?(?:dot|\.) ?[\])}>] ?/g, ".")
     .replace(/ ?[\[({<] ?at ?[\])}>] ?/g, "@")
     .replace(/ (?:dot|\.) /g, ".");
+}
+
+/** The greedy and the ASCII-first readings of `text`, one when they agree. */
+function hostForms(text: string): string[] {
+  const greedy = hostForm(text, false);
+  const asciiFirst = hostForm(text, true);
+  return greedy === asciiFirst ? [greedy] : [greedy, asciiFirst];
 }
 
 /** Whether the oracle reads `token` alone as a host: its TLD rule and extension list, not a copy of them. */
@@ -547,19 +684,25 @@ function isExtensionLabel(label: string): boolean {
   return known;
 }
 
+/** A final label both on the extension list and in the root zone (`ai`, `zip`, `py`, `md`, ...). */
+function isDualLabel(label: string): boolean {
+  return isExtensionLabel(label) && ROOT_TLDS.has(label);
+}
+
 /** A path, query or port right after a host. */
 const URL_TAIL = /^(?::[0-9]{1,5})?(?:[\/\\]|[?#]\S)/;
 
 /**
- * Whether the dot-joined `labels` name a host. A final label the oracle reads as a TLD makes one. A final
- * label on the extension list makes one in a URL's host position, after `www`, before a path or port, or
- * when the token is longer than `name.ext` or `name.ext.ext` (a file name such as `essay.docx` or
- * `notes.tar.gz` is not a host).
+ * Whether the dot-joined `labels` name a host. A final label the oracle reads as a TLD makes one, and so
+ * does one that is both a file extension and a root-zone TLD (T3b ruling: `main.py`, `notes.md`; name files
+ * `.docx`, `.pdf`, `.txt`). Another extension label makes one in a URL's host position, after `www`, before
+ * a path or port, or when the token is longer than `name.ext` or `name.ext.ext` (`notes.tar.gz`).
  */
 function isDomain(labels: readonly string[], urlHost: boolean, rest: string): boolean {
   if (oracleHost(labels.join("."))) return true;
-  if (!isExtensionLabel(labels[labels.length - 1])) return false;
-  if (urlHost || labels[0] === "www" || URL_TAIL.test(rest)) return true;
+  const last = labels[labels.length - 1];
+  if (!isExtensionLabel(last)) return false;
+  if (isDualLabel(last) || urlHost || labels[0] === "www" || URL_TAIL.test(rest)) return true;
   const fileName = labels.length === 2 || (labels.length === 3 && isExtensionLabel(labels[1]));
   return !fileName;
 }
@@ -573,9 +716,95 @@ const CANONICAL_OCTET = /^(?:0|[1-9][0-9]{0,2})$/;
 const LOCAL_PART_END = /[\p{L}\p{M}\p{N}_.%+\-]/u;
 const HEX_RUN = /[0-9a-f:.]+/g;
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
+/** The schemes a WHATWG URL parser gives a host with no slash, or one (`http:host`, `http:/host`). */
+const SPECIAL_SCHEMES: ReadonlySet<string> = new Set(["http", "https", "ws", "wss", "ftp"]);
+const SCHEME_CHAR = /[a-z0-9+.\-]/;
+
+function isSeparator(ch: string): boolean {
+  return ch === "-" || ch === "_";
+}
+
+/** `label` without `-` or `_` at either end: `com-` and `com_` are `com`. */
+function trimLabel(label: string): string {
+  let start = 0;
+  let end = label.length;
+  while (start < end && isSeparator(label[start])) start++;
+  while (end > start && isSeparator(label[end - 1])) end--;
+  return label.slice(start, end);
+}
+
+function cutAtFirstSeparator(label: string): string {
+  for (let i = 1; i < label.length; i++) if (isSeparator(label[i])) return label.slice(0, i);
+  return label;
+}
+
+function afterLastSeparator(label: string): string {
+  for (let i = label.length - 2; i >= 0; i--) if (isSeparator(label[i])) return label.slice(i + 1);
+  return label;
+}
+
+/** The digits `label` ends with, "" when it ends with none: `v192` gives `192`. */
+function trailingDigits(label: string): string {
+  let start = label.length;
+  while (start > 0 && label[start - 1] >= "0" && label[start - 1] <= "9") start--;
+  return label.slice(start);
+}
 
 function labelsOf(run: string): string[] {
-  return run.split(".").filter((label) => label !== "");
+  return run.split(".").map(trimLabel).filter((label) => label !== "");
+}
+
+/**
+ * The hosts a run may name: as written, with its last label cut at its first separator (`com--it`,
+ * `com-based`), and with its first label cut after its last separator or to its trailing digits
+ * (`relay-192`, `relay_192`, `v192`). A reader, a linkifier or a resolver may stop at any of these.
+ */
+function hostReadings(labels: readonly string[]): string[][] {
+  if (labels.length < 2) return [[...labels]];
+  const first = labels[0];
+  const last = labels[labels.length - 1];
+  const middle = labels.slice(1, -1);
+  const firsts = [...new Set([first, afterLastSeparator(first), trailingDigits(first)])].filter((l) =>
+    l !== ""
+  );
+  const lasts = [...new Set([last, cutAtFirstSeparator(last)])];
+  return firsts.flatMap((f) => lasts.map((l) => [f, ...middle, l]));
+}
+
+/** Whether a host starting at `start` sits where a URL parser reads a host: after `//` (or backslashes),
+ * after `@`, or after a special scheme's colon and at most one slash. */
+function inUrlHostPosition(form: string, start: number): boolean {
+  if (form[start - 1] === "@") return true;
+  let i = start - 1;
+  let slashes = 0;
+  while (i >= 0 && (form[i] === "/" || form[i] === "\\")) {
+    i--;
+    slashes++;
+  }
+  if (slashes >= 2) return true;
+  if (form[i] !== ":") return false;
+  let j = i - 1;
+  while (j >= 0 && i - j <= 6 && SCHEME_CHAR.test(form[j])) j--;
+  return SPECIAL_SCHEMES.has(form.slice(j + 1, i));
+}
+
+/** The address a WHATWG URL parser reads from numeric `parts` (decimal, `0x` hex, leading-zero octal),
+ * or null when it reads none. */
+function whatwgIPv4(parts: readonly string[]): string | null {
+  if (parts.length === 0 || parts.length > 4) return null;
+  const numbers: number[] = [];
+  for (const part of parts) {
+    if (part.startsWith("0x")) numbers.push(part.length === 2 ? 0 : parseInt(part.slice(2), 16));
+    else if (part.length > 1 && part.startsWith("0")) {
+      if (!/^[0-7]+$/.test(part)) return null;
+      numbers.push(parseInt(part, 8));
+    } else numbers.push(Number(part));
+  }
+  const last = numbers.pop()!;
+  if (numbers.some((n) => n > 255) || !(last < 256 ** (4 - numbers.length))) return null;
+  let value = last;
+  numbers.forEach((n, i) => (value += n * 256 ** (3 - i)));
+  return [24, 16, 8, 0].map((shift) => Math.floor(value / 2 ** shift) % 256).join(".");
 }
 
 /**
@@ -591,7 +820,9 @@ function ipv4Problem(labels: readonly string[], urlHost: boolean): string | null
       : `'${ip}' is an IP address outside the documentation ranges (${IP_RANGES})`;
   }
   if (labels.length === 4 || urlHost) {
-    return `'${ip}' is shaped like an IP address but is not a canonical dotted quad in ${IP_RANGES}`;
+    const read = whatwgIPv4(labels);
+    return `'${ip}' is shaped like an IP address${read === null ? "" : ` that a URL reads as ${read}`}, ` +
+      `not a canonical dotted quad in ${IP_RANGES}`;
   }
   return null;
 }
@@ -618,25 +849,60 @@ function parseIPv6(text: string): number[] | null {
   return [...head, ...Array(8 - count).fill("0"), ...rest].map((g) => parseInt(g, 16));
 }
 
-/** Every host, address and IP literal in `text` that is not reserved, as messages. */
-function hostProblems(text: string): string[] {
-  const form = hostForm(text);
+/**
+ * The IPv6 readings of a hex-and-colon run: as written when no word character is glued before it, and with
+ * a leading `<word>:` removed (`addr:2001:db9::1`, `[IPv6:2001:db9::1]`); each also with one trailing colon
+ * dropped (`2001:db9::1: down`). None when a word character is glued after it.
+ */
+function ipv6Readings(form: string, run: RegExpMatchArray): string[] {
+  let text = run[0];
+  while (text.endsWith(".")) text = text.slice(0, -1);
+  const after = form[run.index! + run[0].length];
+  if (after !== undefined && WORD_CHAR.test(after)) return [];
+  const before = form[run.index! - 1];
+  const bases: string[] = [];
+  const glued = before !== undefined && WORD_CHAR.test(before);
+  if (!glued) bases.push(text);
+  // The prefix is a `<word>:` only when the run is glued to a word or does not parse whole: `2001:db8::1`
+  // parses, and its `2001:` is no prefix.
+  const colon = text.indexOf(":");
+  if (colon >= 0 && (glued || (parseIPv6(text) === null && parseIPv6(text.slice(0, -1)) === null))) {
+    bases.push(text.slice(colon + 1));
+  }
+  const readings = new Set<string>();
+  for (const base of bases) {
+    readings.add(base);
+    if (base.endsWith(":") && !base.endsWith("::")) readings.add(base.slice(0, -1));
+  }
+  return [...readings].filter((r) => r.split(":").length >= 3 && /[0-9a-f]/.test(r));
+}
+
+/** Every host, address and IP literal in a host form that is not reserved, as messages. */
+function formHostProblems(form: string): string[] {
   const problems: string[] = [];
 
   for (const run of form.matchAll(LABEL_RUN)) {
     const labels = labelsOf(run[0]);
     if (labels.length === 0) continue;
     const start = run.index;
-    const urlHost = /[\/\\]{2}$/.test(form.slice(Math.max(0, start - 2), start)) || form[start - 1] === "@";
-    if (labels.every((l) => NUMERIC_LABEL.test(l))) {
-      const problem = ipv4Problem(labels, urlHost);
-      if (problem !== null) problems.push(problem);
-      continue;
-    }
     const end = start + run[0].length;
-    if (labels.length >= 2 && isDomain(labels, urlHost, form.slice(end, end + 8))) {
-      const host = labels.join(".");
-      if (!reserved(host)) problems.push(`'${host}' is not a reserved domain (${RESERVED_TEXT})`);
+    const urlHost = inUrlHostPosition(form, start);
+    for (const reading of hostReadings(labels)) {
+      if (reading.every((l) => NUMERIC_LABEL.test(l))) {
+        const problem = ipv4Problem(reading, urlHost);
+        if (problem !== null) problems.push(problem);
+        continue;
+      }
+      if (reading.length < 2 || !isDomain(reading, urlHost, form.slice(end, end + 8))) continue;
+      const host = reading.join(".");
+      if (reserved(host)) continue;
+      problems.push(
+        `'${host}' is not a reserved domain (${RESERVED_TEXT})` +
+          (isDualLabel(reading[reading.length - 1])
+            ? "; its final label is a TLD as well as a file extension, so name files with one that is not " +
+              "a TLD (docx, pdf, txt)"
+            : ""),
+      );
     }
   }
 
@@ -656,40 +922,62 @@ function hostProblems(text: string): string[] {
   }
 
   for (const run of form.matchAll(HEX_RUN)) {
-    let candidate = run[0];
-    while (candidate.endsWith(".")) candidate = candidate.slice(0, -1);
-    if (candidate.split(":").length < 3 || !/[0-9a-f]/.test(candidate)) continue;
-    const before = form[run.index - 1];
-    const after = form[run.index + run[0].length];
-    if ((before !== undefined && WORD_CHAR.test(before)) || (after !== undefined && WORD_CHAR.test(after))) {
-      continue;
-    }
-    const groups = parseIPv6(candidate);
-    if (groups !== null && !(groups[0] === 0x2001 && groups[1] === 0x0db8)) {
-      problems.push(`'${candidate}' is an IP address outside the documentation ranges (${IP_RANGES})`);
+    for (const reading of ipv6Readings(form, run)) {
+      const groups = parseIPv6(reading);
+      if (groups !== null && !(groups[0] === 0x2001 && groups[1] === 0x0db8)) {
+        problems.push(`'${reading}' is an IP address outside the documentation ranges (${IP_RANGES})`);
+      }
     }
   }
   return problems;
 }
 
-/** A base64 or base64url token long enough to hide a host. */
-const BASE64_TOKEN = /[A-Za-z0-9+\/_-]{12,}={0,2}/g;
+/** The id rules and the host rules on every reading of `text`. */
+function textProblems(text: string): string[] {
+  const problems = new Set<string>(idRuleProblems(foldHyphens(matchingForm(text))));
+  for (const form of hostForms(text)) {
+    for (const problem of idRuleProblems(form)) problems.add(problem);
+    for (const problem of formHostProblems(form)) problems.add(problem);
+  }
+  return [...problems];
+}
 
-/** The token's decoding when every byte is printable ASCII (text, not a random identifier), else null. */
-function decodedBase64(token: string): string | null {
+/** A base64 or base64url token long enough to hide a host or an id. */
+const BASE64_TOKEN = /[A-Za-z0-9+\/_-]{12,}={0,2}/g;
+/** The shortest printable run of a decoding that is read as text. */
+const MIN_DECODED_RUN = 8;
+
+/**
+ * The printable-ASCII runs of `token` decoded from each of its first four offsets, so a glued prefix
+ * (`ref_`, `x`) cannot shift the alignment, and junk bytes a prefix decodes to do not hide what follows.
+ */
+function base64Texts(token: string): string[] {
   const body = token.replace(/=+$/, "").replace(/-/g, "+").replace(/_/g, "/");
-  if (body.length % 4 === 1) return null;
-  let binary: string;
-  try {
-    binary = atob(body + "=".repeat((4 - (body.length % 4)) % 4));
-  } catch {
-    return null;
+  const texts = new Set<string>();
+  for (let offset = 0; offset < 4; offset++) {
+    let part = body.slice(offset);
+    const remainder = part.length % 4;
+    if (remainder === 1) part = part.slice(0, -1);
+    else if (remainder > 0) part += "=".repeat(4 - remainder);
+    if (part === "") continue;
+    let binary: string;
+    try {
+      binary = atob(part);
+    } catch {
+      continue;
+    }
+    let runStart = -1;
+    for (let i = 0; i <= binary.length; i++) {
+      const c = i < binary.length ? binary.charCodeAt(i) : -1;
+      if (c === 0x09 || c === 0x0a || c === 0x0d || (c >= 0x20 && c <= 0x7e)) {
+        if (runStart < 0) runStart = i;
+      } else {
+        if (runStart >= 0 && i - runStart >= MIN_DECODED_RUN) texts.add(binary.slice(runStart, i));
+        runStart = -1;
+      }
+    }
   }
-  for (let i = 0; i < binary.length; i++) {
-    const c = binary.charCodeAt(i);
-    if (!(c === 0x09 || c === 0x0a || c === 0x0d || (c >= 0x20 && c <= 0x7e))) return null;
-  }
-  return binary;
+  return [...texts];
 }
 
 const CANARY_MENTION = /knowlu-canary/gi;
@@ -733,33 +1021,45 @@ function walk(value: unknown, where: string, visit: (text: string, where: string
   }
 }
 
-function stringProblems(text: string): string[] {
-  const problems: string[] = [];
-  // Code points, as `mailPromptText` cuts the mail text.
-  const length = [...text].length;
-  if (length > MAIL_TEXT_CHARS) {
-    problems.push(
-      `${length} characters, over the ${MAIL_TEXT_CHARS.toLocaleString("en-US")}-character bound (the mail ` +
-        "text cut)",
-    );
+/** Code points, as `mailPromptText` counts the mail text. */
+function codePointCount(text: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (
+      c < 0xdc00 || c > 0xdfff || i === 0 || text.charCodeAt(i - 1) < 0xd800 ||
+      text.charCodeAt(i - 1) > 0xdbff
+    ) {
+      count++;
+    }
   }
-  const form = matchingForm(text);
-  problems.push(...idRuleProblems(form));
-  if (!canariesWellFormed(text, CANARY_AT) || !canariesWellFormed(form, FORM_CANARY_AT)) {
-    problems.push(
+  return count;
+}
+
+function stringProblems(text: string): string[] {
+  // Over the bound, nothing else is read: the oracle's TLD decision is not linear on a long token.
+  const length = codePointCount(text);
+  if (length > MAIL_TEXT_CHARS) {
+    return [
+      `${length} characters, over the ${MAIL_TEXT_CHARS.toLocaleString("en-US")}-character bound (the mail ` +
+      "text cut); no other rule is checked until it is within it",
+    ];
+  }
+  const problems = new Set<string>(textProblems(text));
+  if (!canariesWellFormed(text, CANARY_AT) || !canariesWellFormed(matchingForm(text), FORM_CANARY_AT)) {
+    problems.add(
       "'KNOWLU-CANARY-' must start a whole token with a generated suffix of A-Z and 0-9 " +
         "(KNOWLU-CANARY-[A-Z0-9]+)",
     );
   }
-  problems.push(...hostProblems(text));
   for (const token of text.matchAll(BASE64_TOKEN)) {
-    const decoded = decodedBase64(token[0]);
-    if (decoded === null) continue;
-    for (const problem of hostProblems(decoded)) {
-      problems.push(`base64 ${show(token[0])} decodes to text where ${problem}`);
+    for (const decoded of base64Texts(token[0])) {
+      for (const problem of textProblems(decoded)) {
+        problems.add(`base64 ${show(token[0])} decodes to text where ${problem}`);
+      }
     }
   }
-  return problems;
+  return [...problems];
 }
 
 /**
