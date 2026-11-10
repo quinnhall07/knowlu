@@ -151,7 +151,7 @@ jobs:
       # (hand-off H8 part 1, C2 Task 13; the `eval-gate` job is Task 14's, added in its own commit).
       - name: deno check
         if: needs.changes.outputs.code != 'false'
-        run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts cloud/eval/*.ts
+        run: deno check --config cloud/supabase/deno.json cloud/supabase/functions/**/*.ts cloud/eval/*.ts cloud/eval/redteam/*.ts
       - name: deno lint
         if: needs.changes.outputs.code != 'false'
         run: deno lint --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
