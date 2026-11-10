@@ -119,31 +119,40 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 
 ## Model and effort
 
-The session default is Opus 5.5 at `medium`, capped at `xhigh` (`.claude/settings.json`). The main
+The session default is Fable 5.2 at `high`, capped at `xhigh` (`.claude/settings.json`); an agent with
+no model of its own runs on Opus 5.5 at `xhigh` (`CLAUDE_CODE_SUBAGENT_MODEL`, `modelSettings`). The main
 session does everyday work and delegates a separable piece to a subagent in `.claude/agents/` when that
-is cheaper or safer; each agent's `description:` says when. Rationale: `docs/notes/2026-09-29-model-and-effort-hierarchy.md`.
+is cheaper or safer; each agent's `description:` says when. Rationale: `docs/notes/2026-11-09-model-and-effort-review.md`.
 
 | Agent | Model, effort | Use for |
 |---|---|---|
-| `explorer` | Haiku, low | read-only search, before editing |
-| `mechanical` / `test-writer` / `console-ui` | Sonnet, low / medium / medium | specified edits / the failing test / `app/static`, `site/` |
-| `implementer` / `integrator` | Sonnet, high / Opus, high | specified feature tasks off the contract list / the merge train |
-| `planner` / `debugger` / `cloud-engineer` / `reviewer` | Opus, high | specs and plans / root cause / `cloud/` / pre-push review, and spec/plan review |
+| `planner` / `debugger` | the session's: Fable, high | specs and plans / root cause |
+| `implementer` / `test-writer` / `console-ui` | Opus, high | specified feature tasks off the contract list / the failing test / `app/static`, `site/` |
+| `integrator` / `cloud-engineer` / `reviewer` | Opus, high | the merge train / `cloud/` / pre-push review, and spec/plan review |
 | `contract-engineer` / `contract-reviewer` | Opus, xhigh | the contract list / contract-list diffs |
-| `researcher` / `docs-keeper` | Sonnet, medium / medium | read-only gap research / HANDOFF, docs/reference, ledgers |
+| `researcher` / `docs-keeper` | Opus, high / Sonnet, medium | read-only gap research / HANDOFF, docs/reference, ledgers |
+| `explorer` / `mechanical` | Sonnet, medium | read-only search, before editing / specified edits |
 
-**The contract list** — cheaper agents never edit it:
+**The contract list** — no agent but `contract-engineer` edits it:
 `engine/src/{write,journal,yamlemit,yaml,pystr,ledger,ids,provenance,approvals,sync,entitle,wincred,reconcile}.rs`,
 `app/src/{credentials,account,updates}.rs`, the oracle/sync/entitlement tests, `engine/tests/fixtures/**`.
 
 **No agent fits? Ask in order:** could a silent error corrupt vault bytes, leak a credential or
 student data, move money or break a release (Opus; `xhigh` on the contract list, `high` elsewhere)?
-Is a design choice open, or more than about three files touched (Opus `high`, plan first)? Fully
-specified and checked by the compiler or a test (Sonnet, `low` to `high`)? Read-only (Haiku, `low`)?
+Is a design choice open, the cause unknown, or more than about three files touched (Fable `high`, plan
+first)? Fully specified and checked by the compiler or a test (Opus `high`; Sonnet `medium` when the
+plan writes the code out in full)? Read-only (Sonnet `medium`)? An agent with no type runs Opus at
+`xhigh` unless the dispatch passes an `effort`, so pass the level these questions give.
 The main session orchestrates; it edits only what fits on one screen. Use the closest agent rather than
 inventing one. Subagents don't see the conversation: give them the goal, the files and the
-constraints. Anything a cheaper agent changed goes through `reviewer` before a push. Two failed
-attempts means one level up, never straight to `max`; Fable and `max` are Quinn's call.
+constraints. Anything `mechanical`, `test-writer`, `console-ui`, `implementer` or `docs-keeper` changed
+goes through `reviewer` before a push. Two failed attempts means one level up, effort before model,
+never straight to `max`; `max`, and Fable for a role this table does not give it, are Quinn's call.
+When the plan's Fable allowance runs out, Claude Code asks whether to switch to the default model. That
+is Opus 5.5, which runs at `xhigh` here, and `planner` and `debugger` follow the session there on their
+own (documented, not yet seen here; the note says what was measured). If one of them ends on a usage
+error first, start it again after the switch. On a session that is on neither Fable nor Opus, dispatch
+them with `model: 'opus'`.
 
 ## Gates and conventions
 

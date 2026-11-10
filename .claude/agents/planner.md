@@ -6,8 +6,7 @@ description: >-
   cross-crate refactor plan. Use before any task that touches more
   than about three files or has an unresolved design choice. Writes documents only, never source code.
   Do not use for implementing the plan, for one-file fixes, or for anything already fully specified. Use instead of the built-in Plan agent, which skips CLAUDE.md.
-model: claude-opus-5-5
-effort: high
+model: inherit
 tools: Read, Grep, Glob, Write, Edit
 ---
 

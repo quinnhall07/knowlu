@@ -8,12 +8,16 @@
 // 2. Outward-facing git and GitHub actions ask Quinn even in bypassPermissions mode: tag pushes,
 //    force pushes in any spelling, gh release/variable/secret/ruleset changes (a v* tag ships a
 //    release to every installed tester; CI_SELF_HOSTED would run public PRs on the laptop).
-// 3. researcher may run read-only git and gh only (it also reads untrusted web pages).
-// 4. Cargo output trim: an inert cargo build/check/clippy/test/nextest command (optionally behind
+// 3. reviewer may write one thing with the file tools: its own report, a new dated .md file directly
+//    under docs/reports/. Every other Edit or Write from reviewer is denied. Its Bash is not guarded
+//    here; its prompt limits that to git diff, log and show.
+// 4. researcher may run read-only git and gh only (it also reads untrusted web pages).
+// 5. Cargo output trim: an inert cargo build/check/clippy/test/nextest command (optionally behind
 //    `cd <plain path> &&` or slot.sh) is rewritten to pipe through trim-cargo-output.js.
 //    Prefix KNOWLU_RAW_OUTPUT=1 to skip.
 // An internal error exits 0 with no output, so a hook bug never blocks a call.
 'use strict';
+const fs = require('fs');
 const path = require('path');
 
 const FROZEN = [
@@ -133,7 +137,47 @@ function guardOutward(input) {
   }
 }
 
-const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r"'\\]*$/;
+// reviewer's one writable place: a new, dated report directly under docs/reports/ of this project or
+// of one of its worktrees.
+// - The folder is tied to CLAUDE_PROJECT_DIR, so a matching path elsewhere (~/.claude/rules/docs/reports/)
+//   does not count.
+// - The name must look like a report (2026-11-09-lane-review.md), so CLAUDE.md and anything else
+//   Claude Code loads as instructions cannot be planted there.
+// - An existing file is never overwritten: a new round is a new file, and an earlier verdict stays.
+//   The path is checked as given and in its drive-letter form, because Node reads the Git Bash
+//   spelling /c/x as <current drive>:\c\x and would report an existing report as absent.
+// - Any `..` segment is refused outright rather than resolved.
+// - A worktree kept outside .claude/worktrees/ is not recognized; reviewer then reports in its final
+//   message.
+const REPORT_NAME = /^\d{4}-\d{2}-\d{2}-[a-z0-9._-]+\.md$/;
+const WORKTREES = '/.claude/worktrees/';
+
+function reviewerMayWrite(filePath) {
+  const p = norm(filePath);
+  if (!p || p.split('/').includes('..')) return false;
+  const m = /^(.+)\/docs\/reports\/([^/]+)$/.exec(p);
+  if (!m || !REPORT_NAME.test(m[2])) return false;
+  const base = m[1];
+  const ours = projectRoots().some((r) => base === r ||
+    (base.startsWith(r + WORKTREES) && !base.slice((r + WORKTREES).length).includes('/')));
+  if (!ours) return false;
+  // Built from the normalized path, so //c/x and /./c/x are read the same way as /c/x.
+  const driveForm = p.replace(/^\/([a-z])\//, '$1:/');
+  return !fs.existsSync(driveForm) && !fs.existsSync(String(filePath));
+}
+
+function guardReviewer(input) {
+  if (subagentOf(input) !== 'reviewer') return;
+  if (!['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(input.tool_name)) return;
+  const ti = input.tool_input || {};
+  if (!reviewerMayWrite(ti.file_path || ti.notebook_path || '')) {
+    deny('reviewer writes only its own report: a new file named YYYY-MM-DD-<name>.md directly under docs/reports/ ' +
+      'of this project or of a worktree under its .claude/worktrees/. It never overwrites a report or edits ' +
+      'anything else. If this was your report, put it in the final message instead.');
+  }
+}
+
+const RESEARCHER_OK =/^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r"'\\]*$/;
 
 function guardResearcher(input) {
   if (subagentOf(input) !== 'researcher' || input.tool_name !== 'Bash') return;
@@ -205,13 +249,19 @@ process.stdin.on('end', () => {
   try {
     const input = JSON.parse(raw);
     guardFixtures(input);
+    guardReviewer(input);
     guardResearcher(input);
     guardOutward(input);
     trim(input);
   } catch (_) {
-    // A hook bug never blocks a call, except a file edit under the fixtures: fail closed there.
-    if (/"tool_name"\s*:\s*"(Edit|Write|MultiEdit|NotebookEdit)"/.test(raw) && isFixture(raw)) {
+    // A hook bug never blocks a call, except a file edit under the fixtures or one from reviewer:
+    // fail closed there.
+    const fileTool = /"tool_name"\s*:\s*"(Edit|Write|MultiEdit|NotebookEdit)"/.test(raw);
+    if (fileTool && isFixture(raw)) {
       deny('the guard hit an internal error on a fixture edit, so it refuses rather than allow it.');
+    }
+    if (fileTool && /"agent_type"\s*:\s*"reviewer"/.test(raw)) {
+      deny('the guard hit an internal error on a reviewer write, so it refuses rather than allow it.');
     }
   }
   process.exit(0);
