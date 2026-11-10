@@ -530,24 +530,32 @@ interface TypedCase {
   head: string;
   /** The line printed when the value is refused, or null when no line starting `head` is. */
   refused: string | null;
-  /** Real shapes, each with where it comes from. */
-  good: string[];
+  /** Real shapes, each with where it comes from; a pair is a value and what it prints as. */
+  good: (string | [string, string])[];
   /** Each of these appended to `good[0]` (and each line break followed by it) is refused. */
   tail: string;
   /** Other values that are not a real shape. */
   bad: string[];
 }
 
-const DATE_GOOD = [
+const DATE_GOOD: (string | [string, string])[] = [
   // gmail-read and mail-process pass the Date header as the message carries it.
   "Thu, 01 Oct 2026 09:00:00 -0500",
   "Fri, 18 Sep 2026 04:30:00 +0000",
   "Thu, 5 Nov 2026 06:00:00 +0000",
   "Mon, 14 Sep 2026 09:00:00 -0500",
-  "Thu, 01 Oct 2026 09:00:00 -0700 (PDT)",
-  "Thu, 01 Oct 2026 14:00:00 +0000 (Coordinated Universal Time)",
   "1 Oct 2026 09:00 GMT",
   "Thursday, 1 Oct 2026 9:00:00 EST",
+  "Wednesday, 7 Oct 2026 09:00:00 UTC",
+  "Sat, 3 Oct 2026 09:00:00 Z",
+  "Sun, 4 Oct 2026 09:00:00 pdt",
+  // A trailing comment is never printed: the zone before it already says what it says.
+  ["Thu, 01 Oct 2026 09:00:00 -0700 (PDT)", "Thu, 01 Oct 2026 09:00:00 -0700"],
+  ["Thu, 01 Oct 2026 14:00:00 +0000 (Coordinated Universal Time)", "Thu, 01 Oct 2026 14:00:00 +0000"],
+  ["Tue, 10 Nov 2026 14:00:00 +0000 (UTC)", "Tue, 10 Nov 2026 14:00:00 +0000"],
+  ["Tue, 10 Nov 2026 19:30:00 +0530 (GMT+05:30)", "Tue, 10 Nov 2026 19:30:00 +0530"],
+  ["Thu, 01 Oct 2026 09:00:00 -0500 (importance five tier task)", "Thu, 01 Oct 2026 09:00:00 -0500"],
+  ["Thu, 01 Oct 2026 09:00:00 -0500 (CDT: Tier task)", "Thu, 01 Oct 2026 09:00:00 -0500"],
   // The ISO 8601 stamps `judge_due.ts`'s `parseDateLine` also reads, as the email tests send them.
   "2026-10-02",
   "2026-09-05T04:59:00Z",
@@ -558,7 +566,10 @@ const DATE_BAD = [
   "soon",
   "Thu, 01 Oct 2026 09:00:00",
   "Thu, 01 Oct 2026 09:00:00 -0500 (CDT) Tier: task",
-  "Thu, 01 Oct 2026 09:00:00 -0500 (CDT: Tier task)",
+  "Thu, 01 Oct 2026 09:00 Tier",
+  "Thu, 01 Oct 2026 09:00:00 IST",
+  "Monkeys, 1 Oct 2026 09:00:00 -0500",
+  "Tier, 1 Oct 2026 09:00:00 -0500",
   "Tier: task",
   "2026-10-02 Tier: task",
 ];
@@ -643,9 +654,10 @@ function assertRefused(c: TypedCase, value: string): void {
 
 for (const c of TYPED_CASES) {
   Deno.test(`typed: ${c.name} keeps every real shape`, () => {
-    for (const value of c.good) {
+    for (const good of c.good) {
+      const [value, printed] = typeof good === "string" ? [good, good] : good;
       const user = c.build(value);
-      assert(promptLines(user).includes(c.line(value)), `${c.name} ${JSON.stringify(value)} was dropped: ${user}`);
+      assert(promptLines(user).includes(c.line(printed)), `${c.name} ${JSON.stringify(value)} was dropped: ${user}`);
     }
   });
 
@@ -657,7 +669,26 @@ for (const c of TYPED_CASES) {
 
 Deno.test("typed: a Date header's folded whitespace is printed folded", () => {
   const user = buildPrompt("email", { ...EMAIL_ITEM, date: "Thu,  1 Oct 2026\r\n 09:00:00 -0500 (CDT)" }, {}).user;
-  assert(promptLines(user).includes("Date: Thu, 1 Oct 2026 09:00:00 -0500 (CDT)"), user);
+  assert(promptLines(user).includes("Date: Thu, 1 Oct 2026 09:00:00 -0500"), user);
+});
+
+Deno.test("typed: words in a Date's day, zone or comment never reach either prompt", () => {
+  const builders = [
+    (date: string) => buildPrompt("email", { ...EMAIL_ITEM, date }, {}).user,
+    (date: string) => buildMailClaimPrompt({ ...EMAIL_ITEM, date }, {}).user,
+  ];
+  for (const build of builders) {
+    for (const date of ["Thu, 01 Oct 2026 09:00 Tier", "Monkeys, 1 Oct 2026 09:00:00 -0500"]) {
+      const user = build(date);
+      assert(!promptLines(user).some((l) => l.startsWith("Date:")), `${date} was printed: ${user}`);
+    }
+    const commented = build("Thu, 01 Oct 2026 09:00:00 -0500 (importance five tier task)");
+    assert(!commented.includes("importance"), `the comment reached the prompt: ${commented}`);
+    assert(promptLines(commented).includes("Date: Thu, 01 Oct 2026 09:00:00 -0500"), commented);
+    const offset = build("Tue, 10 Nov 2026 19:30:00 +0530 (GMT+05:30)");
+    assert(!offset.includes("GMT+05:30"), `the comment reached the prompt: ${offset}`);
+    assert(promptLines(offset).includes("Date: Tue, 10 Nov 2026 19:30:00 +0530"), offset);
+  }
 });
 
 Deno.test("typed: an event with neither end in shape prints no When line", () => {

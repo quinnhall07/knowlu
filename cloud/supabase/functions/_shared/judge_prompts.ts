@@ -122,10 +122,14 @@ const TASK_DUE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?$/;
 const EVENT_TIME_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 /** An event source's configured name (`config/events.yaml`; every preset's is a slug). */
 const EVENT_SOURCE_SHAPE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
-/** An RFC 5322 date-time after `field()` folds its whitespace: an optional day name and comma, day,
- * month, 4-digit year, H:MM[:SS], a numeric or alphabetic zone, an optional zone comment. */
+/** An RFC 5322 date-time after `field()` folds its whitespace and its trailing comment is cut: an
+ * optional day name (short or full) and comma, day, month, 4-digit year, H:MM[:SS], and a zone that is
+ * numeric or one of RFC 5322's obs-zone names, UTC or Z. */
 const RFC_DATE_SHAPE =
-  /^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}, ?)?\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) \d{4} \d{1,2}:\d{2}(?::\d{2})? (?:[+-]\d{4}|[a-z]{1,5})(?: \([a-z ]{1,40}\))?$/i;
+  /^(?:(?:mon|monday|tue|tuesday|wed|wednesday|thu|thursday|fri|friday|sat|saturday|sun|sunday), ?)?\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) \d{4} \d{1,2}:\d{2}(?::\d{2})? (?:[+-]\d{4}|ut|utc|gmt|z|est|edt|cst|cdt|mst|mdt|pst|pdt)$/i;
+/** A Date header's trailing comment, `(PDT)` or `(GMT+05:30)`: cut before the shape is checked and never
+ * printed, since the zone before it carries the offset. */
+const DATE_COMMENT = /\s*\([^()]*\)$/;
 /** The ISO 8601 stamp `judge_due.ts`'s `parseDateLine` also reads as a Date line. */
 const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
 
@@ -135,8 +139,18 @@ const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?(?:Z|[+
  * text appended to one is dropped with it rather than shown to the model.
  */
 function typed(value: unknown, max: number, ...shapes: RegExp[]): string {
-  const v = field(str(value), Number.POSITIVE_INFINITY);
+  return shaped(field(str(value), Number.POSITIVE_INFINITY), max, shapes);
+}
+
+function shaped(v: string, max: number, shapes: RegExp[]): string {
   return [...v].length <= max && shapes.some((s) => s.test(v)) ? v : "";
+}
+
+/** A Date header as the prompt prints it: `field()` of it with its trailing comment cut, kept only as an
+ * RFC 5322 date-time or an ISO 8601 stamp of at most 80 characters, else "". */
+function headerDate(value: unknown): string {
+  const v = field(str(value), Number.POSITIVE_INFINITY).replace(DATE_COMMENT, "");
+  return shaped(v, 80, [RFC_DATE_SHAPE, ISO_DATE_SHAPE]);
 }
 
 /**
@@ -271,7 +285,7 @@ export function buildPrompt(
   // feature, and `scrub`/`scrubForPrompt` would replace an email address in it.
   const subject = scrubForPrompt(str(item.subject));
   const parts = [`Subject: ${field(subject, 200)}`, `From: ${field(str(item.from), 200)}`];
-  const date = typed(item.date, 80, RFC_DATE_SHAPE, ISO_DATE_SHAPE);
+  const date = headerDate(item.date);
   if (date !== "") parts.push(`Date: ${date}`);
   if (known.length > 0) parts.push(`Known course slugs: ${known.join(", ")}`);
   // Scrub before clip, not after: clipping a token in half would leave a partial secret on the
@@ -438,7 +452,7 @@ export function buildMailClaimPrompt(item: Record<string, unknown>, seed: Record
     `Subject: ${field(scrubForPrompt(str(item.subject)), 200)}`,
     `From: ${field(str(item.from), 200)}`,
   ];
-  const date = typed(item.date, 80, RFC_DATE_SHAPE, ISO_DATE_SHAPE);
+  const date = headerDate(item.date);
   if (date !== "") parts.push(`Date: ${date}`);
   const known = list(seed.known_courses).map((c) => field(c, 64)).filter((c) => c !== "");
   if (known.length > 0) parts.push(`Known course codes: ${known.join(", ")}`);
