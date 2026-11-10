@@ -167,11 +167,13 @@ select is(:c7_valid, '{}',
 -- C9 (T6b and T7 reviews): every non-internal trigger on a matrix relation, which is every
 -- relation 02 or 03 probes, is either one the insert, upsert and update probes disable
 -- (`tests.unmask_triggers`: row-level, AFTER, on INSERT or UPDATE) or on the stamp-only allowlist
--- (`tests.stamp_only`), there by relation, name and function and still BEFORE and row-level
--- (tgtype bits 2 and 1). A new trigger, or a masking one rewritten so the unmask set no longer
--- holds it, is named here rather than left on to mask a probe. 09: `sync_records_usage` rewritten
--- as BEFORE; `sync_notes_rev_stamp` repointed at `sync_usage_bump`; a statement-level AFTER
--- INSERT trigger on `issues`.
+-- (`tests.stamp_only`), there by relation, name, function and the function's `md5(prosrc)`, and
+-- still BEFORE and row-level (tgtype bits 2 and 1). A new trigger, a masking one rewritten so the
+-- unmask set no longer holds it, or a stamp function whose body changed, is named here rather
+-- than left on to mask a probe; the body pin is deliberate, and a real change to the function
+-- updates it in the same commit. 09: `sync_records_usage` rewritten as BEFORE;
+-- `sync_notes_rev_stamp` repointed at `sync_usage_bump`; `sync_notes_stamp_rev`'s body changed;
+-- a statement-level AFTER INSERT trigger on `issues`.
 select $c$array(select m.rel || ':' || t.tgname
    from tests.matrix m
    join pg_trigger t on t.tgrelid = m.rel::regclass
@@ -179,7 +181,9 @@ select $c$array(select m.rel || ':' || t.tgname
      and t.tgname::text <> all (tests.unmask_triggers(m.rel))
      and not exists (select 1 from tests.stamp_only s
                       where s.rel = m.rel and s.tgname = t.tgname::text
-                        and t.tgfoid = s.fn::regprocedure and (t.tgtype::int & 3) = 3)
+                        and t.tgfoid = s.fn::regprocedure and (t.tgtype::int & 3) = 3
+                        and (select md5(p.prosrc) from pg_proc p where p.oid = t.tgfoid)
+                              = s.src_md5)
    order by 1)::text$c$ as c9 \gset
 select is(:c9, '{}',
   'C9: every trigger on a probed relation is unmasked by the write probes or stamp-only');

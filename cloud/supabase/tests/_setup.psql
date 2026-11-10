@@ -200,17 +200,23 @@ create function tests.unmask_triggers(p_rel text) returns text[] language sql st
 $$;
 
 -- C9's named stamp-only allowlist: a trigger that stays on in every probe because it only stamps
--- the new row, pinned by relation, name and function; C9 also requires it to be BEFORE and
--- row-level. Today one: `sync_notes_rev_stamp`, whose `sync_notes_stamp_rev` sets `rev` (a fresh
--- `nextval`) and `updated_at` on the row being written and touches no other table.
+-- the new row, pinned by relation, name, function and the function's body (`md5(prosrc)`); C9
+-- also requires it to be BEFORE and row-level. Today one: `sync_notes_rev_stamp`, whose
+-- `sync_notes_stamp_rev` sets `rev` (a fresh `nextval`) and `updated_at` on the row being written
+-- and touches no other table. The body pin is deliberate: "stamp-only" is a claim about what the
+-- body does, so any change to that function fails C9 until the same commit re-reads the new body
+-- and updates `src_md5` here. The value is the md5 of the text between `$$` and `$$` in
+-- 20260912000100_sync.sql, the one migration that defines it.
 create table tests.stamp_only (
-  rel    text not null check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
-  tgname text not null,
-  fn     text not null,
+  rel     text not null check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
+  tgname  text not null,
+  fn      text not null,
+  src_md5 text not null check (src_md5 ~ '^[0-9a-f]{32}$'),
   primary key (rel, tgname)
 );
-insert into tests.stamp_only (rel, tgname, fn)
-  values ('public.sync_notes', 'sync_notes_rev_stamp', 'public.sync_notes_stamp_rev()');
+insert into tests.stamp_only (rel, tgname, fn, src_md5)
+  values ('public.sync_notes', 'sync_notes_rev_stamp', 'public.sync_notes_stamp_rev()',
+          'cbd0b5c1bfd0e51570fc0ff7436aa1d3');
 
 -- A check (one owner-side SQL expression, a driver call) evaluated as text, with table `p_rel`'s
 -- `tests.unmask_triggers` disabled by owner DDL inside `tests.under_fault`, which always rolls the
@@ -418,6 +424,28 @@ language sql stable as $$
        select 1 from pg_depend d
         where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
    order by 1
+$$;
+
+-- P4 and P5 (06), each one expression over a relation, so 06 asks it of `realtime.messages` and
+-- 09 shows it failing on whatever relation the image lets this owner plant a fault on (the table
+-- itself, or a scratch table), the relation argument the only difference. Called with
+-- `to_regclass(...)`: a null relation (the table is absent) has no policy and no RLS flag.
+-- P4: the names of the policies on `p_rel` that apply to anon, authenticated or public (a policy
+-- with no `to` lists `public`), as a sorted `text[]` literal.
+create function tests.p4_client_policies(p_rel regclass) returns text
+language sql stable as $$
+  select array(select p.polname::text from pg_policy p
+                where p.polrelid = p_rel
+                  and exists (select 1 from unnest(p.polroles) r(role_id)
+                               where r.role_id = 0
+                                  or r.role_id in (select g.oid from pg_roles g
+                                                    where g.rolname in ('anon', 'authenticated')))
+                order by 1)::text
+$$;
+
+-- P5: whether `p_rel` has row-level security on (null for a null relation).
+create function tests.p5_rls_on(p_rel regclass) returns boolean language sql stable as $$
+  select c.relrowsecurity from pg_class c where c.oid = p_rel
 $$;
 
 -- A valid insert for table `p_rel` and fixture account `p_who` ('A' or 'B'), as SQL text (D5).

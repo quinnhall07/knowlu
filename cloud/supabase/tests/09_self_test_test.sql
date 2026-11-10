@@ -15,13 +15,13 @@
 --   an account id: the two C8 UUIDs are fresh and compared inside `ok()`.
 --
 -- T5a writes the cases that need no fixture rows; T5b and T5c append the rest; T9b appends the
--- review fixes' cases (the masking triggers, C9, the global tables' literal key, F3's DO form, P4).
+-- review fixes' cases (the masking triggers, C9, the literal key, F3's call forms, P4, P5).
 begin;
 \ir _setup.psql
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(154);
+select plan(161);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -31,14 +31,32 @@ select diag('storage policies: '
   || array(select policyname::text from pg_policies where schemaname = 'storage' order by 1)::text);
 select diag('publications: ' || array(select pubname::text from pg_publication order by 1)::text);
 select exists (select 1 from pg_namespace where nspname = 'storage') as has_storage \gset
--- P4's facts: whether Realtime's `realtime.messages` exists here, and whether the owner this file
--- runs as may plant a policy on it (it must own the table, or hold its owner's rights).
+-- P4 and P5's facts: whether Realtime's `realtime.messages` exists here, and where their faults
+-- are planted. A policy or an RLS change needs the table's owner. When the role this file runs as
+-- may `set role` to that owner (`pg_has_role(..., 'SET')`, which a superuser always may), each
+-- fault runs on `realtime.messages` itself under `set local role <owner>`; otherwise on a scratch
+-- table, `tests.zz_rt`, made with RLS on inside the fault, so the same check function is still
+-- seen failing and only its relation argument differs. Each control runs on the real table.
+-- `rt_rel` is the target, `rt_pre` the fault's first statements and `rt_post` its last.
 select to_regclass('realtime.messages') is not null as has_rt_messages,
-       coalesce((select pg_has_role(current_user, c.relowner, 'USAGE') from pg_class c
-                  where c.oid = to_regclass('realtime.messages')), false) as p4_plant \gset
+       coalesce((select pg_has_role(current_user, c.relowner, 'SET') from pg_class c
+                  where c.oid = to_regclass('realtime.messages')), false) as rt_own \gset
+select case when :'rt_own'::boolean then 'realtime.messages' else 'tests.zz_rt' end as rt_rel,
+       case when :'rt_own'::boolean
+         then (select format('set local role %I', r.rolname) from pg_class c
+                 join pg_roles r on r.oid = c.relowner
+                where c.oid = to_regclass('realtime.messages'))
+         else 'create table tests.zz_rt (id int); '
+              || 'alter table tests.zz_rt enable row level security'
+       end as rt_pre,
+       case when :'rt_own'::boolean then 'set local role none' else 'select 1' end
+         as rt_post \gset
 select diag('realtime.messages: '
   || case when :'has_rt_messages'::boolean then 'present' else 'absent' end
-  || case when :'p4_plant'::boolean then ', policies plantable' else '' end);
+  || '; P4 and P5 faults planted on: '
+  || case when not :'has_rt_messages'::boolean then 'none (skipped)'
+          when :'rt_own'::boolean then 'realtime.messages, as its owner'
+          else 'the scratch table tests.zz_rt (this role cannot act as the owner)' end);
 
 -- Guard rail, C8: a stale legacy key never shadows the claims (T3 review, Minor 2). Two fresh
 -- accounts that exist nowhere; neither id is printed.
@@ -192,6 +210,23 @@ select is(tests.under_fault(:'f1_fault', :'f3_stranger'), 'executed',
   'F3 sees a planted fault: an authenticated call to a granted definer function executes');
 select is(:f3_anon, 'denied', 'F3 control: anon''s call is denied');
 select is(:f3_stranger, 'denied', 'F3 control: an authenticated call is denied');
+-- The same fault, seen through the very text 05 runs: `tests.f3_calls()`'s select form for
+-- `read_google_grant` (`select count(*) from public.read_google_grant(null::uuid, null::text)`),
+-- called as anon and as account A, the two callers 05 uses. Granted, it reads `executed`; in the
+-- control, `denied`, a refusal that names the function.
+select
+  $c$(select tests.call_outcome('anon', c.call_sql) from tests.f3_calls() c
+      where c.fn = 'public.read_google_grant(uuid, text)' and not c.via_do)$c$ as f3sel_anon,
+  $c$(select tests.call_outcome('A', c.call_sql) from tests.f3_calls() c
+      where c.fn = 'public.read_google_grant(uuid, text)' and not c.via_do)$c$ as f3sel_a \gset
+select is(tests.under_fault(:'f1_fault', :'f3sel_anon'), 'executed',
+  'F3 sees a planted fault: anon''s select-form call (05''s text) to a granted definer executes');
+select is(tests.under_fault(:'f1_fault', :'f3sel_a'), 'executed',
+  'F3 sees a planted fault: A''s select-form call (05''s text) to a granted definer executes');
+select is(:f3sel_anon, 'denied',
+  'F3 control: anon''s select-form call (05''s text) is denied, naming a function');
+select is(:f3sel_a, 'denied',
+  'F3 control: A''s select-form call (05''s text) is denied, naming a function');
 
 -- F2: one SECURITY INVOKER, non-trigger function granted to anon alone. F2 lists it for anon only,
 -- and F1 does not list it, so the role and the definer flag both discriminate.
@@ -749,8 +784,10 @@ select * from tests.st_unmask_cases();
 
 -- C9: every non-internal trigger on a probed relation is in the unmask set or stamp-only. Seen
 -- failing on a masking trigger rewritten as BEFORE (the unmask set would quietly lose it), on the
--- stamp-only trigger repointed at a function that writes elsewhere, and on a statement-level
--- AFTER INSERT trigger (which `tests.unmask_triggers`, row-level only, leaves on).
+-- stamp-only trigger repointed at a function that writes elsewhere, on the stamp function's body
+-- changed in place (the `md5(prosrc)` pin: deliberate, so a real change to it updates
+-- `tests.stamp_only` in the same commit), and on a statement-level AFTER INSERT trigger (which
+-- `tests.unmask_triggers`, row-level only, leaves on).
 select $c$array(select m.rel || ':' || t.tgname
    from tests.matrix m
    join pg_trigger t on t.tgrelid = m.rel::regclass
@@ -758,7 +795,9 @@ select $c$array(select m.rel || ':' || t.tgname
      and t.tgname::text <> all (tests.unmask_triggers(m.rel))
      and not exists (select 1 from tests.stamp_only s
                       where s.rel = m.rel and s.tgname = t.tgname::text
-                        and t.tgfoid = s.fn::regprocedure and (t.tgtype::int & 3) = 3)
+                        and t.tgfoid = s.fn::regprocedure and (t.tgtype::int & 3) = 3
+                        and (select md5(p.prosrc) from pg_proc p where p.oid = t.tgfoid)
+                              = s.src_md5)
    order by 1)::text$c$ as c9 \gset
 select is(
   tests.under_fault(
@@ -774,6 +813,19 @@ select is(
          for each row execute function public.sync_usage_bump()$f$, :'c9'),
   '{public.sync_notes:sync_notes_rev_stamp}',
   'C9 sees a planted fault: the stamp-only trigger repointed at another function is named');
+select is(
+  tests.under_fault(
+    $f$create or replace function public.sync_notes_stamp_rev() returns trigger
+         language plpgsql set search_path = public as $b$
+       begin
+         new.rev := nextval('public.sync_notes_rev');
+         new.updated_at := now();
+         update public.sync_usage set updated_at = now() where account_id = new.account_id;
+         return new;
+       end;
+       $b$$f$, :'c9'),
+  '{public.sync_notes:sync_notes_rev_stamp}',
+  'C9 sees a planted fault: the stamp-only function''s body changed in place is named');
 select is(
   tests.under_fault(
     $f$create trigger zz after insert on public.issues
@@ -834,38 +886,44 @@ select is(:f3do_anon, 'denied',
 select is(:f3do_a, 'denied',
   'F3 control: A''s DO-form call to public.handle_new_user is denied, naming a function');
 
--- P4 (T9 review, Minor 3): no policy on `realtime.messages` applies to anon, authenticated or
--- public. One policy is planted for each. The table is Realtime's, not a migration's: absent, the
--- three faults are skipped by name (06 then asserts the absence); present but not plantable by
--- this owner, they fail by name. The control runs either way.
-select $c$array(select p.policyname::text from pg_policies p
-   where p.schemaname = 'realtime' and p.tablename = 'messages'
-     and p.roles && '{anon,authenticated,public}'::name[]
-   order by 1)::text$c$ as p4 \gset
-\if :p4_plant
+-- P4 (T9 review, Minor 3) and P5 (T9b review), through `_setup.psql`'s one expression each,
+-- `tests.p4_client_policies(rel)` and `tests.p5_rls_on(rel)`. P4: no policy on
+-- `realtime.messages` applies to anon, authenticated or public; one policy is planted for each.
+-- P5: `realtime.messages` keeps row-level security on; the fault turns it off. Each fault runs on
+-- `rt_rel` (the table itself as its owner, or the scratch `tests.zz_rt`; the diag at the top says
+-- which), and each control on the real table. The table is Realtime's, not a migration's: absent,
+-- the faults are skipped by name, as is P5's control, and 06 asserts the absence.
+select format('tests.p4_client_policies(to_regclass(%L))', :'rt_rel') as p4_fault_check,
+       format('tests.p5_rls_on(to_regclass(%L))', :'rt_rel') as p5_fault_check,
+       $c$tests.p4_client_policies(to_regclass('realtime.messages'))$c$ as p4,
+       $c$tests.p5_rls_on(to_regclass('realtime.messages'))$c$ as p5 \gset
+\if :has_rt_messages
 select is(
-  tests.under_fault($f$create policy zz on realtime.messages for select to anon using (true)$f$,
-    :'p4'),
-  '{zz}', 'P4 sees a planted fault: a policy for anon on realtime.messages is named');
+  tests.under_fault(format('%s; create policy zz on %s for select to anon using (true); %s',
+    :'rt_pre', :'rt_rel', :'rt_post'), :'p4_fault_check'),
+  '{zz}', 'P4 sees a planted fault: a policy for anon is named');
 select is(
-  tests.under_fault($f$create policy zz on realtime.messages for insert to authenticated
-       with check (true)$f$, :'p4'),
-  '{zz}', 'P4 sees a planted fault: a policy for authenticated on realtime.messages is named');
+  tests.under_fault(format(
+    '%s; create policy zz on %s for insert to authenticated with check (true); %s',
+    :'rt_pre', :'rt_rel', :'rt_post'), :'p4_fault_check'),
+  '{zz}', 'P4 sees a planted fault: a policy for authenticated is named');
 select is(
-  tests.under_fault($f$create policy zz on realtime.messages for select using (true)$f$, :'p4'),
-  '{zz}', 'P4 sees a planted fault: a policy with no role (public) on realtime.messages is named');
-\elif :has_rt_messages
-select fail('P4 sees a planted fault: realtime.messages exists, but this owner cannot plant a'
-  || ' policy for anon on it');
-select fail('P4 sees a planted fault: realtime.messages exists, but this owner cannot plant a'
-  || ' policy for authenticated on it');
-select fail('P4 sees a planted fault: realtime.messages exists, but this owner cannot plant a'
-  || ' policy for public on it');
-\else
-select skip('realtime.messages is absent on this image, so no P4 fault can be planted', 3);
-\endif
+  tests.under_fault(format('%s; create policy zz on %s for select using (true); %s',
+    :'rt_pre', :'rt_rel', :'rt_post'), :'p4_fault_check'),
+  '{zz}', 'P4 sees a planted fault: a policy with no role (public) is named');
 select is(:p4, '{}',
   'P4 control: no policy on realtime.messages applies to anon, authenticated or public');
+select is(
+  tests.under_fault(format('%s; alter table %s disable row level security; %s',
+    :'rt_pre', :'rt_rel', :'rt_post'), :'p5_fault_check')::boolean,
+  false, 'P5 sees a planted fault: a table with row-level security off reads false');
+select is(:p5, true, 'P5 control: realtime.messages has row-level security on');
+\else
+select skip('realtime.messages is absent on this image, so no P4 fault can be planted', 3);
+select is(:p4, '{}',
+  'P4 control: no policy on realtime.messages applies to anon, authenticated or public');
+select skip('realtime.messages is absent on this image, so P5 has no table to check', 2);
+\endif
 
 select * from finish();
 rollback;
