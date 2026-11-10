@@ -61,6 +61,19 @@ split_ref() {
   fi
 }
 
+# The public registry rate-limits a busy runner ("toomanyrequests"); a required check must not fail
+# on that, so each digest pull is tried five times, 15 s more apart each time, before it fails.
+pull_with_retry() {
+  local ref="$1" n
+  for n in 1 2 3 4 5; do
+    if docker pull --quiet "$ref" < /dev/null; then return 0; fi
+    echo "supabase-images: pull of $ref failed (try $n of 5); waiting $((n * 15)) s" >&2
+    sleep "$((n * 15))"
+  done
+  echo "supabase-images: could not pull $ref" >&2
+  return 1
+}
+
 case "${1:-}" in
   baseline)
     images > "$baseline"
@@ -75,7 +88,7 @@ case "${1:-}" in
     lines="$(locked)"
     while IFS= read -r line; do
       split_ref "$line"
-      docker pull --quiet "$repo@$digest" < /dev/null
+      pull_with_retry "$repo@$digest"
       docker tag "$repo@$digest" "$repo:$tag" < /dev/null
       echo "supabase-images: $repo:$tag is $digest"
     done <<< "$lines"
