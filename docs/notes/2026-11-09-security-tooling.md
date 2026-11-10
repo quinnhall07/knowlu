@@ -27,9 +27,9 @@ the whole `.github/workflows/` folder.
   `*_test.ts`, a test AES key that decodes to "not-a-secret-32-byte-test-key-!!", placeholder JWTs
   in two plans, and the Supabase anon key in `app/src/account.rs` (role `anon`, public by design).
 - **cargo-deny advisories** (`deny.toml`): RUSTSEC-2026-0367/0368/0369/0429, all in `zip`'s
-  `extract`. The engine's zip 2.x only writes backups (`engine/src/backup.rs`); the updater's zip
-  4.x is `tauri-plugin-updater`'s, installs the NSIS .exe on Windows and checks the minisign
-  signature first. Remove when both reach zip >= 9.
+  `extract`. The engine moved to zip 9 on 2026-11-09; only `tauri-plugin-updater`'s zip 4.x remains,
+  which installs the NSIS .exe on Windows and checks the minisign signature first. Remove when the
+  updater reaches zip >= 9.
 - **zizmor `cache-poisoning`** on `release.yml`: fixed, not excepted. Quinn ruled (2026-11-09) that the release build
   restores no cache, so nothing a main CI run wrote reaches the signing job; `workflows.rs` asserts it.
 

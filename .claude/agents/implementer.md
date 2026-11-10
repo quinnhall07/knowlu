@@ -4,11 +4,12 @@ description: >-
   Implements one specified, test-checked feature task off the contract list, TDD-first, in a named
   worktree, and commits it on that branch: engine commands and read-model code (grades, surface,
   week, scheduler glue), app commands, onboarding and Tauri wiring. Use for SDD tasks a plan
-  specifies and behavior a signed spec already decides; escalate to model:'claude-opus-5-5' (effort high) after two failed
-  attempts. Do not use for the contract list (contract-engineer), cloud/ (cloud-engineer),
+  specifies and behavior a signed spec already decides; after two failed attempts, dispatch it again
+  with effort:'xhigh'. Do not use for the contract list
+  (contract-engineer), cloud/ (cloud-engineer),
   app/static or site/ (console-ui), tasks whose code the plan writes out in full (mechanical), open
   design choices (planner) or an unknown cause (debugger).
-model: claude-sonnet-5-5
+model: claude-opus-5-5
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
@@ -49,12 +50,12 @@ Working rules:
   - after any app build, run `cargo build -p knowlu-engine -j 2` before tests that spawn the engine.
 - App tests on `knowlu/pending/session` fail under cross-process parallel runs. That is a known flake:
   report it, do not fix it, unless the dispatch is that fix.
-- Keep each edit to about 80 lines or fewer. Read files over 300 lines in ranges. Write new documents
-  in pieces of 150 lines or fewer (Write, then Edit-append).
+- Read a file whole before you change it; read ranges only in files you are just consulting. Write a
+  long new document section by section (Write, then one append per section).
 - Never hold or print a token, JWT, key or password. Never run `supabase` (CLI or MCP). Never read a
   student vault or quinn-ops's vault; use scratch vaults only.
 - Append one line to the ledger the dispatch names:
   `date | task | <agent> | sha | pass/fail/ignored, warnings | status | next`.
-- Final message, 40 lines at most: the commits, the files, the gate counts, each deviation as
+- Final message: the outcome first, then the commits, the files, the gate counts, each deviation as
   `Ruling: what — why — cost if wrong`, and open questions. If a report file is refused, the final
   message is the report.

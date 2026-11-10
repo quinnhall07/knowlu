@@ -13,10 +13,10 @@ yanked = "deny"
 unmaintained = "workspace"
 ignore = [
     # zip: all four advisories are in ZipArchive/ZipStreamReader::extract. Reviewed 2026-11-09.
-    # knowlu-engine (zip 2.x) only WRITES backups (engine/src/backup.rs), never extracts. The updater
-    # (tauri-plugin-updater's zip 4.x, not ours to bump) installs the NSIS .exe on Windows, verifies
-    # the minisign signature before it opens anything, and the four are Unix-permission and symlink
-    # issues. Remove these when the engine moves to zip >= 9 and the updater does too.
+    # knowlu-engine is on zip 9.x (fixed) and only WRITES backups (engine/src/backup.rs). Only the
+    # updater's copy remains (tauri-plugin-updater's zip 4.x, not ours to bump): it installs the NSIS
+    # .exe on Windows, verifies the minisign signature before it opens anything, and the four are
+    # Unix-permission and symlink issues. Remove these when the updater moves to zip >= 9 too.
     { id = "RUSTSEC-2026-0367", reason = "zip extract only; we never extract untrusted archives" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract only; we never extract untrusted archives" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract only; we never extract untrusted archives" },
