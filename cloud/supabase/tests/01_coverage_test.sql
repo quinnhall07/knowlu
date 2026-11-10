@@ -149,10 +149,11 @@ select is(:c7, '{}',
 -- C7's validity, slot by slot: no owner insert raises in its cleared slot.
 select * from tests.c7_validity();
 
--- C7's validity, aggregate: each owner insert lands exactly one row in its cleared slot. 09's
+-- C7's validity, aggregate: each owner insert into its cleared slot reports exactly one row. 09's
 -- `svc_valid` predicate (seen failing under a `do instead nothing` rule on `judgments`; its 23514
 -- guard rail shows a bad row raises, never counts), over C7's domain of every matrix table. It
--- runs after the cases above, which have shown none of these probes raises.
+-- runs after the cases above, which have shown none of these probes raises. It does not check
+-- that the row matches `tests.slot_where` (T6a review M2, a T10 fidelity note).
 select $c$array(select m.rel || ':' || w.who
    from tests.matrix m
    cross join (values ('A'), ('B')) w(who)
@@ -160,7 +161,7 @@ select $c$array(select m.rel || ':' || w.who
      and tests.probe('owner', tests.insert_sql(m.rel, w.who), tests.clear_sql(m.rel, w.who)) <> 1
    order by 1)::text$c$ as c7_valid \gset
 select is(:c7_valid, '{}',
-  'C7 validity: as the owner, every table''s insert lands one row in its cleared slot');
+  'C7 validity: as the owner, every table''s insert into its cleared slot reports one row');
 
 -- C8: the impersonation every probe runs under (`tests.as_who`, D5) is PostgREST's. What a client
 -- role sees is read into psql variables, then asserted as the owner; account ids are compared
@@ -194,13 +195,13 @@ select ok(:'c8_seen' = (select id::text from tests.accounts where who = 'A'),
 select tests.as_who('anon');
 select coalesce(auth.uid()::text, '<null>') as c8_anon_uid, current_user as c8_anon_role \gset
 select tests.as_owner();
-select is(:'c8_anon_uid'::text, '<null>', 'C8: auth.uid() is null for anon');
+select ok(:'c8_anon_uid' = '<null>', 'C8: auth.uid() is null for anon');
 select is(:'c8_anon_role'::text, 'anon', 'C8: current_user is anon for anon');
 
 select tests.as_who('nosub');
 select coalesce(auth.uid()::text, '<null>') as c8_nosub_uid, current_user as c8_nosub_role \gset
 select tests.as_owner();
-select is(:'c8_nosub_uid'::text, '<null>', 'C8: auth.uid() is null in a session with no sub');
+select ok(:'c8_nosub_uid' = '<null>', 'C8: auth.uid() is null in a session with no sub');
 select is(:'c8_nosub_role'::text, 'authenticated',
   'C8: current_user is authenticated in a session with no sub');
 
@@ -213,7 +214,7 @@ select ok(:'c8_stranger_uid' <> '<null>'
 
 select tests.as_who('A');
 select tests.as_owner();
-select is(auth.uid(), null, 'C8: auth.uid() is null after as_owner, from A''s session');
+select ok(auth.uid() is null, 'C8: auth.uid() is null after as_owner, from A''s session');
 select is(current_user::text, session_user::text,
   'C8: current_user is the session user after as_owner');
 
