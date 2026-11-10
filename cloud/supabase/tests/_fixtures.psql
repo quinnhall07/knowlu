@@ -54,3 +54,25 @@ begin
     execute tests.insert_sql(r.rel, r.who);
   end loop;
 end $$;
+
+-- The service-only tables (T5c), through the same `tests.insert_sql` text: one row for A and one
+-- for B in each table with an account key, and the one row of each global table. `models` is not
+-- written: its insert reuses the seeded `task` pin, so the seeded row is its fixture. Chains
+-- follow their foreign keys, so the six tables that need a parent go last: `rule_evidence` (A's
+-- rule and A's judgment) and the five that reference `mail_addresses`.
+do $$
+declare r record;
+begin
+  for r in
+    select m.rel, a.who
+      from tests.matrix m
+     cross join tests.accounts a
+     where m.access = 'service' and m.rel <> 'public.models'
+       and (m.key_col is not null or a.who = 'A')
+     order by m.rel in ('public.rule_evidence', 'public.mail_batches', 'public.mail_canaries',
+                        'public.mail_seen', 'public.mail_work', 'public.mail_claims'),
+              m.rel, a.who
+  loop
+    execute tests.insert_sql(r.rel, r.who);
+  end loop;
+end $$;

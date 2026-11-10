@@ -325,13 +325,29 @@ $$;
 -- same text, so a client's -1 or -2 can only be a grant or a policy, never a bad row. Run it into
 -- the slot `tests.clear_sql` empties: several tables hold one row per account. The id is spliced
 -- as a literal, since the client that runs the text cannot read `tests.accounts`. Placeholder
--- values only. Owner-read tables so far (T5b); it raises on any other table.
+-- values only. Every matrix table (T5b, T5c); it raises on any other. A global table's insert
+-- ignores `p_who` and writes the one row `tests.slot_where` names. A row that needs a parent
+-- (`rule_evidence`, the five tables keyed to a mailbox) reads the parent's id here, as the owner,
+-- and raises unless exactly one exists.
 create function tests.insert_sql(p_rel text, p_who text) returns text language plpgsql as $$
-declare v_id uuid; v_body text := '{"actor": "student", "op": "set"}';
+declare
+  v_id uuid; v_body text := '{"actor": "student", "op": "set"}';
+  v_tag text := 'rls-fixture-' || lower(p_who); v_iv text := 'AAAAAAAAAAAAAAAA';
+  v_addr uuid; v_rule bigint; v_judgment uuid;
 begin
   select a.id into v_id from tests.accounts a where a.who = p_who;
   if v_id is null then
     raise exception 'tests.insert_sql: no fixture account %', coalesce(p_who, '<null>');
+  end if;
+  if p_rel in ('public.mail_batches', 'public.mail_canaries', 'public.mail_seen',
+               'public.mail_work', 'public.mail_claims') then
+    select d.id into strict v_addr from public.mail_addresses d where d.account_id = v_id;
+  elsif p_rel = 'public.rule_evidence' then
+    select r.id, j.id into strict v_rule, v_judgment
+      from tests.accounts a
+      join public.rules r on r.account_id = a.id
+      join public.judgments j on j.account_id = a.id
+     where a.who = 'A';
   end if;
   case p_rel
     when 'public.accounts' then
@@ -364,25 +380,149 @@ begin
         'rls fixture note');
     when 'public.sync_usage' then
       return format('insert into public.sync_usage (account_id, bytes) values (%L, 0)', v_id);
+    -- Service-only tables, default grants (T5c).
+    when 'public.consents' then
+      return format('insert into public.consents (account_id, subject_hash, kind, version)'
+        || ' values (%L, %L, %L, %L)', v_id, 'rls-fixture', 'tos', 'rls-fixture');
+    when 'public.webhook_events' then
+      return format('insert into public.webhook_events (event_id, event_type, created_at)'
+        || ' values (%L, %L, now())', 'evt_rls_fixture', 'rls.fixture');
+    when 'public.deleted_accounts' then
+      return format('insert into public.deleted_accounts (email_hash) values (%L)',
+        'rls-fixture');
+    when 'public.models' then
+      return format('insert into public.models (kind, model_id, prompt_version, grammar_version)'
+        || ' values (%L, %L, %L, %L)', 'task', 'rls-fixture', 'rls-fixture', 'rls-fixture');
+    when 'public.judgments' then
+      return format('insert into public.judgments (account_id, kind, item_id, tier, outcome)'
+        || ' values (%L, %L, %L, 0, %L)', v_id, 'task', 'rls-fixture', 'answered');
+    when 'public.rules' then
+      return format('insert into public.rules (account_id, scope, kind, feature, value, verdict)'
+        || ' values (%L, %L, %L, %L, %L, %L)', v_id, 'account', 'task', 'source', 'rls-fixture',
+        '{}');
+    when 'public.rule_evidence' then
+      return format('insert into public.rule_evidence (rule_id, judgment_id, agrees)'
+        || ' values (%L, %L, true)', v_rule, v_judgment);
+    when 'public.usage_daily' then
+      return format('insert into public.usage_daily (account_id, day, kind, calls)'
+        || ' values (%L, current_date, %L, 1)', v_id, 'task');
+    when 'public.budget_alerts' then
+      return format('insert into public.budget_alerts (account_id, month, usd)'
+        || ' values (%L, date_trunc(%L, current_date)::date, 0)', v_id, 'month');
+    when 'public.google_accounts' then
+      return format('insert into public.google_accounts (account_id, google_sub, secret_id)'
+        || ' values (%L, %L, %L)', v_id, v_tag, gen_random_uuid());
+    when 'public.gmail_seen' then
+      return format('insert into public.gmail_seen (account_id, uid) values (%L, %L)',
+        v_id, 'gmail:rls-fixture');
+    when 'public.gmail_queue' then
+      return format('insert into public.gmail_queue (account_id, uid, tier, payload)'
+        || ' values (%L, %L, %L, %L)', v_id, 'gmail:rls-fixture', 'task', '{}');
+    when 'public.google_state' then
+      return format('insert into public.google_state (nonce, account_id) values (%L, %L)',
+        v_tag, v_id);
+    when 'public.eval_cases' then
+      return format('insert into public.eval_cases (kind, request, theirs, source, seed_id)'
+        || ' values (%L, %L, %L, %L, %L)', 'task', '{}', '{}', 'seed', 'seed-rls-fixture');
+    when 'public.eval_runs' then
+      return format('insert into public.eval_runs (model, prompt_version, grammar_version,'
+        || ' prompt_hash, kind, metric, value, threshold, passed, cases)'
+        || ' values (%L, %L, %L, %L, %L, %L, 0, 0, true, 0)', 'rls-fixture', 'rls-fixture',
+        'rls-fixture', 'rls-fixture', 'task', 'rls-fixture');
+    -- Service-only tables, client grants revoked (T5c). An IV is 16 base64 characters (12 zero
+    -- bytes); each unique column carries the account's tag.
+    when 'public.mail_accounts' then
+      return format('insert into public.mail_accounts (account_id, fp_key_ciphertext, fp_key_iv)'
+        || ' values (%L, %L, %L)', v_id, 'rls-fixture', v_iv);
+    when 'public.mail_addresses' then
+      return format('insert into public.mail_addresses (account_id, provider, token_hmac,'
+        || ' token_ciphertext, token_iv) values (%L, %L, %L, %L, %L)',
+        v_id, 'other', v_tag, 'rls-fixture', v_iv);
+    when 'public.mail_batches' then
+      return format('insert into public.mail_batches (address_id, phase, nonce_hmac, since,'
+        || ' expected) values (%L, %L, %L, now(), 0)', v_addr, 'backfill', v_tag);
+    when 'public.mail_canaries' then
+      return format('insert into public.mail_canaries (address_id, nonce_hmac) values (%L, %L)',
+        v_addr, v_tag);
+    when 'public.mail_seen' then
+      return format('insert into public.mail_seen (account_id, msg_hash, fp_hash,'
+        || ' received_minute, address_id, phase) values (%L, %L, %L, date_trunc(%L, now()), %L,'
+        || ' %L)', v_id, 'rls-fixture', 'rls-fixture', 'minute', v_addr, 'live');
+    when 'public.mail_work' then
+      return format('insert into public.mail_work (account_id, address_id, s3_key, phase,'
+        || ' authenticity, msg_hash) values (%L, %L, %L, %L, %L, %L)',
+        v_id, v_addr, 'work/' || v_tag, 'live', 'aligned', 'rls-fixture');
+    when 'public.mail_claims' then
+      return format('insert into public.mail_claims (account_id, address_id, uid, ordering_date,'
+        || ' phase, authenticity, claims) values (%L, %L, %L, now(), %L, %L, %L)',
+        v_id, v_addr, 'rls-fixture', 'live', 'aligned', '[]');
+    when 'public.judge_allowances' then
+      return format('insert into public.judge_allowances (account_id, kind, opened_at, until,'
+        || ' calls_left) values (%L, %L, now(), now() + %L::interval, 0)',
+        v_id, 'event', '14 days');
+    when 'public.comp_grants' then
+      return format('insert into public.comp_grants (account_id, cohort, ends_at)'
+        || ' values (%L, %L, now() + %L::interval)', v_id, 'friends', '30 days');
+    when 'public.comp_audit' then
+      return format('insert into public.comp_audit (account_id, action, ends_at, cohort)'
+        || ' values (%L, %L, now() + %L::interval, %L)', v_id, 'grant', '30 days', 'friends');
+    when 'public.route_daily' then
+      return format('insert into public.route_daily (account_id, day, route)'
+        || ' values (%L, current_date, %L)', v_id, 'rls-fixture');
     else
       raise exception 'tests.insert_sql: no insert for %', coalesce(p_rel, '<null>');
   end case;
 end $$;
 
--- The cleared slot (D5, r1 I4b): SQL text that, run as the owner, deletes account `p_who`'s rows
--- from `p_rel` by the matrix's key, so an insert probe meets an empty slot, never a 23505. For
--- `accounts` the delete cascades and `auth.users` keeps the row. Owner-read tables so far (T5b).
-create function tests.clear_sql(p_rel text, p_who text) returns text language plpgsql as $$
-declare v_id uuid; v_key text;
+-- The slot (D5, r1 I4b): a `where` clause over table `p_rel` that, read as the owner, names account
+-- `p_who`'s rows there. `tests.clear_sql` deletes it, and C7 counts it, so the row an insert probe
+-- refills is the row C7 proves the fixture wrote.
+-- - A table with an account key: `<key_col> = <id>`.
+-- - `mail_batches` and `mail_canaries` (key `address_id`): the account's mailboxes.
+-- - A global table (no key): the one row its `tests.insert_sql` writes, whoever `p_who` is. For
+--   `models` that is the seeded `task` pin the insert reuses; for `rule_evidence`, A's rule and
+--   A's judgment.
+create function tests.slot_where(p_rel text, p_who text) returns text language plpgsql as $$
+declare v_id uuid; v_key text; v_a uuid;
 begin
   select a.id into v_id from tests.accounts a where a.who = p_who;
   if v_id is null then
-    raise exception 'tests.clear_sql: no fixture account %', coalesce(p_who, '<null>');
+    raise exception 'tests.slot_where: no fixture account %', coalesce(p_who, '<null>');
   end if;
-  select m.key_col into v_key from tests.matrix m where m.rel = p_rel and m.access = 'own';
-  if v_key is null then
-    raise exception 'tests.clear_sql: no clear for %', coalesce(p_rel, '<null>');
+  if not exists (select 1 from tests.matrix m where m.rel = p_rel and m.kind = 'table') then
+    raise exception 'tests.slot_where: % is not a matrix table', coalesce(p_rel, '<null>');
   end if;
-  -- `p_rel` passed the matrix's name check, so it is safe to splice as written.
-  return format('delete from %s where %I = %L', p_rel, v_key, v_id);
+  select m.key_col into v_key from tests.matrix m where m.rel = p_rel;
+  select a.id into v_a from tests.accounts a where a.who = 'A';
+  case
+    when v_key = 'address_id' then
+      return format('address_id in (select id from public.mail_addresses where account_id = %L)',
+        v_id);
+    when v_key is not null then
+      return format('%I = %L', v_key, v_id);
+    when p_rel = 'public.webhook_events' then
+      return format('event_id = %L', 'evt_rls_fixture');
+    when p_rel = 'public.deleted_accounts' then
+      return format('email_hash = %L', 'rls-fixture');
+    when p_rel = 'public.models' then
+      return format('kind = %L', 'task');
+    when p_rel = 'public.rule_evidence' then
+      return format('rule_id in (select id from public.rules where account_id = %L)'
+        || ' and judgment_id in (select id from public.judgments where account_id = %L)', v_a, v_a);
+    when p_rel = 'public.eval_cases' then
+      return format('seed_id = %L', 'seed-rls-fixture');
+    when p_rel = 'public.eval_runs' then
+      return format('prompt_hash = %L', 'rls-fixture');
+    else
+      raise exception 'tests.slot_where: no slot for %', p_rel;
+  end case;
+end $$;
+
+-- The cleared slot (D5, r1 I4b): SQL text that, run as the owner, deletes the slot's rows, so an
+-- insert probe meets an empty slot, never a 23505. For `accounts` the delete cascades and
+-- `auth.users` keeps the row; for `mail_addresses` it cascades to the account's mailbox rows.
+create function tests.clear_sql(p_rel text, p_who text) returns text language plpgsql as $$
+begin
+  -- `p_rel` passed the matrix's name check in `slot_where`, so it is safe to splice as written.
+  return format('delete from %s where %s', p_rel, tests.slot_where(p_rel, p_who));
 end $$;

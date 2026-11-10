@@ -20,7 +20,7 @@ begin;
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(118);
+select plan(122);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -530,17 +530,21 @@ select is(tests.under_fault(:'c6_fault', :'o1')::bigint, -1::bigint,
   'C6''s fault seen by O1: A''s count of public.issues is a privilege refusal (-1)');
 select is(:c6, '{}', 'C6 control: every table''s client verbs match the matrix');
 
--- C7: the fixtures are not vacuous. Each owner-read table holds a row for A and a row for B; a
--- missing account counts as no row. The count is dynamic SQL run as the owner, read back through
--- `query_to_xml`.
-select $c$array(select m.rel || ':' || w.who
+-- C7: the fixtures are not vacuous. Each table with an account key holds a row for A and a row
+-- for B, and each global table holds its one row (named `global`): in every case the slot
+-- `tests.slot_where` names, which `tests.clear_sql` empties and an insert probe refills. For
+-- `models` that slot is the seeded `task` pin. A missing account counts as no row. The count is
+-- dynamic SQL run as the owner, read back through `query_to_xml`.
+select $c$array(select m.rel || ':' || case when m.key_col is null then 'global' else w.who end
    from tests.matrix m
    cross join (values ('A'), ('B')) w(who)
    left join tests.accounts a on a.who = w.who
-   where m.access = 'own'
-     and (xpath('/row/n/text()', query_to_xml(format(
-           'select count(*) as n from %s where %I = %L', m.rel, m.key_col, a.id),
-           false, true, '')))[1]::text::bigint = 0
+   where m.kind = 'table' and (m.key_col is not null or w.who = 'A')
+     and case when a.id is null then true
+              else (xpath('/row/n/text()', query_to_xml(format(
+                      'select count(*) as n from %s where %s', m.rel,
+                      tests.slot_where(m.rel, w.who)), false, true, '')))[1]::text::bigint = 0
+         end
    order by 1)::text$c$ as c7 \gset
 select is(
   tests.under_fault(
@@ -549,7 +553,37 @@ select is(
     :'c7'),
   '{public.issues:B}',
   'C7 sees a planted fault: an owner-read table with no row for B is named');
-select is(:c7, '{}', 'C7 control: every owner-read table holds a row for A and a row for B');
+select is(
+  tests.under_fault(
+    $f$delete from public.judgments
+         where account_id = (select id from tests.accounts where who = 'B')$f$,
+    :'c7'),
+  '{public.judgments:B}',
+  'C7 sees a planted fault: a service table with no row for B is named');
+select is(
+  tests.under_fault(
+    $f$delete from public.mail_batches where address_id in (select id from public.mail_addresses
+         where account_id = (select id from tests.accounts where who = 'A'))$f$,
+    :'c7'),
+  '{public.mail_batches:A}',
+  'C7 sees a planted fault: a mailbox-keyed table with no row for A''s mailbox is named');
+select is(
+  tests.under_fault($f$delete from public.models where kind = 'task'$f$, :'c7'),
+  '{public.models:global}',
+  'C7 sees a planted fault: a global table without the row its insert reuses is named');
+select is(:c7, '{}',
+  'C7 control: every keyed table holds a row for A and for B, and every global table its row');
+-- C7's validity run (D5, r2 note 7), for the service tables: as the owner, each insert lands in
+-- its cleared slot (one row), so a client's -1 or -2 there can only be a grant or a policy. A bad
+-- row raises here and stops the file, loud; it is never read as a refusal.
+select $c$array(select m.rel || ':' || w.who
+   from tests.matrix m
+   cross join (values ('A'), ('B')) w(who)
+   where m.access = 'service' and (m.key_col is not null or w.who = 'A')
+     and tests.probe('owner', tests.insert_sql(m.rel, w.who), tests.clear_sql(m.rel, w.who)) <> 1
+   order by 1)::text$c$ as svc_valid \gset
+select is(:svc_valid, '{}',
+  'C7 validity: as the owner, every service table''s insert lands in its cleared slot');
 
 -- V3: each view's `insert ... default values` raises the matrix's code, as anon and as A. A view
 -- whose code differs is named with the code it gave, so the fault case asserts a real success
