@@ -763,6 +763,20 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
 - **Readings T2b must match (T1b).** Scrub tokens are removed before the markup check only, after
   lowercasing, in one pass; a TLD may carry combining marks (`\p{M}`) beside at least two letters;
   `www.`, `javascript:` and `vbscript:` are URLs wherever they occur.
+- **T1b review rulings (controller, 2026-11-09).** Oracle (T1b) and enforcement (T2b) both follow these:
+  - A backslash counts as a slash everywhere a slash is read: `https:\\host`, `host.zip\path`.
+  - `http:` and `https:` are URLs wherever they occur, with or without slashes after them (browsers read
+    `https:host` as `https://host`), like `javascript:`.
+  - On an extension-list label, the tail that makes it a host may start with one optional `.`
+    (`example.ai./reset`, `example.zip.:8080/x`).
+  - A dotted quad (four groups of 1 to 3 digits, each at most 255) is a host, with or without a tail.
+    `localhost` is a host when a port or a path follows it.
+  - `file:` and `data:` need a word boundary before them (`profile:/settings` and `metadata:image/png`
+    are prose); `www.`, `javascript:` and `vbscript:` stay "anywhere".
+  - Known false positives, accepted: code identifiers whose last label is a TLD (`ASP.NET`,
+    `socket.io`, `os.path` in the oracle's open-ended rule), run-together typos (`Friday.Bring`),
+    `lab1.py/lab2.py`. Honest-twin fixtures (T7) and T2b's must-not-flag rows avoid them; a title
+    refused for one costs one card's title.
 - **Example hosts on TLDs with no reserved name (amends §1 and §5).** Where a TLD has no reserved
   name (`ai md pl py rs sh`), the oracle's tests use `example.<label>`; these are never fetched and
   never appear in a fixture. Every host in a test uses the `example` label.
