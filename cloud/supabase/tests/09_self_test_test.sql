@@ -20,7 +20,7 @@ begin;
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(122);
+select plan(124);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -582,8 +582,28 @@ select $c$array(select m.rel || ':' || w.who
    where m.access = 'service' and (m.key_col is not null or w.who = 'A')
      and tests.probe('owner', tests.insert_sql(m.rel, w.who), tests.clear_sql(m.rel, w.who)) <> 1
    order by 1)::text$c$ as svc_valid \gset
+-- Seen failing: a `do instead nothing` rule makes the owner's insert land no row. The statement
+-- still runs (SPI reports it rewritten, with a row count of 0), so the probe returns 0, not an
+-- error, and both of the table's slots are named.
+select is(
+  tests.under_fault($f$create rule zz as on insert to public.judgments do instead nothing$f$,
+    :'svc_valid'),
+  '{public.judgments:A,public.judgments:B}',
+  'C7 validity sees a planted fault: an owner insert that lands no row is named, for A and B');
 select is(:svc_valid, '{}',
   'C7 validity: as the owner, every service table''s insert lands in its cleared slot');
+-- Guard rail (D6, r2 note 7): a bad row is never a count. A check constraint the fixture's
+-- `judgments` row breaks (`not valid`, so the rows already there are not checked) makes the
+-- owner's validity insert raise 23514 through `tests.run`, `tests.probe` and `tests.under_fault`,
+-- none of which catches it, so the validity run cannot pass on a bad `insert_sql`.
+select throws_ok(
+  format('select tests.under_fault(%L, %L)',
+    $f$alter table public.judgments
+         add constraint zz check (item_id <> 'rls-fixture') not valid$f$,
+    $c$tests.probe('owner', tests.insert_sql('public.judgments', 'A'),
+       tests.clear_sql('public.judgments', 'A'))$c$),
+  '23514', 'new row for relation "judgments" violates check constraint "zz"',
+  'guard: an owner insert that breaks a check constraint raises 23514; it is never a count');
 
 -- V3: each view's `insert ... default values` raises the matrix's code, as anon and as A. A view
 -- whose code differs is named with the code it gave, so the fault case asserts a real success

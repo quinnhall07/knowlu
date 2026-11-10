@@ -20,7 +20,8 @@ alter default privileges in schema tests grant execute on functions to anon, aut
 create table tests.matrix (
   rel              text primary key check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
   kind             text not null check (kind in ('table', 'view')),
-  access           text not null check (access in ('own', 'service', 'invoker_view', 'closed_view')),
+  access           text not null
+                     check (access in ('own', 'service', 'invoker_view', 'closed_view')),
   key_col          text,
   touch_col        text,
   grants           text not null check (grants in ('default', 'revoked')),
