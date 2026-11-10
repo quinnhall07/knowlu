@@ -5,19 +5,27 @@
 -- No real data: random UUIDs, `@example.invalid` addresses and placeholder text. No id is printed.
 -- Runs as the database owner the CLI connects as.
 
--- A and B, made the way sign-up makes them: an `auth.users` insert alone, with the column list
--- `proofs/testers_staging.sql` uses, cut to the columns that have no default. The triggers do the
--- rest: `on_auth_user_metadata` trims the metadata, and `on_auth_user_created` (`handle_new_user`,
--- which reads no metadata since 20260917000100) writes the `accounts` row and the `entitlements`
--- row at `none`. The owner's insert fires both. A trigger runs without an EXECUTE check, so
--- 20261109000100's revoke from the client roles does not touch it.
+-- A and B, made the way sign-up makes them: an `auth.users` insert alone, with the column list and
+-- the values `proofs/testers_staging.sql` uses, so the row looks like a real sign-up's. The token
+-- and change columns are '' as the proof writes them, not null (GoTrue cannot read a user whose
+-- token column is null); '' is also outside the tokens' partial unique indexes, so A and B never
+-- collide there. Like the proof, it leaves out `confirmed_at` (generated), the password hash and
+-- `recovery_sent_at`. The triggers do the rest: `on_auth_user_metadata` trims the metadata, and
+-- `on_auth_user_created` (`handle_new_user`, which reads no metadata since 20260917000100) writes
+-- the `accounts` row and the `entitlements` row at `none`. The owner's insert fires both. A
+-- trigger runs without an EXECUTE check, so 20261109000100's revoke from the client roles does
+-- not touch it.
 insert into tests.accounts (who, id) values ('A', gen_random_uuid()), ('B', gen_random_uuid());
 
-insert into auth.users (instance_id, id, aud, role, email, raw_app_meta_data, raw_user_meta_data,
-                        email_confirmed_at, created_at, updated_at)
+insert into auth.users (instance_id, id, aud, role, email, email_confirmed_at, last_sign_in_at,
+                        raw_app_meta_data, raw_user_meta_data, created_at, updated_at,
+                        confirmation_token, recovery_token, email_change_token_new, email_change,
+                        email_change_token_current, email_change_confirm_status, phone_change,
+                        phone_change_token, reauthentication_token, is_anonymous, is_sso_user)
 select '00000000-0000-0000-0000-000000000000', a.id, 'authenticated', 'authenticated',
-       format('rls-%s@example.invalid', lower(a.who)),
-       '{"provider": "email", "providers": ["email"]}', '{}', now(), now(), now()
+       format('rls-%s@example.invalid', lower(a.who)), now(), now(),
+       '{"provider": "email", "providers": ["email"]}', '{}', now(), now(),
+       '', '', '', '', '', 0, '', '', '', false, false
   from tests.accounts a
  order by a.who;
 

@@ -20,7 +20,7 @@ begin;
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(102);
+select plan(104);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -279,9 +279,10 @@ select is(:p3, '{}', 'P3 control: no public or admin relation is published');
 -- A and one for B, and an active subscription on each for V1. Ids never appear in this file: a
 -- check looks each one up as the owner and splices it into the probe as a literal
 -- (`format('%L')`), since the probe runs as the client, who cannot read `tests.accounts`.
--- `probe_write` re-reads its target as the owner, so a target may name `tests.accounts` directly. The select-all companions are D6's:
--- Postgres applies SELECT policies to the rows an update, delete or upsert reads, so without one an
--- update, delete or move fault would still report nothing.
+-- `probe_write` re-reads its target as the owner, so a target may name `tests.accounts` directly.
+-- The select-all companions are D6's: Postgres applies SELECT policies to the rows an update,
+-- delete or upsert reads, so without one an update, delete or move fault would still report
+-- nothing.
 
 -- A1: a select policy for anon.
 select $c$tests.probe('anon', 'select count(*) from public.issues')$c$ as a1 \gset
@@ -501,10 +502,14 @@ select is(
     $f$alter view public.billing_subscribers set (security_invoker = false)$f$, :'c5'),
   '{public.billing_subscribers}',
   'C5 sees a planted fault: an invoker view running as its owner is named');
+-- C5's other branch, under A5's fault: a closed view a client may select.
+select is(tests.under_fault(:'a5_fault', :'c5'), '{public.monthly_spend}',
+  'C5 sees a planted fault: a closed view granted to the client roles is named');
 select is(:c5, '{}', 'C5 control: every view''s security_invoker and select grants match');
 
--- C6: each table's four client verbs, for both client roles, match the matrix's `grants`. Under
--- the same fault, O1's probe becomes a privilege refusal.
+-- C6: each table's four client verbs, for both client roles, match the matrix's `grants`, in both
+-- directions: a verb a `default` table lost, and a verb a `revoked` table gained. Under the revoke,
+-- O1's probe becomes a privilege refusal.
 select
   $f$revoke select on public.issues from authenticated$f$ as c6_fault,
   $c$array(select m.rel || ':' || r.role || ':' || v.verb
@@ -517,6 +522,10 @@ select
      order by 1)::text$c$ as c6 \gset
 select is(tests.under_fault(:'c6_fault', :'c6'), '{public.issues:authenticated:select}',
   'C6 sees a planted fault: a table verb authenticated lost is named');
+select is(
+  tests.under_fault($f$grant select on public.mail_accounts to authenticated$f$, :'c6'),
+  '{public.mail_accounts:authenticated:select}',
+  'C6 sees a planted fault: a verb authenticated gained on a revoked table is named');
 select is(tests.under_fault(:'c6_fault', :'o1')::bigint, -1::bigint,
   'C6''s fault seen by O1: A''s count of public.issues is a privilege refusal (-1)');
 select is(:c6, '{}', 'C6 control: every table''s client verbs match the matrix');
@@ -542,10 +551,14 @@ select is(
   'C7 sees a planted fault: an owner-read table with no row for B is named');
 select is(:c7, '{}', 'C7 control: every owner-read table holds a row for A and a row for B');
 
--- V3: each view's `insert ... default values` raises the matrix's code, as anon and as A. The fault
--- is an updatable view over `issues` that runs as its owner, given defaults for the two columns
--- `issues` cannot default (A's account, a placeholder body) and its own matrix row expecting 55000,
--- so the insert succeeds (00000) and the view is named.
+-- V3: each view's `insert ... default values` raises the matrix's code, as anon and as A. A view
+-- whose code differs is named with the code it gave, so the fault case asserts a real success
+-- (00000), not merely some other code. The fault is an updatable view over `issues` that runs as
+-- its owner, given defaults for the two columns `issues` cannot default (A's account, a
+-- placeholder body) and its own matrix row expecting 55000. The client holds `insert` on the view;
+-- the view's owner, the role the fixtures inserted `issues` rows as, has the base table's
+-- privileges, and `issues` is not under `force row level security`, so neither a grant nor a
+-- policy refuses the insert.
 select
   $f$create view public.zz_v as select * from public.issues;
      do $d$ begin
@@ -558,17 +571,17 @@ select
        (rel, kind, access, key_col, touch_col, grants, policies, view_insert_code)
        values ('public.zz_v', 'view', 'closed_view', null, null, 'revoked', '{}', '55000')$f$
     as v3_fault,
-  $c$array(select m.rel from tests.matrix m
-     where m.kind = 'view'
-       and tests.view_insert('anon', m.rel) is distinct from m.view_insert_code
+  $c$array(select m.rel || ':' || v.code from tests.matrix m
+     cross join lateral (select tests.view_insert('anon', m.rel) as code) v
+     where m.kind = 'view' and v.code is distinct from m.view_insert_code
      order by 1)::text$c$ as v3_anon,
-  $c$array(select m.rel from tests.matrix m
-     where m.kind = 'view'
-       and tests.view_insert('A', m.rel) is distinct from m.view_insert_code
+  $c$array(select m.rel || ':' || v.code from tests.matrix m
+     cross join lateral (select tests.view_insert('A', m.rel) as code) v
+     where m.kind = 'view' and v.code is distinct from m.view_insert_code
      order by 1)::text$c$ as v3_a \gset
-select is(tests.under_fault(:'v3_fault', :'v3_anon'), '{public.zz_v}',
+select is(tests.under_fault(:'v3_fault', :'v3_anon'), '{public.zz_v:00000}',
   'V3 sees a planted fault: anon''s insert into an updatable owner-run view succeeds');
-select is(tests.under_fault(:'v3_fault', :'v3_a'), '{public.zz_v}',
+select is(tests.under_fault(:'v3_fault', :'v3_a'), '{public.zz_v:00000}',
   'V3 sees a planted fault: A''s insert into an updatable owner-run view succeeds');
 select is(:v3_anon, '{}', 'V3 control: anon''s insert into every view raises the matrix''s code');
 select is(:v3_a, '{}', 'V3 control: A''s insert into every view raises the matrix''s code');
