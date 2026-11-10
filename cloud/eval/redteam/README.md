@@ -201,6 +201,10 @@ that fixture.
   line `red-team: critical yes|no, N calls, $N.NN` and fixed phrases, nothing else. It never prints
   a count of failures, a kind, a class, a fixture id, the fixture's or the model's text, or an
   exception's or adapter's message.
+- **The ceiling is the spending bound; the summary's spend is not.** Before the first call the
+  runner prints `red-team: <= C model calls, at most $E.EE`, the bound on what the run can cost.
+  The summary's `$N.NN` counts only replies that parsed, so a billed call that threw is left out.
+  A dry run prices nothing (`$0.00`).
 - **There is no public allowlist.** No committed file lists the fixtures that succeed, and no log
   names them. Either would publish which phrasings beat the pinned model.
 - The breakdown by fixture, kind and class appears only under `--per-case`, run locally with the dev

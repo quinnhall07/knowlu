@@ -669,19 +669,59 @@ function perCaseLines(judged: Judged): string[] {
 // The entry point.
 // ---------------------------------------------------------------------------------------------
 
+/** What the entry point still knows when a throw reaches it: enough to print the summary. */
+interface Progress {
+  /** Set once the ceiling has printed, when calls may begin; until then there is no summary. */
+  meter: Meter | null;
+  rows: ReadonlyMap<FixtureKind, ModelRow>;
+  dry: boolean;
+  /** Set as each fixture is scored, so a throw while scoring never hides a critical found before it. */
+  critical: boolean;
+  /** The fault phrase is printed once, whichever catch prints it first. */
+  faulted: boolean;
+}
+
+/** A caught error's text, clipped and scrubbed, under `--per-case` only. */
+function detail(perCase: boolean, e: unknown): void {
+  if (perCase) console.error(`    detail: ${quote(clipDetail(messageOf(e)))}`);
+}
+
+/** `red-team: critical yes|no, N calls, $S.SS`. A dry run spends nothing, so it prices nothing. */
+function summaryLine(progress: Progress, meter: Meter): string {
+  const usd = progress.dry ? 0 : meter.spend(progress.rows);
+  return `red-team: critical ${progress.critical ? "yes" : "no"}, ${meter.calls} calls, $${usd.toFixed(2)}`;
+}
+
 /**
  * Resolves to the exit code: 0 clean or skipped, 1 critical, 2 an outage or a harness fault. Reads
  * one environment variable itself, `SUPABASE_SERVICE_ROLE_KEY`, first: absent, it reads nothing
  * else and skips (`run_eval.ts`'s A-4 rule, for a fork PR with no secrets). The provider key is read
  * by `modelFor`, never on a dry run; the database URL by the `db` factory.
+ *
+ * A throw from anywhere in the run is a harness fault here (the T5b review's M1): the fixed phrase,
+ * exit 2, and the summary when calls may have begun. Never Deno's unhandled rejection, which prints
+ * the error's own text and a stack and exits 1, the code that reads as critical.
  */
 export async function main(args: string[], deps: Partial<Deps> = {}): Promise<number> {
-  const d: Deps = { ...REAL_DEPS, ...deps };
   const perCase = args.includes("--per-case");
-  const detail = (e: unknown) => {
-    if (perCase) console.error(`    detail: ${quote(clipDetail(messageOf(e)))}`);
-  };
+  const progress: Progress = { meter: null, rows: new Map(), dry: false, critical: false, faulted: false };
+  try {
+    return await run(args, { ...REAL_DEPS, ...deps }, perCase, progress);
+  } catch (e) {
+    if (!progress.faulted) console.error(FAULT_RUN);
+    detail(perCase, e);
+    if (progress.meter !== null) {
+      try {
+        console.log(summaryLine(progress, progress.meter));
+      } catch {
+        // The fault phrase is already printed; the exit code still says fault.
+      }
+    }
+    return 2;
+  }
+}
 
+async function run(args: string[], d: Deps, perCase: boolean, progress: Progress): Promise<number> {
   if (args.some((a) => !ARGS.includes(a))) {
     console.error(FAULT_ARGS);
     return 2;
@@ -691,6 +731,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     return 0;
   }
   const dry = args.includes("--dry-run");
+  progress.dry = dry;
 
   let fixtures: Fixture[];
   try {
@@ -698,7 +739,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     checkSet(fixtures);
   } catch (e) {
     console.error(FAULT_FIXTURES);
-    detail(e);
+    detail(perCase, e);
     return 2;
   }
   const kinds = FIXTURE_KINDS.filter((k) => fixtures.some((f) => f.kind === k));
@@ -709,9 +750,10 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   try {
     const db = d.db();
     for (const kind of kinds) rows.set(kind, await modelRow(db, kind));
+    progress.rows = rows;
   } catch (e) {
     console.error(FAULT_PIN);
-    detail(e);
+    detail(perCase, e);
     return 2;
   }
   const live = new Map<FixtureKind, JudgeModel>();
@@ -720,7 +762,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       for (const kind of kinds) live.set(kind, d.modelFor(rows.get(kind)!, d.envGet));
     } catch (e) {
       console.error(FAULT_MODEL);
-      detail(e);
+      detail(perCase, e);
       return 2;
     }
   } else {
@@ -731,6 +773,8 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   const twins = new Map(fixtures.filter((f) => !isAttack(f)).map((t) => [t.id, t]));
   const runs = new Map<string, Run[]>(fixtures.map((f) => [f.id, []]));
   const meter = new Meter();
+  // From here calls may begin, so a fault from here on still prints the summary.
+  progress.meter = meter;
   const outages = new Set<FixtureKind>();
   let fault = false;
   try {
@@ -746,9 +790,9 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
         const twin = isAttack(fixture) ? twins.get(fixture.twin_of)! : fixture;
         // The one difference a dry run makes: the model, scripted with the twin's answer.
         const model = dry ? () => new ScriptedModel([dryRunAnswer(twin)]) : () => live.get(kind)!;
-        const run = await runOnce(fixture, rows.get(kind)!, model, meter, d.sleep);
-        runs.get(fixture.id)!.push(run);
-        if (run.answered !== null) continue;
+        const result = await runOnce(fixture, rows.get(kind)!, model, meter, d.sleep);
+        runs.get(fixture.id)!.push(result);
+        if (result.answered !== null) continue;
         unscored += 1;
         // Past the bound the kind is already an outage: stop spending on it, and go on to the next.
         if (providerError(unscored, plan.length)) {
@@ -758,9 +802,11 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       }
     }
   } catch (e) {
+    // A fault mid-run still scores the runs already made, so a critical among them is reported.
     fault = true;
+    progress.faulted = true;
     console.error(FAULT_RUN);
-    detail(e);
+    detail(perCase, e);
   }
 
   // What each attack named as planted, by its twin: a twin's output must hold none of it.
@@ -768,10 +814,14 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   for (const attack of fixtures.filter(isAttack)) {
     plantedByTwin.set(attack.twin_of, [...(plantedByTwin.get(attack.twin_of) ?? []), ...attack.planted]);
   }
-  const judged = fixtures.map((f) =>
-    judgeFixture(f, runs.get(f.id)!, isAttack(f) ? runs.get(f.twin_of)! : [], plantedByTwin)
-  );
-  const critical = judged.some((j) => j.critical.length > 0);
+  // One fixture at a time, the critical bit set as each is scored: a throw while scoring reaches the
+  // entry point with every critical found before it still counted.
+  const judged: Judged[] = [];
+  for (const f of fixtures) {
+    const one = judgeFixture(f, runs.get(f.id)!, isAttack(f) ? runs.get(f.twin_of)! : [], plantedByTwin);
+    judged.push(one);
+    if (one.critical.length > 0) progress.critical = true;
+  }
 
   if (perCase) {
     for (const kind of kinds) {
@@ -794,11 +844,9 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     console.log(`per-case twins with a policy hit (Q1): ${judged.filter((j) => j.q1.length > 0).length}`);
   }
   if (outages.size > 0) console.error(OUTAGE);
-  console.log(
-    `red-team: critical ${critical ? "yes" : "no"}, ${meter.calls} calls, $${meter.spend(rows).toFixed(2)}`,
-  );
+  console.log(summaryLine(progress, meter));
   if (fault || outages.size > 0) return 2;
-  return critical ? 1 : 0;
+  return progress.critical ? 1 : 0;
 }
 
 if (import.meta.main) {

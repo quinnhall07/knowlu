@@ -990,6 +990,8 @@ Deno.test("--dry-run scores every committed fixture against its twin's answer: n
   const said = summary(run);
   assertEquals(said.critical, false);
   assertEquals(said.calls, attacks * 3 + twins);
+  // A dry run spends nothing, so it prices nothing: the scripted replies' tokens are not a bill.
+  assertEquals(said.spend, "0.00");
   assertEquals(run.dbWrites, []);
   assertEquals(leaks(run.out, fixtures, []).length, 0, "the one-bit output leaked");
 });
@@ -1610,6 +1612,67 @@ Deno.test("a bad fixture, a missing pin or a missing provider key exits 2 before
   assertOneBit(keyless, fixtures, []);
 });
 
+// The T5b review's M1: a throw anywhere in `main` is a harness fault at the entry point (exit 2, a fixed
+// phrase), never Deno's unhandled rejection, which prints the error's own text and a stack and exits 1,
+// the code that reads as critical.
+
+const HARNESS_FAULT = /^red-team: harness fault, /;
+
+/** A thrown message carrying a canary and a host, so a leak of it is visible to `leaks`. */
+const BOOM = "exploded on KNOWLU-CANARY-BOOM at lure.example.net/boom";
+
+Deno.test("a throw at the service-role key read or in the ceiling exits 2 with a fixed phrase, never the thrown text", async () => {
+  const fixtures = [EVENT_TWIN, EVENT_ONE];
+  const events: string[] = [];
+  const model = routed(fixtures, {}, events);
+  const env = await runMain([], {
+    envGet: () => {
+      throw new Error(BOOM);
+    },
+    loadFixtures: () => Promise.resolve(fixtures),
+    modelFor: () => model,
+  });
+  // An item whose title throws when the ceiling builds its prompt, before any call.
+  const item = { ...EVENT_TWIN.request.item };
+  Object.defineProperty(item, "title", {
+    enumerable: true,
+    get() {
+      throw new Error(BOOM);
+    },
+  });
+  const unbuildable: TwinFixture = { ...EVENT_TWIN, request: { ...EVENT_TWIN.request, item } };
+  const ceiling = await runMain([], {
+    loadFixtures: () => Promise.resolve([unbuildable, EVENT_ONE]),
+    modelFor: () => model,
+  });
+  for (const [label, run] of [["env read", env], ["ceiling", ceiling]] as const) {
+    assertEquals(run.code, 2, `${label}: ${JSON.stringify(run.out)}`);
+    assert(run.out.some((l) => HARNESS_FAULT.test(l)), `${label}: ${JSON.stringify(run.out)}`);
+    // Nothing ran, so there is no summary to print.
+    assertEquals(run.out.filter((l) => SUMMARY.test(l)), [], label);
+    assertOneBit(run, fixtures, [], [BOOM, "exploded"]);
+  }
+  assertEquals(model.total(), 0);
+});
+
+Deno.test("a throw while scoring exits 2 with a fixed phrase, and a critical already found still says critical yes", async () => {
+  // EVENT_ONE obeys on every run and is scored before the attack whose goal throws when read.
+  const bomb = { ...eventAttack("rt-event-c1-9", "KNOWLU-CANARY-EVBOMB") };
+  Object.defineProperty(bomb, "goal", {
+    enumerable: false,
+    get() {
+      throw new Error(BOOM);
+    },
+  });
+  const fixtures = [EVENT_TWIN, EVENT_ONE, bomb as AttackFixture];
+  const run = await scripted(fixtures, { [EVENT_ONE.id]: { then: OBEYED_EVENT } });
+  assertEquals(run.code, 2, JSON.stringify(run.out));
+  assert(run.out.some((l) => HARNESS_FAULT.test(l)), JSON.stringify(run.out));
+  assertEquals(summary(run).critical, true);
+  assertEquals(summary(run).calls, 7);
+  assertOneBit(run, [EVENT_TWIN, EVENT_ONE], [HONEST.event, OBEYED_EVENT], [BOOM, "exploded"]);
+});
+
 // ---------------------------------------------------------------------------------------------
 // §4.2 and §6: the workflows. Red until T6 adds the step and the weekly workflow.
 // ---------------------------------------------------------------------------------------------
@@ -1768,4 +1831,25 @@ Deno.test("source guard: mail-resolve/handler.ts builds and validates the resolv
   assert(/claims:/.test(built) && /candidates/.test(built), "buildMailResolvePrompt({ claims, candidates })");
   const checked = callArgs(src, "validateMailResolve", "\\)");
   assert(/claims:/.test(checked) && /candidates:/.test(checked), "validateMailResolve(answer, { claims, candidates })");
+});
+
+/** The body of the one `function failureCause(...)` in `src`, comments gone and whitespace folded. */
+function failureCauseBody(src: string, where: string): string {
+  const bodies = [...src.matchAll(/\bfunction failureCause\(e: unknown\): Cause \{\n([\s\S]*?)\n\}/g)];
+  assertEquals(bodies.length, 1, `one failureCause in ${where}`);
+  return bodies[0][1].replace(/\s+/g, " ").trim();
+}
+
+// The T5b review: the runner's `failureCause` is a copy, since production's two are not exported. A change
+// to either production copy turns this red, so the runner's reading of a thrown call cannot drift.
+Deno.test("source guard: the runner's failureCause is the one mail-process/model.ts and mail-resolve/handler.ts use", async () => {
+  const runnerText = await Deno.readTextFile(new URL("./run_redteam.ts", import.meta.url));
+  const runner = failureCauseBody(
+    runnerText.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""),
+    "run_redteam.ts",
+  );
+  assert(runner.includes("ModelRefused") && runner.includes("max_tokens"), runner);
+  for (const path of ["mail-process/model.ts", "mail-resolve/handler.ts"]) {
+    assertEquals(failureCauseBody(await source(path), path), runner, path);
+  }
 });
