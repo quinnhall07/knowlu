@@ -1,0 +1,50 @@
+name: redteam-weekly
+# The prompt-injection suite's weekly run (docs/plans/2026-11-09-prompt-injection-suite-plan.md,
+# section 6, Q4). A pin names a model and an upstream, and the upstream can change how it serves
+# without a commit here, so the suite that `ci.yml`'s `red-team suite` step runs on judgment-path
+# PRs also runs here, on `main`, once a week. Its own workflow because `eval-gate` runs only on pull
+# requests.
+#
+# It holds the suite's own OpenRouter key and the staging service-role key, so:
+#   - its only triggers are the schedule and a manual dispatch; no pull request and no branch update
+#     ever starts it, so no PR-authored code runs with its secrets (engine/tests/workflows.rs);
+#   - the job runs only on `main` (a dispatch from another branch is skipped);
+#   - it runs on GitHub's hosted runners only, never ci.yml's CI_SELF_HOSTED switch;
+#   - it reads only (`contents: read`), every action is pinned to the SHA ci.yml uses, and checkout
+#     keeps no credential.
+#
+# The command is the PR step's (see that step's comment for the flags, the env and the key): one bit
+# in a public log, never `--per-case` or `--dry-run`. Exit 0 clean, 1 a critical, 2 an outage or a
+# harness fault. Nothing here waits on it, so it carries no continue-on-error: a red weekly run is
+# the alert. Before `OPENROUTER_REDTEAM_API_KEY` exists, the runner reads the pins with the
+# service-role key, cannot build a model client, prints "red-team: harness fault, a model client
+# could not be built" and exits 2 having spent nothing: the run is red, as an unchecked week should
+# be. Without the service-role key too it prints "red-team: skipped (no database access)" and exits 0.
+on:
+  schedule:
+    - cron: '41 7 * * 1'   # Mondays, 07:41 UTC
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency:
+  group: redteam-weekly   # one run at a time: a second dispatch waits rather than spending in parallel
+  cancel-in-progress: false
+jobs:
+  redteam:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 40
+    # The staging project's host, as ci.yml's eval-gate names it. Not a secret.
+    env:
+      STAGING_HOST: brvhgbihxevrudqpulcm.supabase.co
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { persist-credentials: false }
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed  # v2.0.5
+        with: { deno-version: "2.x" }
+      - name: red-team suite
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_REDTEAM_API_KEY }}
+          SUPABASE_URL: https://${{ env.STAGING_HOST }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
+        run: deno run --allow-read --allow-env=OPENROUTER_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY --allow-net="openrouter.ai,$STAGING_HOST" --config cloud/supabase/deno.json cloud/eval/redteam/run_redteam.ts

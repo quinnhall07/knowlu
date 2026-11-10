@@ -214,10 +214,13 @@ jobs:
     runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
     needs: [changes, cloud]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-    timeout-minutes: 20
-    # A-6: the staging project's host, named once at job level and referenced twice below (the
-    # `eval suite` step's own `SUPABASE_URL` and its `--allow-net` list) — the literal used to
-    # appear twice, independently, which is exactly the shape that drifts the day staging moves.
+    # 20 for `eval suite` plus the `red-team suite` step's own 30: a job that runs out its clock fails
+    # this required check, past any step's continue-on-error.
+    timeout-minutes: 50
+    # A-6: the staging project's host, named once at job level and referenced below (each suite
+    # step's own `SUPABASE_URL` and its `--allow-net` list; the `red-team suite` step reads it as a
+    # shell variable) — the literal used to appear twice, independently, which is exactly the
+    # shape that drifts the day staging moves.
     # Not a secret (the C1 plan: "each project's reference id, its URL ... none secret" —
     # `app/src/account.rs`'s own `DEFAULT_API_BASE` names prod's the same way).
     env:
@@ -229,28 +232,39 @@ jobs:
         if: needs.changes.outputs.code != 'false'
         with: { deno-version: "2.x" }
       # On a document-only change `changes` says `code=false`, the touched-check below finds no prompt,
-      # schema or pin, and `run` stays `no`: the job reports success without spending anything.
-      - name: does this PR touch a prompt, a schema, or the model pins?
+      # schema, pin or red-team file, and `run` and `redteam` stay `no`: the job reports success without
+      # spending anything.
+      - name: does this PR touch a prompt, a schema, the model pins or the red-team suite?
         id: touched
         shell: bash
         env:
           # C2 Task 14 fix 1 (R-C2-E51, finding 4): named through env: rather than interpolated
           # straight into the script, so a base branch name can never be read as shell syntax.
           BASE_REF: ${{ github.base_ref }}
+        # `--no-renames`, as `changes` does: a judgment file moved away still lists its old path.
         run: |
-          files=$(git diff --name-only "origin/$BASE_REF"...HEAD)
+          files=$(git diff --no-renames --name-only "origin/$BASE_REF"...HEAD)
           run=no
-          # The four files that define what is asked and how the answer is checked — A-6 adds
+          # The files that define what is asked and how the answer is checked — A-6 adds
           # `judge_pipeline.ts` (the call order, the verdict shape, the outcome the eval suite
-          # itself replays) beside the three that were already here...
-          if echo "$files" | grep -Eq '^cloud/supabase/functions/_shared/judge_(prompts|models|validate|pipeline)\.ts$'; then run=yes; fi
+          # itself replays) beside the three that were already here, and the prompt-injection suite
+          # plan (section 6) adds `scrub.ts` (it changes what the model sees) and `output_policy.ts`
+          # (what of the answer survives)...
+          if echo "$files" | grep -Eq '^cloud/supabase/functions/_shared/(judge_(prompts|models|validate|pipeline)|scrub|output_policy)\.ts$'; then run=yes; fi
           # ...and ANY migration that mentions the `models` table. A pin change is "a migration row
           # with a date" (§5.2) — `20260912000100_pin_sonnet.sql`, say — so a filename pattern is
           # exactly the wrong test: it would miss the model swap the gate exists for.
           for f in $(echo "$files" | grep -E '^cloud/supabase/migrations/.*\.sql$' || true); do
             if [ -f "$f" ] && grep -qiE '\bmodels\b' "$f"; then run=yes; fi
           done
+          # The red-team suite (plan section 6) runs on everything the eval runs on, plus the suite
+          # itself (any file under `cloud/eval/redteam/`, its README included) and the three mail-path
+          # files its runner composes (section 4.1). Those three change no prompt the eval seed
+          # covers, so they spend no eval run.
+          redteam=$run
+          if echo "$files" | grep -Eq '^cloud/eval/redteam/|^cloud/supabase/functions/(mail-process/(model|handler)|mail-resolve/handler)\.ts$'; then redteam=yes; fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "redteam=$redteam" >> "$GITHUB_OUTPUT"
       # `SUPABASE_URL` is not secret (the job-level `STAGING_HOST` comment above says why); the two
       # secrets Quinn sets — `OPENROUTER_API_KEY` and `SUPABASE_STAGING_SERVICE_ROLE_KEY` — are
       # named in the C2 Task 14 report and the provider-swap Task 4 report, never a value. This
@@ -282,3 +296,39 @@ jobs:
         # not gated by Deno's runtime permissions, only by `--allow-read`/`--allow-net`'s absence
         # entirely, and this step needs to read its own source tree and thresholds.json.
         run: deno run --allow-read --allow-env=OPENROUTER_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY,ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --allow-net=openrouter.ai,${{ env.STAGING_HOST }} --config cloud/supabase/deno.json cloud/eval/run_eval.ts --thresholds cloud/eval/thresholds.json
+      # The prompt-injection suite's Layer 2 (docs/plans/2026-11-09-prompt-injection-suite-plan.md,
+      # sections 4.2 and 6): `cloud/eval/redteam/run_redteam.ts` replays the public attack fixtures
+      # against each kind's pinned model, through the production paths. This log is public, so the
+      # runner prints only fixed phrases, its call ceiling and one bit (critical yes or no), and CI
+      # never passes `--per-case` (the breakdown) or `--dry-run` (scripted answers, not the model).
+      # Exit 0 clean or skipped, 1 a critical, 2 a provider outage or a harness fault.
+      #
+      # The key is the suite's own: `OPENROUTER_REDTEAM_API_KEY`, a credit-capped OpenRouter key set
+      # only as a GitHub Actions secret, mapped to the name `judge_provider.ts` reads, so the suite's
+      # spend is seen, capped and revoked apart from staging's. The pins are read with the staging
+      # service-role key, as `eval suite` reads them. What each absence does:
+      #   - a fork PR has neither secret: the runner prints "red-team: skipped (no database access)"
+      #     and exits 0, having read no other variable and opened no connection;
+      #   - a branch PR before the red-team key exists: the runner reads the pins, then cannot build a
+      #     model client, prints "red-team: harness fault, a model client could not be built" and
+      #     exits 2 before any model call; nothing is spent and continue-on-error keeps the job green.
+      #
+      # No expression is spliced into `run:` (zizmor's template-injection rule): the staging host
+      # reaches `--allow-net` as the job's `STAGING_HOST` variable, read by bash. `--allow-env` names
+      # exactly what is read: the service-role key (the runner), `SUPABASE_URL` (the db factory,
+      # `judge_db.ts`'s serviceDb) and `OPENROUTER_API_KEY` (`modelFor`). No `ANTHROPIC_*` name: no
+      # pin names the anthropic provider, and a provider change needs this step's env and net lists,
+      # as it does `eval suite`'s. The step's own timeout, inside the job's, means a hung call fails
+      # this step rather than the required check.
+      - name: red-team suite
+        if: needs.changes.outputs.code != 'false' && steps.touched.outputs.redteam == 'yes'
+        # Until the prompt-hardening lane lands, a critical (or an outage) is a failed step inside a
+        # green job: a finding recorded, not yet a merge blocker. That lane removes this line.
+        continue-on-error: true
+        timeout-minutes: 30
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_REDTEAM_API_KEY }}
+          SUPABASE_URL: https://${{ env.STAGING_HOST }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
+        run: deno run --allow-read --allow-env=OPENROUTER_API_KEY,SUPABASE_URL,SUPABASE_SERVICE_ROLE_KEY --allow-net="openrouter.ai,$STAGING_HOST" --config cloud/supabase/deno.json cloud/eval/redteam/run_redteam.ts
