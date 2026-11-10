@@ -773,6 +773,8 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
     `localhost` is a host when a port or a path follows it.
   - `file:` and `data:` need a word boundary before them (`profile:/settings` and `metadata:image/png`
     are prose); `www.`, `javascript:` and `vbscript:` stay "anywhere".
+  - `mailto:` is a URL wherever it occurs. A bracketed run of hex digits and colons (`[::1]`) is a host.
+    Other IPv4 spellings (`127.1`, `0x7f.0.0.1`, `2130706433`) and `data:text,x` are accepted residual.
   - Known false positives, accepted: code identifiers whose last label is a TLD (`ASP.NET`,
     `socket.io`, `os.path` in the oracle's open-ended rule), run-together typos (`Friday.Bring`),
     `lab1.py/lab2.py`. Honest-twin fixtures (T7) and T2b's must-not-flag rows avoid them; a title
