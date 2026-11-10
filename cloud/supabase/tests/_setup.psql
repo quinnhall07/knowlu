@@ -76,3 +76,231 @@ begin
   perform set_config('request.jwt.claim.sub', '', true);
   perform set_config('request.jwt.claims', '', true);
 end $$;
+
+-- The fixture accounts by name, written by `_fixtures.psql` (T5b). Only the owner reads it, inside
+-- `as_who`, before the role switch. Ids are never printed.
+create table tests.accounts (
+  who text primary key check (who in ('A', 'B')),
+  id  uuid not null unique
+);
+
+-- Who a probe runs as (D5): `owner`, `anon`, `A`, `B`, `nosub` (authenticated, no `sub`, O12) or
+-- `stranger` (authenticated, a fresh `sub` no account has, O13). Called as the owner.
+create function tests.as_who(p_who text) returns void language plpgsql as $$
+declare v_id uuid;
+begin
+  case p_who
+    when 'owner' then perform tests.as_owner();
+    when 'anon' then perform tests.as_anon();
+    when 'nosub' then
+      perform tests.as_claims(jsonb_build_object('role', 'authenticated', 'aud', 'authenticated'));
+    when 'stranger' then
+      perform tests.as_claims(jsonb_build_object(
+        'sub', gen_random_uuid(), 'role', 'authenticated', 'aud', 'authenticated'));
+    when 'A', 'B' then
+      select a.id into v_id from tests.accounts a where a.who = p_who;
+      if v_id is null then
+        raise exception 'tests.as_who: no fixture account %', p_who;
+      end if;
+      perform tests.as_user(v_id);
+    else
+      raise exception 'tests.as_who: unknown caller %', coalesce(p_who, '<null>');
+  end case;
+end $$;
+
+-- The one probe body (D3, r1 I2, I4c). It takes SQL text, never a regclass, so the relation is
+-- resolved here under the handler. A read (`select count(*) ...`) returns the count it saw; any
+-- other statement returns the rows it touched. A 42501 is -1 (a privilege) or -2 (row-level
+-- security) by its English message; anything else, an unknown 42501 included, is re-raised.
+create function tests.run(p_sql text) returns bigint language plpgsql as $$
+declare n bigint; msg text;
+begin
+  if p_sql ~* '^\s*select\s+count\(\*\)' then
+    execute p_sql into n;
+  else
+    execute p_sql;
+    get diagnostics n = row_count;
+  end if;
+  return n;
+exception when insufficient_privilege then
+  get stacked diagnostics msg = message_text;
+  if msg like 'permission denied for %' then return -1; end if;
+  if msg like '%violates row-level security policy%' then return -2; end if;
+  raise;
+end $$;
+
+-- The driver (D5, r1 M4). Called by the owner: it clears the target slot as the owner when asked
+-- (r1 I4b), switches to the client, runs the probe, and returns to the owner. The subtransaction
+-- is always rolled back (KNRLS is this suite's own SQLSTATE), so a clear or a write that got
+-- through is undone, while its count crosses the rollback in the error's detail.
+create function tests.probe(p_who text, p_sql text, p_clear text default null) returns bigint
+language plpgsql as $$
+declare r bigint; d text;
+begin
+  begin
+    if p_clear is not null then execute p_clear; end if;
+    perform tests.as_who(p_who);
+    r := tests.run(p_sql);
+    perform tests.as_owner();
+    raise exception using errcode = 'KNRLS', detail = r::text;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return d::bigint;
+end $$;
+
+-- D6: plant a fault as the owner, evaluate a check, roll both back, return the check's value as
+-- text. The fault may be several statements; the check is one scalar SQL expression (a probe call
+-- or a catalog query), evaluated as the owner. A null value crosses the rollback as `n`, any other
+-- as `v` and its text, because an error's detail cannot be null.
+create function tests.under_fault(p_fault text, p_check text) returns text
+language plpgsql as $$
+declare r text; d text;
+begin
+  begin
+    execute p_fault;
+    execute format('select (%s)::text', p_check) into r;
+    raise exception using errcode = 'KNRLS', detail = coalesce('v' || r, 'n');
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return case when d = 'n' then null else substr(d, 2) end;
+end $$;
+
+-- A write probe and the owner's check of what it did, in one call (D3, D5, r1 I1, r2 note 4).
+-- As the owner it snapshots the target rows (`p_target_where` over `p_rel`) as one text per row,
+-- primary key, ctid and `touch_col`; runs `p_sql` as `p_who`; and re-reads the same snapshot as the
+-- owner. `changed` is true when the two differ: a row updated (any update gives it a new ctid),
+-- deleted, moved off its key, given a new `touch_col` value (the sentinel included) or added. All
+-- of it is rolled back.
+create function tests.probe_write(
+  p_who text, p_rel text, p_sql text, p_target_where text, out n bigint, out changed boolean)
+language plpgsql as $$
+declare v_touch text; v_pk text; v_snap text; v_before text[]; v_after text[]; d text;
+begin
+  select m.touch_col into v_touch from tests.matrix m where m.rel = p_rel and m.kind = 'table';
+  if v_touch is null then
+    raise exception 'tests.probe_write: % is not a matrix table', coalesce(p_rel, '<null>');
+  end if;
+  select string_agg(format('%I', a.attname), ', ' order by k.ord) into v_pk
+    from pg_index i
+    cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+   where i.indrelid = p_rel::regclass and i.indisprimary;
+  if v_pk is null then
+    raise exception 'tests.probe_write: % has no primary key', p_rel;
+  end if;
+  -- `p_rel` passed the matrix's name check, so it is safe to splice as written.
+  v_snap := format(
+    'select coalesce(array_agg(row(%1$s)::text || %4$L || ctid::text || %4$L'
+    || ' || coalesce(%2$I::text, %5$L) order by row(%1$s)::text), %6$L) from %3$s where %7$s',
+    v_pk, v_touch, p_rel, ' | ', '<null>', '{}', p_target_where);
+  begin
+    execute v_snap into v_before;
+    perform tests.as_who(p_who);
+    n := tests.run(p_sql);
+    perform tests.as_owner();
+    execute v_snap into v_after;
+    raise exception using errcode = 'KNRLS',
+      detail = n::text || ',' || (v_before is distinct from v_after)::text;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  n := split_part(d, ',', 1)::bigint;
+  changed := split_part(d, ',', 2)::boolean;
+end $$;
+
+-- An insert probe with its own outcome: V3 (r1 I4a, r2 note 1). `insert ... default values` into
+-- view `p_rel` as `p_who` returns the SQLSTATE: `00000` if it succeeded (then rolled back), or the
+-- caught 42501, 55000 or 0A000. Any other error is re-raised.
+create function tests.view_insert(p_who text, p_rel text) returns text language plpgsql as $$
+declare d text;
+begin
+  if p_rel is null or p_rel !~ '^(public|admin)\.[a-z_][a-z0-9_]*$' then
+    raise exception 'tests.view_insert: bad relation name %', coalesce(p_rel, '<null>');
+  end if;
+  begin
+    perform tests.as_who(p_who);
+    begin
+      execute format('insert into %s default values', p_rel);
+      d := '00000';
+    exception
+      when insufficient_privilege or object_not_in_prerequisite_state or feature_not_supported then
+        get stacked diagnostics d = returned_sqlstate;
+    end;
+    perform tests.as_owner();
+    raise exception using errcode = 'KNRLS', detail = d;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return d;
+end $$;
+
+-- F3 and F4 under a fault (r2 note 8): `denied` for a 42501 whose message starts
+-- `permission denied for`; `executed` for success or any other error, because a definer function
+-- called with nulls may raise something of its own. Run as `p_who`, always rolled back.
+create function tests.call_outcome(p_who text, p_sql text) returns text language plpgsql as $$
+declare d text; msg text;
+begin
+  begin
+    perform tests.as_who(p_who);
+    begin
+      execute p_sql;
+      d := 'executed';
+    exception
+      when insufficient_privilege then
+        get stacked diagnostics msg = message_text;
+        d := case when msg like 'permission denied for %' then 'denied' else 'executed' end;
+      when others then
+        d := 'executed';
+    end;
+    perform tests.as_owner();
+    raise exception using errcode = 'KNRLS', detail = d;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return d;
+end $$;
+
+-- C1 (D4): every relation in `public` or `admin` (tables, partitioned tables, views, materialized
+-- views, foreign tables) with no matrix row, and every matrix row with no such relation.
+-- Extension members are excluded. Each row names the relation, never its contents.
+create function tests.unlisted() returns table (rel text, problem text)
+language sql stable as $$
+  with live as (
+    select n.nspname || '.' || c.relname as name
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname in ('public', 'admin')
+       and c.relkind in ('r', 'p', 'v', 'm', 'f')
+       and not exists (
+         select 1 from pg_depend d
+          where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
+  )
+  select l.name, 'not in the matrix' from live l
+   where not exists (select 1 from tests.matrix m where m.rel = l.name)
+  union all
+  select m.rel, 'no such relation' from tests.matrix m
+   where not exists (select 1 from live l where l.name = m.rel)
+  order by 1
+$$;
+
+-- F1 and F2: every function in `public` or `admin` that `p_role` may execute, extension members
+-- excluded. `fn` is `schema.name`, the form `tests.rpc_allowlist` holds. The caller filters on
+-- the two flags and the allowlist.
+create function tests.client_functions(p_role text)
+returns table (fn text, args text, is_definer boolean, is_trigger boolean)
+language sql stable as $$
+  select n.nspname || '.' || p.proname,
+         pg_get_function_identity_arguments(p.oid),
+         p.prosecdef,
+         p.prorettype = 'trigger'::regtype
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname in ('public', 'admin')
+     and not exists (
+       select 1 from pg_depend d
+        where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+     and has_function_privilege(p_role::name, p.oid, 'execute')
+   order by 1, 2
+$$;

@@ -19,7 +19,7 @@ begin;
 \ir _setup.psql
 \ir _matrix.psql
 
-select plan(36);
+select plan(39);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -69,6 +69,30 @@ select is(
     message = 'new row violates row-level security policy for table "zz_probe"'; end $d$ $p$),
   -2::bigint,
   'guard: a 42501 naming a row-level security policy reads as an RLS refusal (-2)');
+
+-- The driver itself. `under_fault` carries a null check value across its rollback, and takes a
+-- fault of several statements. `probe_write` counts a write that got through and sees the row
+-- change, and sees nothing when the write is refused. The scratch table is planted with its own
+-- matrix row and rolled back with it, so no fixture is needed.
+select is(tests.under_fault($f$select 1$f$, $c$null::text$c$), null,
+  'driver: under_fault returns a null check value as null');
+select
+  $f$create table public.zz_pw (id int primary key, note text);
+     alter table public.zz_pw disable row level security;
+     insert into public.zz_pw values (1, 'x');
+     grant select, update on public.zz_pw to anon;
+     insert into tests.matrix
+       (rel, kind, access, key_col, touch_col, grants, policies, view_insert_code)
+       values ('public.zz_pw', 'table', 'service', null, 'note', 'default', '{}', null)$f$
+    as pw_fault,
+  $c$tests.probe_write('anon', 'public.zz_pw',
+     'update public.zz_pw set note = ''rls-probe''', 'id = 1')::text$c$ as pw \gset
+select is(tests.under_fault(:'pw_fault', :'pw'), '(1,t)',
+  'probe_write sees a planted fault: an update that got through is counted and the row changed');
+select is(
+  tests.under_fault(:'pw_fault' || '; alter table public.zz_pw enable row level security', :'pw'),
+  '(0,f)',
+  'probe_write control: under row-level security with no policy, nothing is touched or changed');
 
 -- C1 (D4): `tests.unlisted()` names every relation without a matrix row and every row without a
 -- relation, in both schemas.
@@ -166,7 +190,8 @@ select is(:v2, -1::bigint,
 
 -- P1 and P2: a bucket, and a storage policy outside the platform's own set. That set is the
 -- design's expectation, empty; the `storage policies` diag above shows what this image holds, and
--- a non-empty set fails P2's control by name. The schema may be absent, so both are skipped then.
+-- a non-empty set fails P2's control by name. Without a `storage` schema neither fault can be
+-- planted, so the four cases fail by name rather than run against nothing.
 \if :has_storage
 select
   $f$insert into storage.buckets (id, name) values ('zz-rls-probe', 'zz-rls-probe')$f$ as p1_fault,
@@ -182,7 +207,10 @@ select is(tests.under_fault(:'p2_fault', :'p2'), '{zz}',
   'P2 sees a planted fault: a storage policy outside the platform''s set is named');
 select is(:p2, '{}', 'P2 control: storage holds no policy beyond the platform''s set');
 \else
-select skip('P1, P2: this image has no storage schema', 4);
+select fail('P1 sees a planted fault: no storage schema, so no bucket can be planted');
+select fail('P1 control: no storage schema to read');
+select fail('P2 sees a planted fault: no storage schema, so no policy can be planted');
+select fail('P2 control: no storage schema to read');
 \endif
 
 -- P3: a public table in a publication. The fault adds `issues` to `supabase_realtime` when the
