@@ -114,6 +114,31 @@ function fieldList(value: unknown, entryMax: number, lineMax: number): string {
   return field(list(value).map((v) => field(v, entryMax)).filter((v) => v !== "").join(", "), lineMax);
 }
 
+/** A task's due as the engine sends it (`approvals::plain` of the note's `due`): a bare date, a
+ * minute-precision timestamp (`format_due`; a timestamp with seconds is normalised to this), or the
+ * space-separated form a hand edit may leave, which `models::coerce_datetime` also reads. */
+const TASK_DUE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?$/;
+/** An event's start or end: `events::judge_roster` formats both `%Y-%m-%dT%H:%M`. */
+const EVENT_TIME_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+/** An event source's configured name (`config/events.yaml`; every preset's is a slug). */
+const EVENT_SOURCE_SHAPE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+/** An RFC 5322 date-time after `field()` folds its whitespace: an optional day name and comma, day,
+ * month, 4-digit year, H:MM[:SS], a numeric or alphabetic zone, an optional zone comment. */
+const RFC_DATE_SHAPE =
+  /^(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]{0,6}, ?)?\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) \d{4} \d{1,2}:\d{2}(?::\d{2})? (?:[+-]\d{4}|[a-z]{1,5})(?: \([a-z ]{1,40}\))?$/i;
+/** The ISO 8601 stamp `judge_due.ts`'s `parseDateLine` also reads as a Date line. */
+const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * A typed field: `field()` of the value, kept only when it is at most `max` characters and matches
+ * one of `shapes` whole, else "" and the caller prints nothing. A typed value carries no prose, so
+ * text appended to one is dropped with it rather than shown to the model.
+ */
+function typed(value: unknown, max: number, ...shapes: RegExp[]): string {
+  const v = field(str(value), Number.POSITIVE_INFINITY);
+  return [...v].length <= max && shapes.some((s) => s.test(v)) ? v : "";
+}
+
 /**
  * The system prompt, with the per-account values left as placeholders.
  *
@@ -208,7 +233,7 @@ export function buildPrompt(
     parts.push(`Title: ${field(str(item.title), 200)}`);
     // An absent due date is absent, never the word "None": a model shown "Due: None" reliably
     // treats it as a date it failed to read rather than as an assignment without one.
-    const due = field(str(item.due), 40);
+    const due = typed(item.due, 40, TASK_DUE_SHAPE);
     if (due !== "") parts.push(`Due: ${due}`);
     const body = clip(str(item.body).trim(), MAX_BODY_CHARS);
     if (body !== "") parts.push(`Body:\n${body}`);
@@ -216,11 +241,13 @@ export function buildPrompt(
   }
 
   if (kind === "event") {
-    const parts = [
-      `Title: ${field(str(item.title), 200)}`,
-      `When: ${field(str(item.start), 40)} to ${field(str(item.end), 40)}`,
-      `Source: ${field(str(item.source), 120)}`,
-    ];
+    const parts = [`Title: ${field(str(item.title), 200)}`];
+    // A start out of shape leaves no When line; an end out of shape leaves the start alone.
+    const start = typed(item.start, 40, EVENT_TIME_SHAPE);
+    const end = typed(item.end, 40, EVENT_TIME_SHAPE);
+    if (start !== "") parts.push(end !== "" ? `When: ${start} to ${end}` : `When: ${start}`);
+    const source = typed(item.source, 40, EVENT_SOURCE_SHAPE);
+    if (source !== "") parts.push(`Source: ${source}`);
     const organizer = field(str(item.organizer), 120);
     if (organizer !== "") parts.push(`Organizer: ${organizer}`);
     const location = field(str(item.location), 120);
@@ -243,11 +270,9 @@ export function buildPrompt(
   // scrubbed — `judge_rules.ts`'s `featureMap` maps `item.from` into the `source` promotion
   // feature, and `scrub`/`scrubForPrompt` would replace an email address in it.
   const subject = scrubForPrompt(str(item.subject));
-  const parts = [
-    `Subject: ${field(subject, 200)}`,
-    `From: ${field(str(item.from), 200)}`,
-    `Date: ${field(str(item.date), 80)}`,
-  ];
+  const parts = [`Subject: ${field(subject, 200)}`, `From: ${field(str(item.from), 200)}`];
+  const date = typed(item.date, 80, RFC_DATE_SHAPE, ISO_DATE_SHAPE);
+  if (date !== "") parts.push(`Date: ${date}`);
   if (known.length > 0) parts.push(`Known course slugs: ${known.join(", ")}`);
   // Scrub before clip, not after: clipping a token in half would leave a partial secret on the
   // wire, where scrubbing first replaces it with a short, fixed-length placeholder that clip then
@@ -403,16 +428,18 @@ export function mailPromptText(text: string): string {
 }
 
 /**
- * `mail_claim`'s prompt: the subject (scrubbed), the sender, the Date header, the account's known course
- * codes, the time zone and `mailPromptText` of the text, and nothing else the caller's item holds. From is
- * not scrubbed, as on the email path: the sender is what a vendor's mail is judged by, and §7 names it.
+ * `mail_claim`'s prompt: the subject (scrubbed), the sender, the Date header when it is a date-time, the
+ * account's known course codes, the time zone and `mailPromptText` of the text, and nothing else the
+ * caller's item holds. From is not scrubbed, as on the email path: the sender is what a vendor's mail is
+ * judged by, and §7 names it.
  */
 export function buildMailClaimPrompt(item: Record<string, unknown>, seed: Record<string, unknown>): Prompt {
   const parts = [
     `Subject: ${field(scrubForPrompt(str(item.subject)), 200)}`,
     `From: ${field(str(item.from), 200)}`,
-    `Date: ${field(str(item.date), 80)}`,
   ];
+  const date = typed(item.date, 80, RFC_DATE_SHAPE, ISO_DATE_SHAPE);
+  if (date !== "") parts.push(`Date: ${date}`);
   const known = list(seed.known_courses).map((c) => field(c, 64)).filter((c) => c !== "");
   if (known.length > 0) parts.push(`Known course codes: ${known.join(", ")}`);
   const zone = field(str(seed.time_zone), 64);
