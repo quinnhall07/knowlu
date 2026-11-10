@@ -319,3 +319,70 @@ language sql stable as $$
      and has_function_privilege(p_role::name, p.oid, 'execute')
    order by 1, 2
 $$;
+
+-- A valid insert for table `p_rel` and fixture account `p_who` ('A' or 'B'), as SQL text (D5).
+-- `_fixtures.psql` writes its rows with it, and every insert probe and owner validity run uses the
+-- same text, so a client's -1 or -2 can only be a grant or a policy, never a bad row. Run it into
+-- the slot `tests.clear_sql` empties: several tables hold one row per account. The id is spliced
+-- as a literal, since the client that runs the text cannot read `tests.accounts`. Placeholder
+-- values only. Owner-read tables so far (T5b); it raises on any other table.
+create function tests.insert_sql(p_rel text, p_who text) returns text language plpgsql as $$
+declare v_id uuid; v_body text := '{"actor": "student", "op": "set"}';
+begin
+  select a.id into v_id from tests.accounts a where a.who = p_who;
+  if v_id is null then
+    raise exception 'tests.insert_sql: no fixture account %', coalesce(p_who, '<null>');
+  end if;
+  case p_rel
+    when 'public.accounts' then
+      return format('insert into public.accounts (id, email) values (%L, %L)',
+        v_id, format('rls-%s@example.invalid', lower(p_who)));
+    when 'public.entitlements' then
+      return format('insert into public.entitlements (account_id, status) values (%L, %L)',
+        v_id, 'none');
+    when 'public.sources' then
+      return format('insert into public.sources (account_id, kind, url_ciphertext, url_iv)'
+        || ' values (%L, %L, %L, %L)', v_id, 'lms_ics', 'rls-fixture', 'rls-fixture');
+    when 'public.billing_reminders' then
+      return format('insert into public.billing_reminders (account_id, last_reminded_at)'
+        || ' values (%L, now())', v_id);
+    when 'public.telemetry_events' then
+      return format('insert into public.telemetry_events (account_id, ts, session, view, action)'
+        || ' values (%L, now(), %L, %L, %L)', v_id, 'rls-fixture', 'today', 'open');
+    when 'public.corrections' then
+      return format('insert into public.corrections (account_id, ts, item_id, field, kind)'
+        || ' values (%L, now(), %L, %L, %L)', v_id, 'rls-fixture', 'priority', 'task');
+    when 'public.issues' then
+      return format('insert into public.issues (account_id, body) values (%L, %L)', v_id, '{}');
+    when 'public.sync_records' then
+      return format('insert into public.sync_records (account_id, device, record_hash, body)'
+        || ' values (%L, %L, %L, %L)', v_id, '0123456789abcdef',
+        encode(sha256(convert_to(v_body, 'UTF8')), 'hex'), v_body);
+    when 'public.sync_notes' then
+      return format('insert into public.sync_notes (account_id, path, device, body)'
+        || ' values (%L, %L, %L, %L)', v_id, 'tasks/rls-fixture.md', '0123456789abcdef',
+        'rls fixture note');
+    when 'public.sync_usage' then
+      return format('insert into public.sync_usage (account_id, bytes) values (%L, 0)', v_id);
+    else
+      raise exception 'tests.insert_sql: no insert for %', coalesce(p_rel, '<null>');
+  end case;
+end $$;
+
+-- The cleared slot (D5, r1 I4b): SQL text that, run as the owner, deletes account `p_who`'s rows
+-- from `p_rel` by the matrix's key, so an insert probe meets an empty slot, never a 23505. For
+-- `accounts` the delete cascades and `auth.users` keeps the row. Owner-read tables so far (T5b).
+create function tests.clear_sql(p_rel text, p_who text) returns text language plpgsql as $$
+declare v_id uuid; v_key text;
+begin
+  select a.id into v_id from tests.accounts a where a.who = p_who;
+  if v_id is null then
+    raise exception 'tests.clear_sql: no fixture account %', coalesce(p_who, '<null>');
+  end if;
+  select m.key_col into v_key from tests.matrix m where m.rel = p_rel and m.access = 'own';
+  if v_key is null then
+    raise exception 'tests.clear_sql: no clear for %', coalesce(p_rel, '<null>');
+  end if;
+  -- `p_rel` passed the matrix's name check, so it is safe to splice as written.
+  return format('delete from %s where %I = %L', p_rel, v_key, v_id);
+end $$;

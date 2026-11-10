@@ -18,6 +18,7 @@
 begin;
 \ir _setup.psql
 \ir _matrix.psql
+\ir _fixtures.psql
 
 select plan(102);
 
@@ -275,10 +276,10 @@ select is(:p3, '{}', 'P3 control: no public or admin relation is published');
 
 -- The owner-read faults (T5b), planted on `public.issues` unless named. They read accounts A and B
 -- from `tests.accounts` and the fixture rows `_fixtures.psql` writes: exactly one `issues` row for
--- A and one for B, and an active subscription on each for V1. Ids never appear in this file: a check
--- looks each one up as the owner and splices it into the probe as a literal (`format('%L')`), since
--- the probe runs as the client, who cannot read `tests.accounts`. `probe_write` re-reads its target
--- as the owner, so a target may name `tests.accounts` directly. The select-all companions are D6's:
+-- A and one for B, and an active subscription on each for V1. Ids never appear in this file: a
+-- check looks each one up as the owner and splices it into the probe as a literal
+-- (`format('%L')`), since the probe runs as the client, who cannot read `tests.accounts`.
+-- `probe_write` re-reads its target as the owner, so a target may name `tests.accounts` directly. The select-all companions are D6's:
 -- Postgres applies SELECT policies to the rows an update, delete or upsert reads, so without one an
 -- update, delete or move fault would still report nothing.
 
