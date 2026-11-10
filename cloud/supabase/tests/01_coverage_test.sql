@@ -1,6 +1,7 @@
--- Coverage (RLS pgTAP plan, D3 C1 to C8, D4): every relation in `public` and `admin` is in the
--- matrix, and each one's row-level security, policies, view options, client grants and fixture
--- rows are exactly what the matrix says. This is the real run against the migrated schema.
+-- Coverage (RLS pgTAP plan, D3 C1 to C8, D4; C9 from the T6b and T7 reviews): every relation in
+-- `public` and `admin` is in the matrix, and each one's row-level security, policies, view
+-- options, client grants, fixture rows and triggers are exactly what the matrix and the probes
+-- assume. This is the real run against the migrated schema.
 --
 -- Every check is the expression `09_self_test_test.sql` first showed failing against its own
 -- planted fault, kept here in the same text: each is a psql variable (`\gset`) and `:x` runs it as
@@ -40,9 +41,9 @@ begin
   end loop;
 end $$;
 
--- 20 fixed cases (C1 to C6 one each, C7's count and its validity aggregate, C8's twelve), plus
--- one per C7 slot.
-select plan(20 + (
+-- 21 fixed cases (C1 to C6 one each, C7's count and its validity aggregate, C8's twelve, C9),
+-- plus one per C7 slot.
+select plan(21 + (
   select count(*)::int
     from tests.matrix m
    cross join (values ('A'), ('B')) w(who)
@@ -162,6 +163,26 @@ select $c$array(select m.rel || ':' || w.who
    order by 1)::text$c$ as c7_valid \gset
 select is(:c7_valid, '{}',
   'C7 validity: as the owner, every table''s insert into its cleared slot reports one row');
+
+-- C9 (T6b and T7 reviews): every non-internal trigger on a matrix relation, which is every
+-- relation 02 or 03 probes, is either one the insert, upsert and update probes disable
+-- (`tests.unmask_triggers`: row-level, AFTER, on INSERT or UPDATE) or on the stamp-only allowlist
+-- (`tests.stamp_only`), there by relation, name and function and still BEFORE and row-level
+-- (tgtype bits 2 and 1). A new trigger, or a masking one rewritten so the unmask set no longer
+-- holds it, is named here rather than left on to mask a probe. 09: `sync_records_usage` rewritten
+-- as BEFORE; `sync_notes_rev_stamp` repointed at `sync_usage_bump`; a statement-level AFTER
+-- INSERT trigger on `issues`.
+select $c$array(select m.rel || ':' || t.tgname
+   from tests.matrix m
+   join pg_trigger t on t.tgrelid = m.rel::regclass
+   where not t.tgisinternal
+     and t.tgname::text <> all (tests.unmask_triggers(m.rel))
+     and not exists (select 1 from tests.stamp_only s
+                      where s.rel = m.rel and s.tgname = t.tgname::text
+                        and t.tgfoid = s.fn::regprocedure and (t.tgtype::int & 3) = 3)
+   order by 1)::text$c$ as c9 \gset
+select is(:c9, '{}',
+  'C9: every trigger on a probed relation is unmasked by the write probes or stamp-only');
 
 -- C8: the impersonation every probe runs under (`tests.as_who`, D5) is PostgREST's. What a client
 -- role sees is read into psql variables, then asserted as the owner; account ids are compared

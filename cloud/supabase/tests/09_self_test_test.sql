@@ -14,13 +14,14 @@
 -- - Name sets read as sorted `text[]` literals, so a failure names each stray. Nothing here prints
 --   an account id: the two C8 UUIDs are fresh and compared inside `ok()`.
 --
--- T5a writes the cases that need no fixture rows; T5b and T5c append the rest.
+-- T5a writes the cases that need no fixture rows; T5b and T5c append the rest; T9b appends the
+-- review fixes' cases (the masking triggers, C9, the global tables' literal key, F3's DO form, P4).
 begin;
 \ir _setup.psql
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(124);
+select plan(154);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -30,6 +31,14 @@ select diag('storage policies: '
   || array(select policyname::text from pg_policies where schemaname = 'storage' order by 1)::text);
 select diag('publications: ' || array(select pubname::text from pg_publication order by 1)::text);
 select exists (select 1 from pg_namespace where nspname = 'storage') as has_storage \gset
+-- P4's facts: whether Realtime's `realtime.messages` exists here, and whether the owner this file
+-- runs as may plant a policy on it (it must own the table, or hold its owner's rights).
+select to_regclass('realtime.messages') is not null as has_rt_messages,
+       coalesce((select pg_has_role(current_user, c.relowner, 'USAGE') from pg_class c
+                  where c.oid = to_regclass('realtime.messages')), false) as p4_plant \gset
+select diag('realtime.messages: '
+  || case when :'has_rt_messages'::boolean then 'present' else 'absent' end
+  || case when :'p4_plant'::boolean then ', policies plantable' else '' end);
 
 -- Guard rail, C8: a stale legacy key never shadows the claims (T3 review, Minor 2). Two fresh
 -- accounts that exist nowhere; neither id is printed.
@@ -701,6 +710,162 @@ select is(:s2, -2::bigint, 'S2 control: A''s insert into public.judgments is an 
 select is(:s3, '(0,f)', 'S3 control: A''s update of public.judgments touches nothing');
 select is(:s4, '(0,f)', 'S4 control: A''s move of public.judgments rows to B touches nothing');
 select is(:s5, '(0,f)', 'S5 control: A''s delete of public.judgments rows touches nothing');
+
+-- The masking triggers (T9b; T6b review I1, T7 review). `sync_records_usage` and
+-- `sync_notes_usage` run `sync_usage_bump` as the caller, whose `sync_usage` upsert a client's
+-- RLS refuses. Both client roles hold insert on both sync tables and on `sync_usage` at the
+-- default grants (C6), so only policies stand in the way, and the trigger's refusal is -2: the
+-- value an insert probe expects. For each sync table and each probing role (anon inserting A's
+-- row, 02's A2; A inserting B's row, 03's O4), an insert policy for that role is planted:
+-- - the bare probe still reads -2, so the mask is real;
+-- - the probe through `tests.unmasked` reads 1, so the unmask lifts it and the hole shows;
+-- - the control, no policy planted, reads -2 through `tests.unmasked`: the table's own refusal.
+create function tests.st_unmask_cases() returns setof text language plpgsql as $$
+declare r record; v_check text; v_fault text; v_via text;
+begin
+  for r in
+    select * from (values
+      ('public.sync_notes', 'anon', 'anon', 'A'),
+      ('public.sync_notes', 'A', 'authenticated', 'B'),
+      ('public.sync_records', 'anon', 'anon', 'A'),
+      ('public.sync_records', 'A', 'authenticated', 'B')) v(rel, who, role, slot)
+  loop
+    v_check := format('tests.probe(%L, tests.insert_sql(%L, %L), tests.clear_sql(%L, %L))',
+      r.who, r.rel, r.slot, r.rel, r.slot);
+    v_via := format('tests.unmasked(%L, %L)', r.rel, v_check);
+    v_fault := format('create policy zz on %s for insert to %I with check (true)', r.rel, r.role);
+    return next is(tests.under_fault(v_fault, v_check)::bigint, -2::bigint,
+      format('unmask: under a planted %s insert policy, %s''s insert of %s''s row into %s'
+        || ' still reads -2 bare (the trigger masks it)', r.role, r.who, r.slot, r.rel));
+    return next is(tests.under_fault(v_fault, v_via)::bigint, 1::bigint,
+      format('unmask: under the same policy, %s''s insert into %s reads 1 through'
+        || ' tests.unmasked (the hole shows)', r.who, r.rel));
+    return next is(tests.unmasked(r.rel, v_check)::bigint, -2::bigint,
+      format('unmask control: %s''s insert of %s''s row into %s reads -2 through'
+        || ' tests.unmasked (the table''s own refusal)', r.who, r.slot, r.rel));
+  end loop;
+end $$;
+select * from tests.st_unmask_cases();
+
+-- C9: every non-internal trigger on a probed relation is in the unmask set or stamp-only. Seen
+-- failing on a masking trigger rewritten as BEFORE (the unmask set would quietly lose it), on the
+-- stamp-only trigger repointed at a function that writes elsewhere, and on a statement-level
+-- AFTER INSERT trigger (which `tests.unmask_triggers`, row-level only, leaves on).
+select $c$array(select m.rel || ':' || t.tgname
+   from tests.matrix m
+   join pg_trigger t on t.tgrelid = m.rel::regclass
+   where not t.tgisinternal
+     and t.tgname::text <> all (tests.unmask_triggers(m.rel))
+     and not exists (select 1 from tests.stamp_only s
+                      where s.rel = m.rel and s.tgname = t.tgname::text
+                        and t.tgfoid = s.fn::regprocedure and (t.tgtype::int & 3) = 3)
+   order by 1)::text$c$ as c9 \gset
+select is(
+  tests.under_fault(
+    $f$drop trigger sync_records_usage on public.sync_records;
+       create trigger sync_records_usage before insert or update on public.sync_records
+         for each row execute function public.sync_usage_bump()$f$, :'c9'),
+  '{public.sync_records:sync_records_usage}',
+  'C9 sees a planted fault: a masking trigger rewritten as BEFORE INSERT is named');
+select is(
+  tests.under_fault(
+    $f$drop trigger sync_notes_rev_stamp on public.sync_notes;
+       create trigger sync_notes_rev_stamp before insert or update on public.sync_notes
+         for each row execute function public.sync_usage_bump()$f$, :'c9'),
+  '{public.sync_notes:sync_notes_rev_stamp}',
+  'C9 sees a planted fault: the stamp-only trigger repointed at another function is named');
+select is(
+  tests.under_fault(
+    $f$create trigger zz after insert on public.issues
+         for each statement execute function public.sync_usage_bump()$f$, :'c9'),
+  '{public.issues:zz}',
+  'C9 sees a planted fault: a statement-level AFTER INSERT trigger is named');
+select is(:c9, '{}',
+  'C9 control: every trigger on a probed relation is unmasked by the write probes or stamp-only');
+
+-- The global tables' literal key (T8 review), on `rule_evidence`: its slot reads `rules` and
+-- `judgments`, which a student cannot see, so 04 filters the student's probe on the row's primary
+-- key, resolved by the owner (`tests.pk_where`). Under one policy for every command, open to
+-- authenticated, S1 by key finds the row and S3 and S5 land; without it they read 0 and `(0,f)`.
+-- The owner's re-read is the slot, as in 04.
+select
+  $f$create policy zz on public.rule_evidence for all to authenticated
+       using (true) with check (true)$f$ as re_fault,
+  $c$tests.probe('A', format('select count(*) from public.rule_evidence where %s',
+     tests.pk_where('public.rule_evidence', tests.slot_where('public.rule_evidence', 'A'))))$c$
+    as re_s1,
+  $c$tests.probe_write('A', 'public.rule_evidence',
+     format('update public.rule_evidence set agrees = not agrees where %s',
+       tests.pk_where('public.rule_evidence', tests.slot_where('public.rule_evidence', 'A'))),
+     tests.slot_where('public.rule_evidence', 'A'))::text$c$ as re_s3,
+  $c$tests.probe_write('A', 'public.rule_evidence',
+     format('delete from public.rule_evidence where %s',
+       tests.pk_where('public.rule_evidence', tests.slot_where('public.rule_evidence', 'A'))),
+     tests.slot_where('public.rule_evidence', 'A'))::text$c$ as re_s5 \gset
+select is(tests.under_fault(:'re_fault', :'re_s1')::bigint, 1::bigint,
+  'S1 by key sees a planted fault: A reads the global public.rule_evidence row by its key');
+select is(tests.under_fault(:'re_fault', :'re_s3'), '(1,t)',
+  'S3 sees a planted fault: A''s update of the global public.rule_evidence row by its key lands');
+select is(tests.under_fault(:'re_fault', :'re_s5'), '(1,t)',
+  'S5 sees a planted fault: A''s delete of the global public.rule_evidence row by its key lands');
+select is(:re_s1, 0::bigint,
+  'S1 by key control: A reads no public.rule_evidence row by its key');
+select is(:re_s3, '(0,f)',
+  'S3 control: A''s update of the public.rule_evidence row by its key changes nothing');
+select is(:re_s5, '(0,f)',
+  'S5 control: A''s delete of the public.rule_evidence row by its key changes nothing');
+
+-- F3's DO form (T9 review, Minor 1): a trigger-returning definer, called the way 05 calls it
+-- (`tests.f3_calls()`), through `tests.call_outcome`, which reads `denied` only for a refusal
+-- that names a function. Granted, the call runs and Postgres refuses a trigger function outside
+-- a trigger (0A000), which reads `executed`.
+select
+  $f$grant execute on function public.handle_new_user() to anon, authenticated$f$ as f3do_fault,
+  $c$(select tests.call_outcome('anon', c.call_sql) from tests.f3_calls() c
+      where c.fn = 'public.handle_new_user()' and c.via_do)$c$ as f3do_anon,
+  $c$(select tests.call_outcome('A', c.call_sql) from tests.f3_calls() c
+      where c.fn = 'public.handle_new_user()' and c.via_do)$c$ as f3do_a \gset
+select is(tests.under_fault(:'f3do_fault', :'f3do_anon'), 'executed',
+  'F3 sees a planted fault: anon''s DO-form call to a granted trigger definer executes');
+select is(tests.under_fault(:'f3do_fault', :'f3do_a'), 'executed',
+  'F3 sees a planted fault: A''s DO-form call to a granted trigger definer executes');
+select is(:f3do_anon, 'denied',
+  'F3 control: anon''s DO-form call to public.handle_new_user is denied, naming a function');
+select is(:f3do_a, 'denied',
+  'F3 control: A''s DO-form call to public.handle_new_user is denied, naming a function');
+
+-- P4 (T9 review, Minor 3): no policy on `realtime.messages` applies to anon, authenticated or
+-- public. One policy is planted for each. The table is Realtime's, not a migration's: absent, the
+-- three faults are skipped by name (06 then asserts the absence); present but not plantable by
+-- this owner, they fail by name. The control runs either way.
+select $c$array(select p.policyname::text from pg_policies p
+   where p.schemaname = 'realtime' and p.tablename = 'messages'
+     and p.roles && '{anon,authenticated,public}'::name[]
+   order by 1)::text$c$ as p4 \gset
+\if :p4_plant
+select is(
+  tests.under_fault($f$create policy zz on realtime.messages for select to anon using (true)$f$,
+    :'p4'),
+  '{zz}', 'P4 sees a planted fault: a policy for anon on realtime.messages is named');
+select is(
+  tests.under_fault($f$create policy zz on realtime.messages for insert to authenticated
+       with check (true)$f$, :'p4'),
+  '{zz}', 'P4 sees a planted fault: a policy for authenticated on realtime.messages is named');
+select is(
+  tests.under_fault($f$create policy zz on realtime.messages for select using (true)$f$, :'p4'),
+  '{zz}', 'P4 sees a planted fault: a policy with no role (public) on realtime.messages is named');
+\elif :has_rt_messages
+select fail('P4 sees a planted fault: realtime.messages exists, but this owner cannot plant a'
+  || ' policy for anon on it');
+select fail('P4 sees a planted fault: realtime.messages exists, but this owner cannot plant a'
+  || ' policy for authenticated on it');
+select fail('P4 sees a planted fault: realtime.messages exists, but this owner cannot plant a'
+  || ' policy for public on it');
+\else
+select skip('realtime.messages is absent on this image, so no P4 fault can be planted', 3);
+\endif
+select is(:p4, '{}',
+  'P4 control: no policy on realtime.messages applies to anon, authenticated or public');
 
 select * from finish();
 rollback;

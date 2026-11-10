@@ -19,10 +19,16 @@
 -- A global table (no account key: `webhook_events`, `deleted_accounts`, `models`, `rule_evidence`,
 -- `eval_cases`, `eval_runs`) has one slot, the fixture row `tests.slot_where` names, and is probed
 -- as A only: `insert_sql` and `slot_where` ignore the account there, so B would send the same
--- statements at the same row. S1 reads all rows and the fixture row by its own key, S2 inserts
--- that row into its cleared slot, S3 sets it to the sentinel and S5 deletes it. S4 does not
--- apply: there is no account key to move the row onto, and S3 already shows that no update
--- reaches the row at all.
+-- statements at the same row. The student's probe never filters on the slot's own `where`: for
+-- `rule_evidence` that reads `rules` and `judgments`, which a student cannot see, so it would
+-- match nothing under any policy (T8 review). The owner resolves the slot's one row to its
+-- primary key instead, and the probe filters on that literal, `row(<key columns>)::text = '<key>'`
+-- (`tests.pk_where`, which 09 saw find the row under an allow-all policy on `rule_evidence`). S1
+-- reads all rows and the row by that key, S2 inserts the row into its cleared slot, and S3 sets
+-- it to the sentinel and S5 deletes it, both by that key; the owner's re-read is still the slot.
+-- S4 does not apply: there is no account key to move the row onto, and S3 by the literal key
+-- already shows that no update reaches the row at all, so neither can one that re-points
+-- `rule_evidence`'s `rule_id` or `judgment_id`.
 --
 -- `plan()` is computed from `tests.matrix`: six cases per keyed slot, five per global slot, one
 -- per closed view, and one guard that the loops are not empty.
@@ -94,7 +100,7 @@ begin
     v_write := case r.grants when 'default' then '(0,f)' else '(-1,f)' end;
     v_slot := tests.slot_where(r.rel, r.who);
     if r.key_col is null then
-      v_pred := v_slot;
+      v_pred := tests.pk_where(r.rel, v_slot);
       v_one := format('the global %s row', r.rel);
       v_many := v_one;
     else

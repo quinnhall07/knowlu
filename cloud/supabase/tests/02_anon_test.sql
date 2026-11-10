@@ -17,13 +17,18 @@
 -- (`tests.clear_sql`; a global table's one slot), so a refusal can only be a grant or a policy. Its
 -- arguments are built before the driver clears anything, and each probe clears only its own table.
 --
--- A2 and A3 run with the target table's AFTER triggers disabled (owner DDL inside
--- `tests.under_fault`, rolled back with the probe). Such a trigger fires only for a row that has
+-- A2 and A3 run through `tests.unmasked` (`_setup.psql`): the target table's non-internal,
+-- row-level AFTER triggers that fire on INSERT or UPDATE (`tests.unmask_triggers`; today
+-- `sync_records_usage` and `sync_notes_usage`) are disabled by owner DDL inside
+-- `tests.under_fault`, rolled back with the probe. Such a trigger fires only for a row that has
 -- already passed the table's grant and policies, so it never refuses a probe on a sound schema;
--- but one that writes elsewhere as the caller (`sync_usage_bump`, on `sync_records` and
--- `sync_notes`) would turn an insert that got through into another table's -2. With it off, the
--- probe reports the table's own grant and policy. A4 keeps them (the trigger's delete branch is an
--- update, which RLS filters without an error, so it masks nothing).
+-- but those two run `sync_usage_bump` as the caller, whose `sync_usage` upsert would turn an insert
+-- that got through into `sync_usage`'s -2, the value A2 expects. With them off, the probe reports
+-- the table's own grant and policy. Disabling a trigger also stops its DELETE arm, inside that
+-- subtransaction only. A4 calls the driver directly, so the triggers stay on (on DELETE the
+-- function runs a plain update, which RLS filters to no row without an error, so it masks
+-- nothing). 09 shows the mask is real and the unmask lifts it, for anon on each sync table; 01's
+-- C9 fails on any other trigger on a relation this file probes.
 --
 -- No id, address or row content is printed: descriptions name the case and the relation only.
 begin;
@@ -58,28 +63,6 @@ begin
   end case;
 end $$;
 
--- Owner DDL that disables the table's own AFTER triggers on insert or update (not internal, so
--- never a foreign key's), or null when it has none.
-create function tests.a_unmask(p_rel text) returns text language sql stable as $$
-  select string_agg(format('alter table %s disable trigger %I', tests.a_qualified(p_rel),
-                           t.tgname), '; ' order by t.tgname)
-    from pg_trigger t
-   where t.tgrelid = p_rel::regclass and not t.tgisinternal
-     and (t.tgtype::int & 2) = 0 and (t.tgtype::int & 64) = 0 and (t.tgtype::int & 20) <> 0
-$$;
-
--- Evaluates a check (one owner-side SQL expression) as text: with the table's AFTER triggers
--- disabled through `tests.under_fault` when it has any, as written otherwise.
-create function tests.a_unmasked(p_rel text, p_check text) returns text language plpgsql as $$
-declare v_ddl text := tests.a_unmask(p_rel); r text;
-begin
-  if v_ddl is null then
-    execute format('select (%s)::text', p_check) into r;
-    return r;
-  end if;
-  return tests.under_fault(v_ddl, p_check);
-end $$;
-
 -- One case per relation for `p_case`, in `rel` order: A1 to A4 over the tables, A5 and V3 over the
 -- views. Each group is its own statement below, so a probe that raises stops the file after the
 -- groups before it have printed.
@@ -110,7 +93,7 @@ begin
           else 'a privilege refusal (-1)' end);
         v_check := format('tests.probe(%L, tests.insert_sql(%L, %L), tests.clear_sql(%L, %L))',
           'anon', r.rel, 'A', r.rel, 'A');
-        return next is(tests.a_unmasked(r.rel, v_check)::bigint, v_n, v_desc);
+        return next is(tests.unmasked(r.rel, v_check)::bigint, v_n, v_desc);
       when 'A3' then
         v_n := case r.grants when 'default' then 0 else -1 end;
         v_desc := format('A3 anon cannot update %s: %s, every row unchanged', r.rel,
@@ -118,7 +101,7 @@ begin
         v_sql := format('update %s set %s', r.q, tests.a_sentinel(r.rel));
         v_check := format('tests.probe_write(%L, %L, %L, %L)::text', 'anon', r.rel, v_sql,
           'true');
-        return next is(tests.a_unmasked(r.rel, v_check), format('(%s,f)', v_n), v_desc);
+        return next is(tests.unmasked(r.rel, v_check), format('(%s,f)', v_n), v_desc);
       when 'A4' then
         v_n := case r.grants when 'default' then 0 else -1 end;
         v_desc := format('A4 anon cannot delete from %s: %s, every row unchanged', r.rel,

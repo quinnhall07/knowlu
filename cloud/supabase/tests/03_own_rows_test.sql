@@ -26,56 +26,42 @@ begin;
 \ir _matrix.psql
 \ir _fixtures.psql
 
--- The sync triggers (progress.md, the T5b ruling and its correction). `sync_records_usage` and
--- `sync_notes_usage` run `sync_usage_bump`, which is SECURITY INVOKER and upserts the account's
--- `sync_usage` row. If a client's insert or update on `sync_records` or `sync_notes` got past that
--- table's own policy (a real hole), the trigger's upsert would run as the client, `sync_usage`'s
--- RLS would refuse it, and the probe would read -2, or `(-2,f)`: the value a refusal gives, so the
--- hole would be masked. So every insert, upsert and update probe on a table with such a trigger
--- runs inside `tests.under_fault`, whose owner DDL disables the trigger in the subtransaction it
--- always rolls back, and the probe sees the table's own policy and nothing else. Disabling an
--- after trigger can only remove an error raised once a row has passed RLS: it can unmask a hole,
--- never make a refused write look accepted. Delete probes keep the triggers on: on DELETE the
+-- The sync triggers (progress.md, the T5b ruling and its correction; T6b and T7 reviews).
+-- `sync_records_usage` and `sync_notes_usage` run `sync_usage_bump`, which is SECURITY INVOKER and
+-- upserts the account's `sync_usage` row. If a client's insert or update on `sync_records` or
+-- `sync_notes` got past that table's own policy (a real hole), the trigger's upsert would run as
+-- the client, `sync_usage`'s RLS would refuse it, and the probe would read -2, or `(-2,f)`: the
+-- value a refusal gives, so the hole would be masked. So every insert, upsert and update probe
+-- runs through `_setup.psql`'s `tests.unmasked`, which disables the table's
+-- `tests.unmask_triggers` (non-internal, row-level, AFTER, on INSERT or UPDATE; none on most
+-- tables) by owner DDL inside `tests.under_fault`, rolled back with the probe, so the probe sees
+-- the table's own policy and nothing else. Disabling an after trigger can only remove an error
+-- raised once a row has passed RLS: it can unmask a hole, never make a refused write look
+-- accepted. Delete probes call the driver directly and keep the triggers on: on DELETE the
 -- function runs a plain `update`, which RLS filters to 0 rows, so it hides no delete hole.
---
--- The set comes from the catalog rather than per-table names: every trigger on the table that is
--- not internal, fires after the row (neither BEFORE nor INSTEAD OF) and fires on INSERT or UPDATE.
--- Today that is exactly those two, and the diag below prints it. BEFORE triggers stay on
--- (`sync_notes_rev_stamp` only stamps `rev` and `updated_at`). tgtype bits: 2 BEFORE, 4 INSERT,
--- 16 UPDATE, 64 INSTEAD OF.
-create function tests.own_masking_triggers(p_rel text) returns text[] language sql stable as $$
-  select coalesce(array_agg(t.tgname::text order by t.tgname), '{}')
-    from pg_trigger t
-   where t.tgrelid = p_rel::regclass
-     and not t.tgisinternal
-     and (t.tgtype::int & (2 | 64)) = 0
-     and (t.tgtype::int & (4 | 16)) <> 0
-$$;
+-- `sync_notes_rev_stamp` is BEFORE, so it stays on everywhere; it only stamps `rev` and
+-- `updated_at`, and C9 (01) pins it as `tests.stamp_only`. 09 shows the mask is real and the
+-- unmask lifts it, for A inserting B's row into each sync table; C9 fails on any other trigger.
 
--- The owner DDL for those triggers, or null when the table has none.
-create function tests.own_write_fault(p_rel text) returns text language sql stable as $$
-  select string_agg(format('alter table %s disable trigger %I', p_rel, g), '; ' order by g)
-    from unnest(tests.own_masking_triggers(p_rel)) g
-$$;
-
--- A check's value as text: run directly, or inside `tests.under_fault` when there is owner DDL to
--- plant first. Either way the check is the same driver call.
-create function tests.own_value(p_fault text, p_check text) returns text language plpgsql as $$
+-- A check's value as text: through `tests.unmasked` when `p_unmask`, run directly otherwise.
+-- Either way the check is the same driver call.
+create function tests.own_value(p_unmask boolean, p_rel text, p_check text) returns text
+language plpgsql as $$
 declare v text;
 begin
-  if p_fault is null then
-    execute format('select (%s)::text', p_check) into v;
-    return v;
+  if p_unmask then
+    return tests.unmasked(p_rel, p_check);
   end if;
-  return tests.under_fault(p_fault, p_check);
+  execute format('select (%s)::text', p_check) into v;
+  return v;
 end $$;
 
 -- A write probe as A, with the owner's re-read of `p_target` (D5's `tests.probe_write`), as text:
 -- `(n,changed)`.
-create function tests.own_write(p_fault text, p_rel text, p_sql text, p_target text)
+create function tests.own_write(p_unmask boolean, p_rel text, p_sql text, p_target text)
 returns text language plpgsql as $$
 begin
-  return tests.own_value(p_fault, format('tests.probe_write(%L, %L, %L, %L)::text',
+  return tests.own_value(p_unmask, p_rel, format('tests.probe_write(%L, %L, %L, %L)::text',
     'A', p_rel, p_sql, p_target));
 end $$;
 
@@ -157,7 +143,6 @@ declare
   r record;
   v_a uuid;
   v_b uuid;
-  v_fault text;
   v_sent text;
   v_slot_a text;
   v_slot_b text;
@@ -175,9 +160,8 @@ begin
      where m.access = 'own'
      order by m.rel
   loop
-    -- The insert, upsert and update probes' owner DDL: the sync triggers disabled (see
-    -- `tests.own_masking_triggers` above for why), null on every other owner-read table.
-    v_fault := tests.own_write_fault(r.rel);
+    -- The insert, upsert and update probes run through `tests.unmasked` (`true` below; see the
+    -- comment above `tests.own_value` for why), the delete probes directly (`false`).
     v_sent := tests.own_sentinel(r.rel);
     v_slot_a := tests.slot_where(r.rel, 'A');
     v_slot_b := tests.slot_where(r.rel, 'B');
@@ -202,38 +186,38 @@ begin
 
     -- O3 and O4: the fixture's own valid row, into the account's cleared slot.
     return next is(
-      tests.own_value(v_fault, format('tests.probe(%L, %L, %L)', 'A',
+      tests.own_value(true, r.rel, format('tests.probe(%L, %L, %L)', 'A',
         tests.insert_sql(r.rel, 'A'), tests.clear_sql(r.rel, 'A'))),
       '-2', format('O3: A''s insert of a row for A into %s is an RLS refusal (-2)', r.rel));
     return next is(
-      tests.own_value(v_fault, format('tests.probe(%L, %L, %L)', 'A',
+      tests.own_value(true, r.rel, format('tests.probe(%L, %L, %L)', 'A',
         tests.insert_sql(r.rel, 'B'), tests.clear_sql(r.rel, 'B'))),
       '-2', format('O4: A''s insert of a row for B into %s is an RLS refusal (-2)', r.rel));
 
     -- O5: B's own row upserted onto B's existing primary key; the re-read is B's slot.
-    return next is(tests.own_write(v_fault, r.rel, tests.own_upsert_sql(r.rel), v_slot_b),
+    return next is(tests.own_write(true, r.rel, tests.own_upsert_sql(r.rel), v_slot_b),
       '(-2,f)',
       format('O5: A''s upsert onto B''s key in %s is an RLS refusal, B''s rows unchanged', r.rel));
 
     -- O6 and O7: `touch_col` set to its sentinel on A's rows, then on B's.
-    return next is(tests.own_write(v_fault, r.rel,
+    return next is(tests.own_write(true, r.rel,
         format('update %s set %I = %s where %s', r.rel, r.touch_col, v_sent, v_slot_a), v_slot_a),
       '(0,f)', format('O6: A''s update of its own rows of %s touches nothing', r.rel));
-    return next is(tests.own_write(v_fault, r.rel,
+    return next is(tests.own_write(true, r.rel,
         format('update %s set %I = %s where %s', r.rel, r.touch_col, v_sent, v_slot_b), v_slot_b),
       '(0,f)', format('O7: A''s update of B''s rows of %s touches nothing', r.rel));
 
     -- O8: the move, A's rows re-keyed to B; the re-read is A's slot, so a row that left reads as
     -- changed.
-    return next is(tests.own_write(v_fault, r.rel,
+    return next is(tests.own_write(true, r.rel,
         format('update %s set %I = %L where %s', r.rel, r.key_col, v_b, v_slot_a), v_slot_a),
       '(0,f)', format('O8: A''s move of its own rows of %s to B touches nothing', r.rel));
 
     -- O9 and O10: deletes, with no owner DDL: the triggers stay on, since they mask no delete hole.
-    return next is(tests.own_write(null, r.rel,
+    return next is(tests.own_write(false, r.rel,
         format('delete from %s where %s', r.rel, v_slot_a), v_slot_a),
       '(0,f)', format('O9: A''s delete of its own rows of %s touches nothing', r.rel));
-    return next is(tests.own_write(null, r.rel,
+    return next is(tests.own_write(false, r.rel,
         format('delete from %s where %s', r.rel, v_slot_b), v_slot_b),
       '(0,f)', format('O10: A''s delete of B''s rows of %s touches nothing', r.rel));
 
@@ -285,8 +269,8 @@ begin
     'V1: A reads exactly its own row of public.billing_subscribers, though B holds one too');
 end $$;
 
--- 13 cases for every owner-read table, plus V1.
-select plan(13 * (select count(*)::int from tests.matrix m where m.access = 'own') + 1);
+-- One guard, 13 cases for every owner-read table, plus V1.
+select plan(1 + 13 * (select count(*)::int from tests.matrix m where m.access = 'own') + 1);
 
 -- Counts and names only: what the plan above was computed from, and which triggers the insert,
 -- upsert and update probes run without.
@@ -294,10 +278,14 @@ select diag(format('owner-read tables: %s, 13 cases each, plus V1', count(*)))
   from tests.matrix m
  where m.access = 'own';
 select diag('insert, upsert and update probes run with these after triggers disabled: '
-  || coalesce(string_agg(m.rel || ' ' || tests.own_masking_triggers(m.rel)::text, ', '
+  || coalesce(string_agg(m.rel || ' ' || tests.unmask_triggers(m.rel)::text, ', '
        order by m.rel), 'none'))
   from tests.matrix m
- where m.access = 'own' and cardinality(tests.own_masking_triggers(m.rel)) > 0;
+ where m.access = 'own' and cardinality(tests.unmask_triggers(m.rel)) > 0;
+
+-- A loop over nothing passes; this case fails if the matrix lists no owner-read table.
+select ok((select count(*) from tests.matrix m where m.access = 'own') > 0,
+  'O guard: the matrix lists owner-read tables to probe');
 
 select * from tests.own_rows_cases();
 select tests.own_v1();

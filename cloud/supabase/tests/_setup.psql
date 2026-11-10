@@ -173,6 +173,69 @@ begin
   return case when d = 'n' then null else substr(d, 2) end;
 end $$;
 
+-- The masking triggers (T6b review I1, T7 review; the T5b ruling in progress.md). A trigger that
+-- fires after a row has passed the table's grant and policies, and then writes elsewhere as the
+-- caller, can turn a write that got through into another table's refusal. `sync_records_usage`
+-- and `sync_notes_usage` run `sync_usage_bump`, which is SECURITY INVOKER and upserts the
+-- account's `sync_usage` row; a client's insert that passed a planted policy on either table would
+-- then read `sync_usage`'s -2, the very value an insert probe expects. The insert, upsert and
+-- update probes of 02 and 03 therefore run through `tests.unmasked` below.
+--
+-- The set, exactly: every trigger on table `p_rel` that is not internal (so never a foreign key's
+-- or another constraint's own), is row-level (tgtype bit 1), is neither BEFORE (bit 2) nor
+-- INSTEAD OF (bit 64), so fires AFTER, and fires on INSERT (bit 4) or UPDATE (bit 16). A user
+-- `create constraint trigger` is such a trigger and is in the set. A statement-level trigger, a
+-- BEFORE trigger or a DELETE-only one is not, and 01's C9 names it instead: every non-internal
+-- trigger on a relation 02 or 03 probes must be in this set or in `tests.stamp_only` below, so a
+-- new or rewritten trigger fails C9 loud rather than quietly leaving the set empty. 09 shows the
+-- mask is real and that `tests.unmasked` lifts it, for each sync table and each probing role.
+create function tests.unmask_triggers(p_rel text) returns text[] language sql stable as $$
+  select coalesce(array_agg(t.tgname::text order by t.tgname), '{}')
+    from pg_trigger t
+   where t.tgrelid = p_rel::regclass
+     and not t.tgisinternal
+     and (t.tgtype::int & 1) = 1
+     and (t.tgtype::int & (2 | 64)) = 0
+     and (t.tgtype::int & (4 | 16)) <> 0
+$$;
+
+-- C9's named stamp-only allowlist: a trigger that stays on in every probe because it only stamps
+-- the new row, pinned by relation, name and function; C9 also requires it to be BEFORE and
+-- row-level. Today one: `sync_notes_rev_stamp`, whose `sync_notes_stamp_rev` sets `rev` (a fresh
+-- `nextval`) and `updated_at` on the row being written and touches no other table.
+create table tests.stamp_only (
+  rel    text not null check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
+  tgname text not null,
+  fn     text not null,
+  primary key (rel, tgname)
+);
+insert into tests.stamp_only (rel, tgname, fn)
+  values ('public.sync_notes', 'sync_notes_rev_stamp', 'public.sync_notes_stamp_rev()');
+
+-- A check (one owner-side SQL expression, a driver call) evaluated as text, with table `p_rel`'s
+-- `tests.unmask_triggers` disabled by owner DDL inside `tests.under_fault`, which always rolls the
+-- DDL back with the probe; evaluated as written when the set is empty. `alter table ... disable
+-- trigger` stops every event of the trigger, its DELETE arm included, but only inside that
+-- subtransaction. Disabling a trigger that fires after RLS can only remove an error raised once a
+-- row has passed the table's own grant and policies: it can unmask a hole, never make a refused
+-- write read as accepted.
+create function tests.unmasked(p_rel text, p_check text) returns text language plpgsql as $$
+declare v_ddl text; r text;
+begin
+  select string_agg(format('alter table %I.%I disable trigger %I', n.nspname, c.relname, g),
+                    '; ' order by g)
+    into v_ddl
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+   cross join unnest(tests.unmask_triggers(p_rel)) g
+   where c.oid = p_rel::regclass;
+  if v_ddl is null then
+    execute format('select (%s)::text', p_check) into r;
+    return r;
+  end if;
+  return tests.under_fault(v_ddl, p_check);
+end $$;
+
 -- A write probe and the owner's check of what it did, in one call (D3, D5, r1 I1, r2 note 4).
 -- As the owner it snapshots the target rows (`p_target_where` over `p_rel`) as one text per row,
 -- primary key, ctid and `touch_col`; runs `p_sql` as `p_who`; and re-reads the same snapshot as the
@@ -319,6 +382,42 @@ language sql stable as $$
         where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
      and has_function_privilege(p_role::name, p.oid, 'execute')
    order by 1, 2
+$$;
+
+-- F3's calls (T9; shared since T9b, so 09 proves the very text 05 runs). Every SECURITY DEFINER
+-- function in `public` or `admin`, extension members excluded, as F1 reads them. `fn` names the
+-- function with its argument types, schema included; `call_sql` is the call, one typed null per
+-- argument; `via_do` marks a call made through a DO block. The call is
+-- `select count(*) from <fn>(...)`, unless the return type cannot sit in FROM (a pseudo-type other
+-- than `void`, so `trigger`, which Postgres rejects there at parse time, 42804, before any
+-- privilege check): then `do $d$ begin perform <fn>(...); end $d$`, and a procedure
+-- `do $d$ begin call ...; end $d$`. A STRICT function called with a null would be folded to null
+-- at plan time and never checked, which `tests.call_outcome` reads as `executed`, so such a
+-- function fails its case loud rather than pass.
+create function tests.f3_calls() returns table (fn text, call_sql text, via_do boolean)
+language sql stable as $$
+  select n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')',
+         case
+           when p.prokind = 'p' then
+             format('do $d$ begin call %I.%I(%s); end $d$', n.nspname, p.proname, a.nulls)
+           when t.typtype = 'p' and p.prorettype <> 'void'::regtype then
+             format('do $d$ begin perform %I.%I(%s); end $d$', n.nspname, p.proname, a.nulls)
+           else format('select count(*) from %I.%I(%s)', n.nspname, p.proname, a.nulls)
+         end,
+         p.prokind = 'p' or (t.typtype = 'p' and p.prorettype <> 'void'::regtype)
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    join pg_type t on t.oid = p.prorettype
+   cross join lateral (
+     select coalesce(string_agg(format('null::%s', format_type(x.typ, null)), ', '
+                                order by x.ord), '') as nulls
+       from unnest(p.proargtypes::oid[]) with ordinality as x(typ, ord)) a
+   where n.nspname in ('public', 'admin')
+     and p.prosecdef
+     and not exists (
+       select 1 from pg_depend d
+        where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+   order by 1
 $$;
 
 -- A valid insert for table `p_rel` and fixture account `p_who` ('A' or 'B'), as SQL text (D5).
@@ -526,4 +625,35 @@ create function tests.clear_sql(p_rel text, p_who text) returns text language pl
 begin
   -- `p_rel` passed the matrix's name check in `slot_where`, so it is safe to splice as written.
   return format('delete from %s where %s', p_rel, tests.slot_where(p_rel, p_who));
+end $$;
+
+-- A client's filter for the one row `p_where` names in table `p_rel`, by a primary-key literal
+-- (T8 review): `row(<key columns>)::text = '<key>'`. The owner reads the row's key here, with the
+-- key columns read from `pg_index` as `tests.probe_write` reads them, so the client's statement
+-- filters on the table's own columns and nothing it cannot see. A global table's slot (say
+-- `rule_evidence`'s, through `rules` and `judgments`) can read tables a student never sees; as the
+-- student's own filter it would match nothing under any policy, and a probe would pass vacuously.
+-- Raises unless `p_where` names exactly one row. Neither the key nor `p_where` is printed.
+create function tests.pk_where(p_rel text, p_where text) returns text language plpgsql as $$
+declare v_pk text; v_key text;
+begin
+  if not exists (select 1 from tests.matrix m where m.rel = p_rel and m.kind = 'table') then
+    raise exception 'tests.pk_where: % is not a matrix table', coalesce(p_rel, '<null>');
+  end if;
+  select string_agg(format('%I', a.attname), ', ' order by k.ord) into v_pk
+    from pg_index i
+    cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+   where i.indrelid = p_rel::regclass and i.indisprimary;
+  if v_pk is null then
+    raise exception 'tests.pk_where: % has no primary key', p_rel;
+  end if;
+  begin
+    -- `p_rel` is a matrix name (pattern-checked), so it is spliced as written.
+    execute format('select row(%s)::text from %s where %s', v_pk, p_rel, p_where)
+      into strict v_key;
+  exception when no_data_found or too_many_rows then
+    raise exception 'tests.pk_where: the target in % is not exactly one row', p_rel;
+  end;
+  return format('row(%s)::text = %L', v_pk, v_key);
 end $$;
