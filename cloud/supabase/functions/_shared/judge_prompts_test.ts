@@ -345,7 +345,7 @@ Deno.test("task-3: the task hash moved off task-2 and is pinned", async () => {
 
 /** Every code point a reader of the prompt may take as a line boundary (`str.splitlines`'s set). */
 const LINE_BOUNDARY = new Set([0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029]);
-const BREAKS = ["\n", "\r\n", "\u2028", "\u2029", "\u0085"];
+const BREAKS = ["\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028", "\u2029", "\u0085"];
 
 /** The prompt split at every line boundary, CRLF counted once. */
 function promptLines(user: string): string[] {
@@ -399,7 +399,7 @@ const FIELD_CASES: FieldCase[] = [
   },
   {
     name: "task Course slug",
-    bound: 40,
+    bound: 64,
     build: (v) => buildPrompt("task", { title: "PS3" }, { course: v }).user,
     line: (v) => `Course slug: ${v}`,
   },
@@ -471,7 +471,7 @@ const FIELD_CASES: FieldCase[] = [
   },
   {
     name: "email Known course slugs entry",
-    bound: 40,
+    bound: 64,
     build: (v) => buildPrompt("email", EMAIL_ITEM, { known_courses: ["math-221", v] }).user,
     line: (v) => `Known course slugs: math-221, ${v}`,
   },
@@ -495,7 +495,7 @@ const FIELD_CASES: FieldCase[] = [
   },
   {
     name: "mail_claim Known course codes entry",
-    bound: 40,
+    bound: 64,
     build: (v) => buildMailClaimPrompt(EMAIL_ITEM, { known_courses: ["MATH-301", v] }).user,
     line: (v) => `Known course codes: MATH-301, ${v}`,
   },
@@ -550,6 +550,29 @@ for (const c of FIELD_CASES) {
     assert(lines.includes(c.line(filler.slice(0, c.bound))), `${c.name} was not cut to ${c.bound}`);
   });
 }
+
+// `slugify` caps a slug at 60 characters (engine/src/ingest.rs), and a course with no code falls
+// back to the slug of its name. `validate` keeps a model's course only when it is in the uncut
+// known list, so a slug cut in the prompt would come back as a course no list holds.
+Deno.test("one line: a 51-character course slug reaches all three prompts whole", () => {
+  const slug = "introduction-to-engineering-design-and-professional";
+  assertEquals(slug.length, 51);
+  const task = buildPrompt("task", { title: "PS3" }, { course: slug }).user;
+  assert(promptLines(task).includes(`Course slug: ${slug}`), task);
+  const email = buildPrompt("email", EMAIL_ITEM, { known_courses: ["math-221", slug] }).user;
+  assert(promptLines(email).includes(`Known course slugs: math-221, ${slug}`), email);
+  const claim = buildMailClaimPrompt(EMAIL_ITEM, { known_courses: ["MATH-301", slug] }).user;
+  assert(promptLines(claim).includes(`Known course codes: MATH-301, ${slug}`), claim);
+});
+
+Deno.test("one line: a whitespace-only Organizer or Location prints no line", () => {
+  for (const [key, head] of [["organizer", "Organizer:"], ["location", "Location:"]] as const) {
+    for (const blank of [" ", "\n", " \u2028 ", "\x1d"]) {
+      const user = buildPrompt("event", { ...EVENT_ITEM, [key]: blank }, {}).user;
+      assert(!user.includes(head), `${JSON.stringify(blank)} still printed ${head}: ${user}`);
+    }
+  }
+});
 
 Deno.test("one line: Categories and Audiences drop empty entries and cut the joined line to 200", () => {
   const entries = Array.from({ length: 10 }, (_, i) => `topic-${i}-${"c".repeat(22)}`);

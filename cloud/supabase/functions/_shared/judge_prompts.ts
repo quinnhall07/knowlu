@@ -97,7 +97,10 @@ function list(value: unknown): string[] {
  * A single-line item field as it goes into a prompt: every line-rule character (a C0 control, DEL,
  * U+0085, U+2028, U+2029) becomes a space, then `oneLine` collapses whitespace and cuts the value to
  * `max` characters. `oneLine`'s `\s` does not match U+0085 or U+001C-U+001E, so the line rule runs
- * first. An ordinary value comes out unchanged.
+ * first. Whitespace and quotes are normalised as `oneLine` does it (runs of whitespace become one
+ * space and the ends are trimmed, `"` becomes `'`, ` · ` becomes ` - `); an ordinary date, slug or
+ * name has none of these and comes out unchanged. A course slug's bound (64) sits above `slugify`'s
+ * 60-character cap, so a slug the device sends is never cut.
  */
 function field(value: string, max: number): string {
   let spaced = "";
@@ -199,7 +202,7 @@ export function buildPrompt(
     const parts: string[] = [];
     const prefs = clip(str(seed.preferences), MAX_PREFS_CHARS);
     if (prefs !== "") parts.push(`The student's stated preferences:\n${prefs}`);
-    parts.push(`Course slug: ${field(str(seed.course), 40) || "null"}`);
+    parts.push(`Course slug: ${field(str(seed.course), 64) || "null"}`);
     const weights = clip(str(seed.weights), MAX_WEIGHTS_CHARS);
     if (weights !== "") parts.push(`Grade weights:\n${weights}`);
     parts.push(`Title: ${field(str(item.title), 200)}`);
@@ -218,8 +221,10 @@ export function buildPrompt(
       `When: ${field(str(item.start), 40)} to ${field(str(item.end), 40)}`,
       `Source: ${field(str(item.source), 120)}`,
     ];
-    if (str(item.organizer) !== "") parts.push(`Organizer: ${field(str(item.organizer), 120)}`);
-    if (str(item.location) !== "") parts.push(`Location: ${field(str(item.location), 120)}`);
+    const organizer = field(str(item.organizer), 120);
+    if (organizer !== "") parts.push(`Organizer: ${organizer}`);
+    const location = field(str(item.location), 120);
+    if (location !== "") parts.push(`Location: ${location}`);
     const categories = fieldList(item.categories, 60, 200);
     if (categories !== "") parts.push(`Categories: ${categories}`);
     const audiences = fieldList(item.audiences, 60, 200);
@@ -231,7 +236,7 @@ export function buildPrompt(
     return { system: systemTemplate("event"), user: parts.join("\n"), schema };
   }
 
-  const known = list(seed.known_courses).map((c) => field(c, 40)).filter((c) => c !== "");
+  const known = list(seed.known_courses).map((c) => field(c, 64)).filter((c) => c !== "");
   // The scrub site (provider swap Task 3): the one place both the Gmail-read path
   // (`gmail-read/handler.ts`) and the device's `judge-email` path build the email prompt, because
   // both hand their item straight to `judge()`, which calls `buildPrompt` here. `From` is NEVER
@@ -408,7 +413,7 @@ export function buildMailClaimPrompt(item: Record<string, unknown>, seed: Record
     `From: ${field(str(item.from), 200)}`,
     `Date: ${field(str(item.date), 80)}`,
   ];
-  const known = list(seed.known_courses).map((c) => field(c, 40)).filter((c) => c !== "");
+  const known = list(seed.known_courses).map((c) => field(c, 64)).filter((c) => c !== "");
   if (known.length > 0) parts.push(`Known course codes: ${known.join(", ")}`);
   const zone = field(str(seed.time_zone), 64);
   if (zone !== "") parts.push(`Time zone: ${zone}`);
