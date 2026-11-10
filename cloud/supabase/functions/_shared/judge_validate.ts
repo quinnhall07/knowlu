@@ -6,8 +6,14 @@
 //
 // `judge_due.ts` imports `ABSOLUTE_DUE_RE` from here and the mail region calls its `resolveDue`: a cycle
 // that is safe because neither module touches the other's exports while it loads, only inside functions.
+//
+// Every model-written free-text field goes through the free-text policy (`output_policy.ts`; the
+// prompt-injection suite plan, section 4.3): step 1 the line rule, step 2 `oneLine` unclipped, steps
+// 3 to 5 the policy, which also clips. `output_policy.ts` imports `oneLine` from here: the same safe
+// kind of cycle as `judge_due.ts`'s.
 import { resolveDue } from "./judge_due.ts";
 import type { MailClaim, Topic } from "./mail_templates.ts";
+import { enforceFreeText, type FreeTextField } from "./output_policy.ts";
 
 export const CONFIDENCE_FLOOR = 0.6;
 export const MAX_REASON_CHARS = 140;
@@ -33,7 +39,14 @@ export const EVENT_VERDICTS = ["obligation", "opportunity", "drop", "unsure"] as
 /** The five email tiers of cloud design §5.3, and stream J Task T9's sixth: `completion`, "this
  * email confirms the student already submitted or finished a specific piece of work". Its `title`
  * is the work's name, which the device matches against its own task titles. */
-export const EMAIL_TIERS = ["task", "borderline", "event", "opportunity", "information", "completion"] as const;
+export const EMAIL_TIERS = [
+  "task",
+  "borderline",
+  "event",
+  "opportunity",
+  "information",
+  "completion",
+] as const;
 
 // Added for `cloud/eval/schema.ts` (C2 Task 13): this file had no item-field or labelled-field
 // lists before — nothing here validated `request.item`'s shape, only the model's answer — so
@@ -101,6 +114,25 @@ export function oneLine(text: string, max: number): string {
   return [...collapsed].slice(0, max).join("");
 }
 
+/** True for a character the device's line rule refuses: a C0 control (tab included), DEL, U+0085,
+ * U+2028 or U+2029. Each is a line boundary for `pystr::splitlines`, or a control no text needs. */
+function lineRuleChar(c: number): boolean {
+  return c < 0x20 || c === 0x7f || c === 0x85 || c === 0x2028 || c === 0x2029;
+}
+
+/**
+ * One of `validate()`'s free-text fields through the policy's five steps: each line-rule character
+ * becomes a space (step 1), `oneLine` unclipped (step 2), then `output_policy.ts` (steps 3 to 5).
+ * Null when the policy refuses the field, and with it the answer.
+ */
+function freeText(field: FreeTextField, raw: unknown): string | null {
+  let spaced = "";
+  for (const ch of typeof raw === "string" ? raw : "") {
+    spaced += lineRuleChar(ch.codePointAt(0) ?? 0) ? " " : ch;
+  }
+  return enforceFreeText(field, oneLine(spaced, Number.POSITIVE_INFINITY));
+}
+
 export function validate(
   kind: Kind,
   answer: Record<string, unknown>,
@@ -112,11 +144,10 @@ export function validate(
   if (kind === "task") {
     const effort = num(answer.effort_hours);
     const importance = num(answer.importance);
-    const reason = oneLine(
-      typeof answer.importance_reason === "string" ? answer.importance_reason : "",
-      MAX_REASON_CHARS,
-    );
-    if (effort === null || importance === null || reason === "") return { ok: false, cause: "incomplete" };
+    const reason = freeText("importance_reason", answer.importance_reason);
+    if (effort === null || importance === null || reason === null || reason === "") {
+      return { ok: false, cause: "incomplete" };
+    }
     if (confidence < CONFIDENCE_FLOOR) return { ok: false, cause: "below floor" };
     const known = Array.isArray(seed.known_courses) ? seed.known_courses as string[] : [];
     const raw = typeof answer.course === "string" ? answer.course.trim() : "";
@@ -134,8 +165,8 @@ export function validate(
 
   if (kind === "event") {
     const verdict = typeof answer.verdict === "string" ? answer.verdict : "";
-    const why = oneLine(typeof answer.why === "string" ? answer.why : "", MAX_REASON_CHARS);
-    if (!(EVENT_VERDICTS as readonly string[]).includes(verdict) || why === "") {
+    const why = freeText("why", answer.why);
+    if (!(EVENT_VERDICTS as readonly string[]).includes(verdict) || why === null || why === "") {
       return { ok: false, cause: "incomplete" };
     }
     // `unsure` IS the model's honest answer to "I can't tell from this text" — gating it behind
@@ -150,11 +181,13 @@ export function validate(
   }
 
   const tier = typeof answer.tier === "string" ? answer.tier : "";
-  const why = oneLine(typeof answer.why === "string" ? answer.why : "", MAX_REASON_CHARS);
-  if (!(EMAIL_TIERS as readonly string[]).includes(tier) || why === "") {
+  const why = freeText("why", answer.why);
+  if (!(EMAIL_TIERS as readonly string[]).includes(tier) || why === null || why === "") {
     return { ok: false, cause: "incomplete" };
   }
-  const title = oneLine(typeof answer.title === "string" ? answer.title : "", 200);
+  // Q1: a title that breaks the policy refuses the answer; the deck never shows an edited title.
+  const title = freeText("title", answer.title);
+  if (title === null) return { ok: false, cause: "incomplete" };
   // T9: a completion names the work it completes, or the device has nothing to match — and a
   // promoted rule never carries a title (`fieldsOf` drops it), so this is also what sends a
   // title-less rule answer on to the model rather than queueing an unmatchable completion.
@@ -175,8 +208,9 @@ export function validate(
       // reaches this function its `due` is either already the wire shape (`judge_due.ts` resolved
       // it, or the email stated an absolute date the model copied verbatim) or something that
       // failed to resolve — and an unresolved phrase is exactly as untrustworthy here as it always
-      // was, so it is still dropped to `null` rather than written into a vault.
-      due: typeof answer.due === "string" && ABSOLUTE_DUE_RE.test(answer.due) ? answer.due : null,
+      // was, so it is still dropped to `null` rather than written into a vault. A well-shaped due
+      // that names no real day or time (`2026-02-30`, `T24:00`) is dropped too, as on the mail path.
+      due: realDue(typeof answer.due === "string" ? answer.due : null),
       effort_hours: effort === null ? null : clamp(effort, 0.25, 40),
       importance: importance === null ? null : clamp(Math.round(importance), 1, 5),
       confidence: clamp(confidence, 0, 1),
@@ -302,8 +336,17 @@ function mailClaim(
   if (!(folded.text.includes(evidence) || folded.subject.includes(evidence))) {
     return INCOMPLETE;
   }
-  const why = oneLine(a.why, MAX_REASON_CHARS);
-  if (why === "") return INCOMPLETE;
+  // The free-text policy's steps 3 to 5 (`output_policy.ts`) apply to a model's text only (§4.3's scope);
+  // a template's keeps the line rule above and is clipped as before. Step 2's `oneLine` runs unclipped,
+  // so the policy never sees a host an earlier clip cut in half. A refusal refuses this claim alone.
+  const policed = (field: FreeTextField, value: string, max: number): string | null =>
+    source === "model" ? enforceFreeText(field, value) : [...value].slice(0, max).join("");
+  const unclipped = (value: string) => oneLine(value, Number.POSITIVE_INFINITY);
+  const said = unclipped(a.why);
+  if (said === "") return INCOMPLETE;
+  const why = policed("why", said, MAX_REASON_CHARS);
+  const quoted = policed("evidence", evidence, MAIL_EVIDENCE_CHARS)?.trim();
+  if (why === null || quoted === undefined || quoted === "") return INCOMPLETE;
   const course = typeof a.course === "string" && ctx.knownCourses.includes(a.course.trim())
     ? a.course.trim()
     : null;
@@ -315,13 +358,17 @@ function mailClaim(
     value: null,
     item: null,
     topic: null,
-    evidence: [...evidence].slice(0, MAIL_EVIDENCE_CHARS).join("").trim(),
+    evidence: quoted,
     why,
     confidence: clamp(confidence, 0, 1),
     source,
     resolution: null,
   };
-  const named = oneLine(target, MAIL_TITLE_CHARS);
+  // Only a change and a receipt send their target, so only theirs is held to the policy.
+  const named = kind === "change" || kind === "receipt"
+    ? policed("target", unclipped(target), MAIL_TITLE_CHARS)
+    : "";
+  if (named === null) return INCOMPLETE;
   let claim: MailClaim;
   if (kind === "change") {
     if (named === "") return INCOMPLETE;
@@ -341,11 +388,14 @@ function mailClaim(
     if (it === null || typeof it !== "object" || Array.isArray(it)) return INCOMPLETE;
     const i = it as Record<string, unknown>;
     if (typeof i.title !== "string" || breaksLine(i.title)) return INCOMPLETE;
-    const title = oneLine(i.title, MAIL_TITLE_CHARS);
+    const title = policed("item.title", unclipped(i.title), MAIL_TITLE_CHARS);
     const itemKind = ITEM_KINDS.find((k) => k === i.item_kind);
     const effort = num(i.effort_hours);
     const importance = num(i.importance);
-    if (title === "" || itemKind === undefined || effort === null || effort < 0.25 || effort > 40) {
+    if (
+      title === null || title === "" || itemKind === undefined || effort === null || effort < 0.25 ||
+      effort > 40
+    ) {
       return INCOMPLETE;
     }
     if (importance === null || !Number.isInteger(importance) || importance < 1 || importance > 5) {
