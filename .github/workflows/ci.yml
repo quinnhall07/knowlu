@@ -214,8 +214,8 @@ jobs:
     runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
     needs: [changes, cloud]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-    # 20 for `eval suite` plus the `red-team suite` step's own 30: a job that runs out its clock fails
-    # this required check, past any step's continue-on-error.
+    # The `eval suite` step's own 20 plus the `red-team suite` step's own 30: a job that runs out its
+    # clock fails this required check, past any step's continue-on-error.
     timeout-minutes: 50
     # A-6: the staging project's host, named once at job level and referenced below (each suite
     # step's own `SUPABASE_URL` and its `--allow-net` list; the `red-team suite` step reads it as a
@@ -258,11 +258,13 @@ jobs:
             if [ -f "$f" ] && grep -qiE '\bmodels\b' "$f"; then run=yes; fi
           done
           # The red-team suite (plan section 6) runs on everything the eval runs on, plus the suite
-          # itself (any file under `cloud/eval/redteam/`, its README included) and the three mail-path
-          # files its runner composes (section 4.1). Those three change no prompt the eval seed
-          # covers, so they spend no eval run.
+          # itself (any file under `cloud/eval/redteam/`, its README included), the three mail-path
+          # files its runner composes (section 4.1), `tlds.ts` (the TLD lists `output_policy.ts` and
+          # the suite's oracle read) and `judge_due.ts` (resolveDue, the value the email `due_not`
+          # goal checks). None of those changes a prompt the eval seed covers, so they spend no eval
+          # run.
           redteam=$run
-          if echo "$files" | grep -Eq '^cloud/eval/redteam/|^cloud/supabase/functions/(mail-process/(model|handler)|mail-resolve/handler)\.ts$'; then redteam=yes; fi
+          if echo "$files" | grep -Eq '^cloud/eval/redteam/|^cloud/supabase/functions/(mail-process/(model|handler)|mail-resolve/handler|_shared/(tlds|judge_due))\.ts$'; then redteam=yes; fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "redteam=$redteam" >> "$GITHUB_OUTPUT"
       # `SUPABASE_URL` is not secret (the job-level `STAGING_HOST` comment above says why); the two
@@ -284,6 +286,8 @@ jobs:
       # constructor reads them unconditionally even when no Anthropic call is ever made.
       - name: eval suite
         if: needs.changes.outputs.code != 'false' && steps.touched.outputs.run == 'yes'
+        # Its own bound, as the job's was before the red-team step joined it (job: 20 + 30).
+        timeout-minutes: 20
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SUPABASE_URL: https://${{ env.STAGING_HOST }}
@@ -321,7 +325,8 @@ jobs:
       # as it does `eval suite`'s. The step's own timeout, inside the job's, means a hung call fails
       # this step rather than the required check.
       - name: red-team suite
-        if: needs.changes.outputs.code != 'false' && steps.touched.outputs.redteam == 'yes'
+        # `!cancelled()`: the one bit still reports on a PR whose eval suite failed.
+        if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && steps.touched.outputs.redteam == 'yes' }}
         # Until the prompt-hardening lane lands, a critical (or an outage) is a failed step inside a
         # green job: a finding recorded, not yet a merge blocker. That lane removes this line.
         continue-on-error: true

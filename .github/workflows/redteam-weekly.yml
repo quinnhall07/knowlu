@@ -8,7 +8,9 @@ name: redteam-weekly
 # It holds the suite's own OpenRouter key and the staging service-role key, so:
 #   - its only triggers are the schedule and a manual dispatch; no pull request and no branch update
 #     ever starts it, so no PR-authored code runs with its secrets (engine/tests/workflows.rs);
-#   - the job runs only on `main` (a dispatch from another branch is skipped);
+#   - the job runs only on `main` (a dispatch from another branch is skipped). That guard prevents
+#     accidents, not attacks: anyone with write access can edit it on a branch and dispatch, which is
+#     no more than a branch PR can already do with ci.yml's red-team suite step;
 #   - it runs on GitHub's hosted runners only, never ci.yml's CI_SELF_HOSTED switch;
 #   - it reads only (`contents: read`), every action is pinned to the SHA ci.yml uses, and checkout
 #     keeps no credential.

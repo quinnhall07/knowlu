@@ -357,9 +357,14 @@ fn the_red_team_key_is_named_only_in_the_red_team_suite_step_and_the_weekly_work
                 assert!(!step.contains("secrets.OPENROUTER_API_KEY"), "the red-team suite never spends the eval's key:\n{step}");
                 let eval = step_block(job, "eval suite");
                 assert!(!eval.contains(key), "the eval suite step never holds the red-team key:\n{eval}");
+                // The job's clock covers both suites; the eval keeps its own 20-minute bound inside it.
+                assert!(code_lines(eval).contains(&"        timeout-minutes: 20"), "the eval suite step keeps timeout-minutes: 20:\n{eval}");
+                // `!cancelled()`: the bit still reports on a PR whose eval suite failed.
                 assert!(
-                    step.contains("if: needs.changes.outputs.code != 'false' && steps.touched.outputs.redteam == 'yes'"),
-                    "the red-team suite runs on the touched check's `redteam` output, behind `code != 'false'`:\n{step}"
+                    step.contains(
+                        "if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && steps.touched.outputs.redteam == 'yes' }}"
+                    ),
+                    "the red-team suite runs on the touched check's `redteam` output, behind `!cancelled()` and `code != 'false'`:\n{step}"
                 );
                 let touched = step_block(job, "does this PR touch a prompt, a schema, the model pins or the red-team suite?");
                 assert!(touched.contains("echo \"redteam=$redteam\" >> \"$GITHUB_OUTPUT\""), "the touched check publishes `redteam`:\n{touched}");
@@ -369,6 +374,9 @@ fn the_red_team_key_is_named_only_in_the_red_team_suite_step_and_the_weekly_work
                     "^cloud/eval/redteam/",
                     "mail-process/(model|handler)",
                     "mail-resolve/handler",
+                    // The TLD lists output_policy.ts and the oracle read, and resolveDue (the email
+                    // `due_not` goal's value).
+                    "_shared/(tlds|judge_due)",
                 ] {
                     assert!(touched.contains(path), "the touched check names `{path}`:\n{touched}");
                 }
@@ -381,6 +389,33 @@ fn the_red_team_key_is_named_only_in_the_red_team_suite_step_and_the_weekly_work
             }
             _ => assert!(!text.contains(key), "{name} must never name {key}"),
         }
+    }
+    // The weekly run is the PR step's command, byte for byte: one place to review, no drift.
+    let runner_line = |name: &str, text: &str| -> String {
+        let lines: Vec<String> =
+            code_lines(text).into_iter().filter(|l| l.contains("cloud/eval/redteam/run_redteam.ts")).map(String::from).collect();
+        assert_eq!(lines.len(), 1, "{name}: exactly one line runs the red-team runner: {lines:?}");
+        lines.into_iter().next().unwrap()
+    };
+    let ci = workflow("ci.yml");
+    assert_eq!(
+        runner_line("redteam-weekly.yml", &workflow("redteam-weekly.yml")),
+        runner_line("ci.yml", step_block(job_block(&ci, "eval-gate"), "red-team suite")),
+        "the weekly runner line differs from ci.yml's red-team suite runner line"
+    );
+}
+
+/// A secret reaches a step only by its own name. `toJSON(secrets)` dumps every secret into one value
+/// and `secrets[...]` picks one by a computed name, so neither the key-placement check above nor a
+/// reviewer could see which secret a step holds.
+#[test]
+fn no_workflow_dumps_or_indexes_the_secrets_context() {
+    let dump = regex::Regex::new(r"(?i)tojson\s*\(\s*secrets").unwrap();
+    let index = regex::Regex::new(r"(?i)secrets\s*\[").unwrap();
+    for name in all_workflows() {
+        let text = workflow(&name);
+        assert!(!dump.is_match(&text), "{name}: toJSON(secrets) hands a step every secret");
+        assert!(!index.is_match(&text), "{name}: secrets[...] names a secret no check can read");
     }
 }
 
@@ -419,7 +454,16 @@ fn the_weekly_red_team_workflow_runs_on_schedule_and_dispatch_only_on_hosted_run
     }
     let runs_on: Vec<&str> = code.iter().map(|l| l.trim()).filter(|l| l.starts_with("runs-on:")).collect();
     assert!(!runs_on.is_empty() && runs_on.iter().all(|l| *l == "runs-on: ubuntu-latest"), "GitHub-hosted only: {runs_on:?}");
-    assert!(code.contains(&"permissions: { contents: read }"), "redteam-weekly.yml reads only");
+    let permissions: Vec<&str> = code.iter().copied().filter(|l| l.trim_start().starts_with("permissions:")).collect();
+    assert_eq!(permissions, ["permissions: { contents: read }"], "redteam-weekly.yml reads only, granted once at the top");
+    let checkouts: Vec<usize> = code.iter().enumerate().filter(|(_, l)| l.contains("actions/checkout@")).map(|(i, _)| i).collect();
+    assert_eq!(checkouts.len(), 1, "redteam-weekly.yml checks out once");
+    let checkout: Vec<&str> =
+        code[checkouts[0] + 1..].iter().copied().take_while(|l| !l.trim_start().starts_with("- ") && !l.trim().is_empty()).collect();
+    assert!(
+        checkout.iter().any(|l| l.trim() == "with: { persist-credentials: false }"),
+        "the weekly checkout keeps no credential: {checkout:?}"
+    );
     assert!(body.contains("if: github.ref == 'refs/heads/main'"), "the weekly run runs main's checkout only");
     assert!(!body.contains("continue-on-error"), "the weekly run blocks nothing, so a red run is the alert, never softened");
 }
