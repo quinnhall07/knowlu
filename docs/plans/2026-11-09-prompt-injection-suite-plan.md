@@ -808,7 +808,7 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
 
 ## 9. Records (T0 fills)
 
-- Execution branch and base SHA: `security/output-policy` (worktree `knowlu-policy`), base `c61c7cec`.
+- Execution branch and base SHA: `security/output-policy` (worktree `knowlu-policy`), base `c61c7cec`; PR A squashed and rebased onto `530f5776` as `b2d8fb4b`, merged as PR #74 (`4743ded8`), 2026-11-10.
 - Q6: (b), ruled by Quinn 2026-11-09 (§10).
 - The IANA root-zone list's version line (T0; replaced by the line T2b fetched, if newer): `# Version 2026110900, Last Updated Mon Nov  9 07:07:01 2026 UTC`.
 - Quinn's go for the production deploy, asked at T9a's PASS (date, before PR A's push): 2026-11-10, "Deploy, then push" (production deploy of b2d8fb4b before the push).
