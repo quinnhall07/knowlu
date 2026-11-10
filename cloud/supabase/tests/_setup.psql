@@ -1,0 +1,78 @@
+-- The suite's shared setup (RLS pgTAP plan, D1 and D5). Every pgTAP file includes it first, with
+-- psql's `\ir`, inside the file's own transaction, and the file ends in `rollback`: the `tests`
+-- schema, its tables and its helpers never outlive the file. pg_prove does not run it as a test
+-- (`supabase test db` runs `.sql` and `.pg` files only).
+--
+-- Runs as the database owner the CLI connects as. Nothing here names a real account, address or
+-- note: fixtures use random UUIDs and `@example.invalid` (D1).
+
+-- T4 decides whether pgTAP needs this (it does only if `extensions` is not already on the path):
+-- set search_path = public, extensions;
+
+create schema tests;
+-- The probe body runs under the client roles, so they may reach the schema's functions. The
+-- default privilege covers the helpers T5a adds below these; the tables stay the owner's.
+grant usage on schema tests to anon, authenticated;
+alter default privileges in schema tests grant execute on functions to anon, authenticated;
+
+-- D3's matrix, filled by `_matrix.psql`: one row per relation in `public` and `admin`. The checks
+-- make a malformed row fail the whole file loud, never silently skip a probe.
+create table tests.matrix (
+  rel              text primary key check (rel ~ '^(public|admin)\.[a-z_]+$'),
+  kind             text not null check (kind in ('table', 'view')),
+  access           text not null check (access in ('own', 'service', 'invoker_view', 'closed_view')),
+  key_col          text,
+  touch_col        text,
+  grants           text not null check (grants in ('default', 'revoked')),
+  policies         text[] not null,
+  view_insert_code text check (view_insert_code ~ '^[0-9A-Z]{5}$'),
+  check ((kind = 'table') = (access in ('own', 'service'))),
+  check (kind = 'view' or touch_col is not null),
+  check (kind = 'table' or (key_col is null and touch_col is null)),
+  check ((kind = 'view') = (view_insert_code is not null))
+);
+
+-- Q3's allowlist (F2): the client-executable non-trigger functions that are so by design, as
+-- `schema.name`. No identity or generated column: `_matrix.psql` fills it with
+-- `insert ... select * from tests.rpc_allowlist`, which cannot write one.
+create table tests.rpc_allowlist (
+  fn text primary key check (fn ~ '^(public|admin)\.[a-z_]+$')
+);
+
+-- Impersonation, as PostgREST does it (D5): the claims go in `request.jwt.claims`, then
+-- `set local role`, both scoped to the transaction (or the subtransaction a probe rolls back).
+-- `auth.uid()` reads the legacy `request.jwt.claim.sub` first, so every helper clears it: a stale
+-- value can never shadow the claims. All four are SECURITY INVOKER.
+
+-- An authenticated session for account `p_sub`.
+create function tests.as_user(p_sub uuid) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', json_build_object(
+    'sub', p_sub, 'role', 'authenticated', 'aud', 'authenticated')::text, true);
+  execute 'set local role authenticated';
+end $$;
+
+-- A request with the anon key and no session.
+create function tests.as_anon() returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', json_build_object('role', 'anon')::text, true);
+  execute 'set local role anon';
+end $$;
+
+-- An authenticated session carrying exactly these claims (O12, O13: no `sub`, a stranger's `sub`).
+create function tests.as_claims(p_claims jsonb) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', p_claims::text, true);
+  execute 'set local role authenticated';
+end $$;
+
+-- Back to the owner the file connected as, with no claims at all.
+create function tests.as_owner() returns void language plpgsql as $$
+begin
+  execute 'set local role none';
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', '', true);
+end $$;
