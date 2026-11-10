@@ -109,17 +109,22 @@ begin
 end $$;
 
 -- The one probe body (D3, r1 I2, I4c). It takes SQL text, never a regclass, so the relation is
--- resolved here under the handler. A read (`select count(*) ...`) returns the count it saw; any
--- other statement returns the rows it touched. A 42501 is -1 (a privilege) or -2 (row-level
+-- resolved here under the handler. A read (`select count(*) ...`) returns the count it saw, from
+-- exactly one row; a write (`insert`, `update`, `delete`, `merge` or `do` as its first word)
+-- returns the rows it touched. Anything else (another select, a CTE, a leading comment) raises
+-- 22023: its row count would read as rows seen. A 42501 is -1 (a privilege) or -2 (row-level
 -- security) by its English message; anything else, an unknown 42501 included, is re-raised.
 create function tests.run(p_sql text) returns bigint language plpgsql as $$
 declare n bigint; msg text;
 begin
   if p_sql ~* '^\s*select\s+count\(\*\)' then
-    execute p_sql into n;
-  else
+    execute p_sql into strict n;
+  elsif p_sql ~* '^\s*(insert|update|delete|merge|do)\M' then
     execute p_sql;
     get diagnostics n = row_count;
+  else
+    raise exception using errcode = '22023',
+      message = 'tests.run: not a count read or a write statement';
   end if;
   return n;
 exception when insufficient_privilege then
@@ -197,6 +202,12 @@ begin
     v_pk, v_touch, p_rel, ' | ', '<null>', '{}', p_target_where);
   begin
     execute v_snap into v_before;
+    -- A probe aimed at no rows would read as "touched nothing, changed nothing" whatever the
+    -- policy says, so it is an error, never a refusal.
+    if cardinality(v_before) = 0 then
+      raise exception using errcode = '22023',
+        message = format('tests.probe_write: no target rows in %s', p_rel);
+    end if;
     perform tests.as_who(p_who);
     n := tests.run(p_sql);
     perform tests.as_owner();
@@ -236,9 +247,10 @@ begin
   return d;
 end $$;
 
--- F3 and F4 under a fault (r2 note 8): `denied` for a 42501 whose message starts
--- `permission denied for`; `executed` for success or any other error, because a definer function
--- called with nulls may raise something of its own. Run as `p_who`, always rolled back.
+-- F3 and F4 under a fault (r2 note 8): `denied` only for a refused call, a 42501 whose message
+-- starts `permission denied for function`. Any other 42501 (raised inside a function that did
+-- run) is re-raised, never counted as a deny. `executed` for success or any other error, because a
+-- definer function called with nulls may raise something of its own. Run as `p_who`, rolled back.
 create function tests.call_outcome(p_who text, p_sql text) returns text language plpgsql as $$
 declare d text; msg text;
 begin
@@ -250,7 +262,10 @@ begin
     exception
       when insufficient_privilege then
         get stacked diagnostics msg = message_text;
-        d := case when msg like 'permission denied for %' then 'denied' else 'executed' end;
+        if msg not like 'permission denied for function %' then
+          raise;
+        end if;
+        d := 'denied';
       when others then
         d := 'executed';
     end;

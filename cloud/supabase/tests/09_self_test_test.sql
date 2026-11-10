@@ -19,7 +19,7 @@ begin;
 \ir _setup.psql
 \ir _matrix.psql
 
-select plan(39);
+select plan(48);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -52,6 +52,28 @@ select throws_ok(
   $t$select tests.probe('anon', 'update public.issues set zz_no_such_column = 1')$t$,
   '42703', null,
   'guard: a probe given a broken write statement raises through the driver, under anon');
+-- A read that is not `select count(*)` must not fall through to the write branch, whose row
+-- count of a select would read as rows seen. A count, or a write, is the statement's first word.
+select throws_ok(
+  $t$select tests.run('select count(1) from public.issues')$t$,
+  '22023', 'tests.run: not a count read or a write statement',
+  'guard: tests.run refuses select count(1) rather than read its row count');
+select throws_ok(
+  $t$select tests.run('with t as (select 1) select count(*) from t')$t$,
+  '22023', 'tests.run: not a count read or a write statement',
+  'guard: tests.run refuses a read behind a CTE');
+select throws_ok(
+  $t$select tests.run('/* lead */ select count(*) from public.issues')$t$,
+  '22023', 'tests.run: not a count read or a write statement',
+  'guard: tests.run refuses a read behind a leading comment');
+-- call_outcome reads only a refused function call as `denied`; any other 42501 inside a function
+-- that ran is re-raised, never counted as a deny.
+select throws_ok(
+  $t$select tests.call_outcome('anon',
+    $p$do $d$ begin raise exception using errcode = '42501',
+      message = 'permission denied for table zz_probe'; end $d$ $p$)$t$,
+  '42501', 'permission denied for table zz_probe',
+  'guard: call_outcome re-raises a 42501 that is not a refused function call');
 select throws_ok(
   $t$select tests.probe('anon',
     $p$do $d$ begin raise exception using errcode = '42501', message = 'other'; end $d$ $p$)$t$,
@@ -80,7 +102,7 @@ select
   $f$create table public.zz_pw (id int primary key, note text);
      alter table public.zz_pw disable row level security;
      insert into public.zz_pw values (1, 'x');
-     grant select, update on public.zz_pw to anon;
+     grant select, update, delete on public.zz_pw to anon;
      insert into tests.matrix
        (rel, kind, access, key_col, touch_col, grants, policies, view_insert_code)
        values ('public.zz_pw', 'table', 'service', null, 'note', 'default', '{}', null)$f$
@@ -93,6 +115,26 @@ select is(
   tests.under_fault(:'pw_fault' || '; alter table public.zz_pw enable row level security', :'pw'),
   '(0,f)',
   'probe_write control: under row-level security with no policy, nothing is touched or changed');
+-- The snapshot sees a change by itself: a DO block reports no row count (n = 0), so `changed`
+-- here comes from the ctid alone (a self-assigning update) and from the row's absence (a delete).
+select
+  $c$tests.probe_write('anon', 'public.zz_pw',
+     'do $d$ begin update public.zz_pw set note = note where id = 1; end $d$', 'id = 1')::text$c$
+    as pw_do_update,
+  $c$tests.probe_write('anon', 'public.zz_pw',
+     'do $d$ begin delete from public.zz_pw where id = 1; end $d$', 'id = 1')::text$c$
+    as pw_do_delete,
+  $c$tests.probe_write('anon', 'public.zz_pw',
+     'update public.zz_pw set note = ''rls-probe''', 'id = 2')::text$c$ as pw_empty \gset
+select is(tests.under_fault(:'pw_fault', :'pw_do_update'), '(0,t)',
+  'probe_write sees a self-assigning update by its new ctid, with no row count to go on');
+select is(tests.under_fault(:'pw_fault', :'pw_do_delete'), '(0,t)',
+  'probe_write sees a deleted row by its absence, with no row count to go on');
+-- A probe aimed at no rows proves nothing, so it is an error, never a refusal.
+select throws_ok(
+  format('select tests.under_fault(%L, %L)', :'pw_fault', :'pw_empty'),
+  '22023', 'tests.probe_write: no target rows in public.zz_pw',
+  'guard: probe_write refuses a target that holds no rows');
 
 -- C1 (D4): `tests.unlisted()` names every relation without a matrix row and every row without a
 -- relation, in both schemas.
@@ -170,6 +212,10 @@ select
      or has_schema_privilege('service_role', 'admin', 'usage'))$c$ as f5 \gset
 select is(tests.under_fault(:'f5_fault', :'f5')::boolean, true,
   'F5 sees a planted fault: anon holds usage on admin');
+select is(tests.under_fault($f$grant usage on schema admin to authenticated$f$, :'f5')::boolean,
+  true, 'F5 sees a planted fault: authenticated holds usage on admin');
+select is(tests.under_fault($f$grant usage on schema admin to service_role$f$, :'f5')::boolean,
+  true, 'F5 sees a planted fault: service_role holds usage on admin');
 select is(:f5, false, 'F5 control: no API role holds usage on admin');
 
 -- A5 and V2: `monthly_spend`, a closed view, granted to both client roles. It reads as a count
