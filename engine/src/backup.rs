@@ -266,6 +266,30 @@ mod tests {
     }
 
     #[test]
+    fn a_written_snapshot_opens_and_round_trips_every_backed_up_file() {
+        let (v, t) = (fixture(), target());
+        let today: jiff::civil::Date = "2026-09-04".parse().unwrap();
+        let z = snapshot(&v, &t, "p1", today).unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&z).unwrap()).expect("the snapshot opens as a zip");
+        let mut expected = Vec::new();
+        for folder in BACKUP_FOLDERS {
+            let d = v.join(folder);
+            if !d.is_dir() { continue; }
+            let mut files = Vec::new(); walk(&d, &mut files);
+            for f in files { expected.push(f.strip_prefix(&v).unwrap().to_string_lossy().replace('\\', "/")); }
+        }
+        assert!(!expected.is_empty(), "the fixture vault has backed-up files");
+        let mut names: Vec<String> = archive.file_names().map(|s| s.expect("entry name").to_string()).collect();
+        names.sort(); expected.sort();
+        assert_eq!(names, expected, "the archive lists exactly the backed-up files");
+        for rel in &expected {
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut archive.by_name(rel).unwrap(), &mut body).unwrap();
+            assert_eq!(body, std::fs::read(v.join(rel)).unwrap(), "{rel} round-trips byte for byte");
+        }
+    }
+
+    #[test]
     fn an_unreachable_target_is_amber_in_status_never_an_error_out_of_tick() {
         let v = fixture();
         let gone = std::path::Path::new(r"Q:\no-such-drive\knowlu-backup");

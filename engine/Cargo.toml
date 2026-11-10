@@ -51,7 +51,7 @@ sha1 = "0.11.0"
 ureq = { version = "3.4.0", features = ["cookies"] }
 # Knowlu foundation plan, Task 4 — dated zip snapshots for the backup mirror. Deflate only;
 # no encryption, no bzip2/zstd — the vault is markdown and small JSON, not worth the crate size.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Security_Credentials", "Win32_Foundation"] }

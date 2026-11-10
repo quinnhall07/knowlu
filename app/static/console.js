@@ -1299,6 +1299,7 @@
 
   // Dispatch table from view name to its main-body renderer. Every nav view is built now
   // (Task 3 finishes Issues) — the not-built placeholder is gone (R-P2-3).
+  var KNOWN_VIEWS = { today: 1, overdue: 1, week: 1, later: 1, all: 1, decisions: 1, "good-to-know": 1, issues: 1, runs: 1, schedule: 1 };
   var VIEW_RENDERERS = { runs: renderRunsView, decisions: renderDecisionsView, "good-to-know": renderGoodToKnowView, issues: renderIssuesView, schedule: renderScheduleView };
 
   function renderRuns(state) {
@@ -1464,7 +1465,7 @@
     if (reordered) { current.revision = state.revision; }
     renderNav(state); renderTopline(state); renderGauge(state); renderSyncLine(state); renderDelta(state); renderTheDay(state); renderDeck(state); renderAhead(state); renderComingUp(state); renderGoodToKnow(state); renderClosed(state); renderRuns(state);
     var listViews = { overdue: 1, week: 1, later: 1, all: 1 };
-    EL("main-today").hidden = current.view !== "today"; EL("main-list").hidden = !listViews[current.view]; EL("main-runs").hidden = current.view !== "runs"; EL("main-decisions").hidden = current.view !== "decisions";
+    EL("main-today").hidden = current.view !== "today"; EL("main-list").hidden = !Object.prototype.hasOwnProperty.call(listViews, current.view); EL("main-runs").hidden = current.view !== "runs"; EL("main-decisions").hidden = current.view !== "decisions";
     EL("main-gtk").hidden = current.view !== "good-to-know";
     EL("main-issues").hidden = current.view !== "issues";
     EL("main-schedule").hidden = current.view !== "schedule";
@@ -1473,8 +1474,11 @@
     current.state = state; current.revision = state.revision;
     ROWS = {};
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
-    else if (listViews[current.view]) { renderList(state); }
-    else if (VIEW_RENDERERS[current.view]) { VIEW_RENDERERS[current.view](state); }
+    else if (Object.prototype.hasOwnProperty.call(listViews, current.view)) { renderList(state); }
+    else {
+      // Dispatch only on the table's own keys: the name looked up never comes from the URL hash.
+      Object.keys(VIEW_RENDERERS).forEach(function (name) { if (name === current.view) { VIEW_RENDERERS[name](state); } });
+    }
     watchSeen();
   }
 
@@ -1490,7 +1494,7 @@
     // after a route never takes the hold path (orderOf(null) would never match orderOf(state)).
     // R-P2-3 (rider): the not-built placeholder is gone, so an unrecognised hash must not reach
     // a view with no renderer and no toggle to hide it — fall back to "today" instead (one line).
-    current.view = (view && { today: 1, overdue: 1, week: 1, later: 1, all: 1, decisions: 1, "good-to-know": 1, issues: 1, runs: 1, schedule: 1 }[view]) ? view : "today"; current.pendingOrder = null; current.revision = null; current.state = null;
+    current.view = (view && Object.prototype.hasOwnProperty.call(KNOWN_VIEWS, view)) ? view : "today"; current.pendingOrder = null; current.revision = null; current.state = null;
     ev("view_opened", null, "view", null);
     return poll();
   }
