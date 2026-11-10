@@ -46,7 +46,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   byte for byte and they are CRLF because vaults are — **never re-encode them**. The engine still
   translates CRLF on every vault read and write (`pystr`): users' vaults are whatever they are.
   `str::lines()` strips a trailing `\r`; `split('\n')` does not.
-- Workflow: brainstorm → spec (`docs/specs/`) → plan (`docs/plans/`) → execute with review
-  checkpoints; every plan carries a fidelity ledger and every review lands in `docs/reports/`. Quinn
-  reviews at checkpoints — surface trade-offs, ask before assuming.
+- Workflow: sized to the risk as Small, Lane or Contract; `CLAUDE.md` ("Gates and conventions") has
+  the rule. Only a Contract change runs spec (`docs/specs/`) → plan (`docs/plans/`, with a fidelity
+  ledger) → execution with review checkpoints. Every review lands in `docs/reports/`. Quinn reviews
+  at checkpoints — surface trade-offs, ask before assuming.
 

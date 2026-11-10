@@ -20,9 +20,9 @@ command output or a URL, and you mark what you could not verify.
 - Bash is for read-only commands only: `git log`, `show`, `diff`, `ls-tree`, `merge-base`,
   `worktree list`, and `gh pr list/view`, `gh run list`.
 - Never cargo, supabase, fetch, stash, checkout, add or commit. Never write a file.
-- Never read a student vault or quinn-ops's vault. Read files over 300 lines in ranges.
+- Never read a student vault or quinn-ops's vault.
 
-Final message, 50 lines at most:
+Final message:
 1. the answer first;
 2. a table: item | exists / partial / missing | evidence | size (S/M/L, files touched,
    contract-list yes/no);

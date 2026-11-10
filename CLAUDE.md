@@ -174,9 +174,24 @@ them with `model: 'opus'`.
   bytes are the contract, CRLF because vaults are — **never re-encode them**. The engine translates
   CRLF on every vault read and write (`pystr`). `str::lines()` strips a trailing `\r`;
   `split('\n')` does not.
-- Workflow: brainstorm → spec (`docs/specs/`) → plan (`docs/plans/`, with a fidelity ledger) →
-  execute with review checkpoints; reviews land in `docs/reports/`. Quinn reviews at checkpoints —
-  surface trade-offs, ask before assuming.
+- Workflow, sized to the risk. Say which size a piece of work is when it starts:
+  - **Small**: reversible, about three files or fewer, no open design choice, and nothing that
+    **Contract** names. No spec and no plan: the test first, then the change, then `reviewer` on the
+    diff.
+  - **Lane**: a feature. One design note of a page or two in `docs/specs/` (the behavior, each
+    decision with its reason, what must not break, the tests that prove it), then tasks dispatched
+    from it.
+  - **Contract**: anything that touches the contract list, a vault byte format, a migration, money,
+    credentials, a release or the privacy page, at any size. Spec, then a plan with a fidelity ledger,
+    then execution with review checkpoints; contract-list diffs go to `contract-reviewer`.
+  - A design note or plan gets one review and one re-review. What is still open after the second
+    round goes to Quinn as a short list of decisions, each with a recommendation, never to a third round.
+  - A lane or contract change ends with a live run of the student journey it touches, in a scratch
+    profile on a scratch vault, driven through the DOM, before its PR is called ready. The main session
+    runs it against staging (production only on Quinn's word), and no subagent holds a session. The PR
+    says what was run and what was seen; a change no student can see says that instead.
+  - Reviews land in `docs/reports/`. Quinn reviews at checkpoints — surface trade-offs, ask before
+    assuming.
 
 ## Direction
 

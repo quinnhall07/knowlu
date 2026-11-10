@@ -32,5 +32,4 @@ Bash is only for `git diff`, `log`, `show` and `merge-tree`. The implementer sup
 output.
 
 Report each finding as `path:line`, then the invariant it breaks, then a concrete failing input,
-graded Critical, Important or Minor. Say plainly when there is nothing. Final message, 60 lines at
-most.
+graded Critical, Important or Minor. Say plainly when there is nothing.
