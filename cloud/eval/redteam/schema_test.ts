@@ -783,6 +783,61 @@ Deno.test("a final label that is both a file extension and a TLD is a host", () 
   }
 });
 
+// T3b fix round 2: a mail client's quoted-printable and wrapped base64, and fewer prose false positives.
+
+Deno.test("a host behind quoted-printable or an RFC 2047 Q-word fails hygieneViolations", () => {
+  const cases: Array<[string, string]> = [
+    ["text", "visit notexample=2Ecom today"],
+    ["text", "visit notexample.c=\nom today"], // a soft line break
+    ["subject", "=?utf-8?Q?visit_notexample=2Ecom?="],
+    ["from", "=?utf-8?Q?Prof?= <prof=40notexample=2Ecom>"],
+  ];
+  for (const [field, value] of cases) {
+    const record = withItem(CLAIM_TWIN, field, value);
+    assertEquals(validateFixture(record), [], `${JSON.stringify(value)}: still structurally valid`);
+    expectFoldedViolation(hygiene(record), "notexample", JSON.stringify(value));
+  }
+  // `=40` is an at only inside a Q-word, so maths stays prose; `x=2E3` reads as `x.3`, which is no host.
+  for (const text of ["Solve x=40y for y.", "Take x=2E3 as the bound."]) {
+    assertEquals(hygiene(withItem(CLAIM_TWIN, "text", text)), [], text);
+  }
+});
+
+Deno.test("base64 wrapped across whitespace fails hygieneViolations", () => {
+  // The last case wraps a whole 24-character line before a final chunk shorter than a token.
+  const texts = [
+    "c2VldGggbm90ZXhhbXBsZS5j\nb20gdG9kYXkgYW5kIG1vcmU=",
+    "c2VldGggbm90ZXhhbXBsZS5j b20gdG9kYXkgYW5kIG1vcmU=",
+    "c2VldGggbm90ZXhhbXBsZS5j b20gdG9kYXk=",
+  ];
+  for (const text of texts) {
+    const record = withItem(CLAIM_TWIN, "text", text);
+    assertEquals(validateFixture(record), [], `${JSON.stringify(text)}: still structurally valid`);
+    expectFoldedViolation(hygiene(record), "notexample", JSON.stringify(text));
+  }
+});
+
+Deno.test("syllabus abbreviations and dotted file extensions stay clean, half-spaced hosts do not", () => {
+  const prose = [
+    "Lab 4 is due Fri. by 11:59 pm.",
+    "Homework is due Mon. at noon.",
+    "Office hours run Jan. to Mar. in room 204.",
+    "Quiz 3 opens Tues. at 9 am.",
+    "Bring a pencil, a calculator, etc. to the exam.",
+    "Worth 20 pts. in total.",
+    "Read the notes before Wed. in lab.",
+    "Approx. at 3 pm we start.",
+    "Submit your .py file.",
+    "Upload the .zip with your report.",
+    "Commit the .java sources and a .md writeup.",
+  ];
+  for (const text of prose) assertEquals(hygiene(withItem(TASK_TWIN, "body", text)), [], text);
+  for (const spelling of ["notexample .com", "notexample. com", "notexample. org"]) {
+    const record = withItem(TASK_TWIN, "body", `Your grade is posted at ${spelling} today.`);
+    expectFoldedViolation(hygiene(record), "notexample", spelling);
+  }
+});
+
 Deno.test("an address at a non-reserved domain fails hygieneViolations, naming it", () => {
   const dotted = withItem(EMAIL_TWIN, "from", "Dean <dean@notexample.edu>");
   assertEquals(validateFixture(dotted), [], "still structurally valid");

@@ -627,9 +627,11 @@ function isRootTld(label: string): boolean {
 
 /**
  * A dot with whitespace on one side only, joined when the label after it is a root-zone TLD: `notexample
- * .com`, `notexample. com`. Read before case is folded, so `. ` joins only before a lower-case label after a
- * label of two or more characters: a sentence's next word is capitalised (`Friday. Community`), and `e.g.
- * the` follows a one-letter label.
+ * .com`, `notexample. com`. ` .x` is left alone when `x` is a file extension (`your .py file`). Read before
+ * case is folded, so `. x` joins only before a lower-case label of three or more letters, after a label of
+ * two or more characters: a sentence's next word is capitalised (`Friday. Community`), `e.g. the` follows a
+ * one-letter label, and the two-letter TLDs a syllabus abbreviation meets (`Fri. by`, `Jan. to`, `pts. in`)
+ * are not joined, a residual named in the T3b report.
  */
 function joinHalfSpacedDots(text: string): string {
   return text
@@ -637,13 +639,58 @@ function joinHalfSpacedDots(text: string): string {
     .replace(
       / \.([\p{L}\p{N}][\p{L}\p{M}\p{N}_\-]*)/gu,
       (whole, label: string, offset: number, all: string) =>
-        labelCharsBefore(all, offset) >= 1 && isRootTld(label) ? `.${label}` : whole,
+        labelCharsBefore(all, offset) >= 1 && isRootTld(label) &&
+          !isExtensionLabel(cutAtFirstSeparator(label).toLowerCase())
+          ? `.${label}`
+          : whole,
     )
     .replace(
       /\. (\p{Ll}[\p{L}\p{M}\p{N}_\-]*)/gu,
       (whole, label: string, offset: number, all: string) =>
-        labelCharsBefore(all, offset) >= 2 && isRootTld(label) ? `.${label}` : whole,
+        labelCharsBefore(all, offset) >= 2 && /^\p{L}{3,}$/u.test(cutAtFirstSeparator(label)) &&
+          isRootTld(label)
+          ? `.${label}`
+          : whole,
     );
+}
+
+/** An RFC 2047 Q-encoded word (group 1, its encoded text), or a run of quoted-printable `=XX` escapes. */
+const QP_TOKEN = /=\?[^?\s]+\?[qQ]\?([^?\s]*)\?=|(?:=[0-9a-fA-F][0-9a-fA-F])+/g;
+/** A quoted-printable soft line break. */
+const QP_SOFT_BREAK = /=\r?\n/g;
+/** A run of `=XX` escapes inside a Q-word's text. */
+const QP_RUN = /(?:=[0-9a-fA-F][0-9a-fA-F])+/g;
+
+/** `=XX` escapes decoded as UTF-8 runs (Latin-1 on error), keeping `=40` as written when `keepAt`. */
+function decodeQpRun(run: string, keepAt: boolean): string {
+  let out = "";
+  let pending = "";
+  for (let i = 0; i + 2 < run.length; i += 3) {
+    const hex = run.slice(i + 1, i + 3);
+    if (keepAt && hex === "40") {
+      if (pending !== "") out += decodePercentRun(pending);
+      pending = "";
+      out += run.slice(i, i + 3);
+    } else {
+      pending += `%${hex}`;
+    }
+  }
+  return pending === "" ? out : out + decodePercentRun(pending);
+}
+
+/**
+ * The quoted-printable reading a mail client gives `text`: soft line breaks removed, a Q-word decoded whole
+ * (its `_` a space, every `=XX` a byte), and `=XX` elsewhere decoded too, except `=40`. An at outside a
+ * Q-word stays `=40`, so `x=40y` in maths stays prose; `x=2E3` reads `x.3`, which is no host.
+ */
+function decodeQuotedPrintable(text: string): string {
+  return text.replace(QP_SOFT_BREAK, "").replace(
+    QP_TOKEN,
+    (whole, qWord: string | undefined) =>
+      qWord === undefined
+        ? decodeQpRun(whole, true)
+        : qWord.replace(/_/g, " ").replace(QP_RUN, (run) => decodeQpRun(run, false)),
+  );
 }
 
 /**
@@ -660,11 +707,12 @@ function hostForm(text: string, asciiFirst: boolean): string {
     .replace(/ (?:dot|\.) /g, ".");
 }
 
-/** The greedy and the ASCII-first readings of `text`, one when they agree. */
+/** The greedy, ASCII-first and quoted-printable readings of `text`, each once. */
 function hostForms(text: string): string[] {
-  const greedy = hostForm(text, false);
-  const asciiFirst = hostForm(text, true);
-  return greedy === asciiFirst ? [greedy] : [greedy, asciiFirst];
+  const forms = new Set([hostForm(text, false), hostForm(text, true)]);
+  const quotedPrintable = decodeQuotedPrintable(text);
+  if (quotedPrintable !== text) forms.add(hostForm(quotedPrintable, false));
+  return [...forms];
 }
 
 /** Whether the oracle reads `token` alone as a host: its TLD rule and extension list, not a copy of them. */
@@ -1052,14 +1100,56 @@ function stringProblems(text: string): string[] {
         "(KNOWLU-CANARY-[A-Z0-9]+)",
     );
   }
-  for (const token of text.matchAll(BASE64_TOKEN)) {
-    for (const decoded of base64Texts(token[0])) {
+  for (const token of base64Candidates(text)) {
+    for (const decoded of base64Texts(token)) {
       for (const problem of textProblems(decoded)) {
-        problems.add(`base64 ${show(token[0])} decodes to text where ${problem}`);
+        problems.add(`base64 ${show(token)} decodes to text where ${problem}`);
       }
     }
   }
   return [...problems];
+}
+
+const WHITESPACE_ONLY = /^\s+$/;
+/** A maximal run of base64 characters, its padding included: a `BASE64_TOKEN` when 12 or more precede it. */
+const BASE64_CHUNK = /[A-Za-z0-9+\/_-]+={0,2}/g;
+
+/** A wrapped base64 line: a token, unpadded, its length a multiple of four, as MIME wraps them. */
+function isBase64Line(chunk: string): boolean {
+  return chunk.length >= 12 && chunk.length % 4 === 0 && !chunk.endsWith("=");
+}
+
+/**
+ * Every base64 token in `text`, and each whitespace-separated run of them joined without the whitespace: a
+ * mail client unwraps MIME base64 lines before decoding them. A run continues with another token, or, after
+ * a whole wrapped line, with a shorter final chunk (`b20gdG9kYXk=`). One pass; each gap is read once.
+ */
+function base64Candidates(text: string): string[] {
+  const candidates: string[] = [];
+  let run: string[] = [];
+  let previousEnd = -1;
+  const flush = () => {
+    if (run.length > 1) candidates.push(run.join(""));
+  };
+  for (const match of text.matchAll(BASE64_CHUNK)) {
+    const chunk = match[0];
+    let body = chunk.length;
+    while (body > 0 && chunk[body - 1] === "=") body--;
+    const isToken = body >= 12;
+    if (isToken) candidates.push(chunk);
+    const last = run[run.length - 1];
+    const joins = last !== undefined && !last.endsWith("=") &&
+      (isToken || isBase64Line(last)) && WHITESPACE_ONLY.test(text.slice(previousEnd, match.index));
+    if (joins) {
+      run.push(chunk);
+    } else {
+      flush();
+      run = isToken ? [chunk] : [];
+    }
+    previousEnd = match.index + chunk.length;
+  }
+  flush();
+  return candidates;
 }
 
 /**
