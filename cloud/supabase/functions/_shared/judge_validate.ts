@@ -115,8 +115,9 @@ export function oneLine(text: string, max: number): string {
 }
 
 /** True for a character the device's line rule refuses: a C0 control (tab included), DEL, U+0085,
- * U+2028 or U+2029. Each is a line boundary for `pystr::splitlines`, or a control no text needs. */
-function lineRuleChar(c: number): boolean {
+ * U+2028 or U+2029. Each is a line boundary for `pystr::splitlines`, or a control no text needs.
+ * `judge_prompts.ts` applies the same rule to every single-line field it puts in a prompt. */
+export function lineRuleChar(c: number): boolean {
   return c < 0x20 || c === 0x7f || c === 0x85 || c === 0x2028 || c === 0x2029;
 }
 

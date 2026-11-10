@@ -9,7 +9,7 @@
 // appended beyond the bound, not carved out of it, so a fully clipped 1200-character body prompt
 // emits 1213 characters, the marker being the frame telling the model it cut something, not part
 // of what it cut. `judge_prompts_test.ts` pins the exact count.
-import { ABSOLUTE_DUE_RE, type MailKind, oneLine } from "./judge_validate.ts";
+import { ABSOLUTE_DUE_RE, lineRuleChar, type MailKind, oneLine } from "./judge_validate.ts";
 import { scrubForPrompt } from "./scrub.ts";
 
 export const MAX_BODY_CHARS = 1200;
@@ -91,6 +91,24 @@ function str(value: unknown): string {
 
 function list(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+/**
+ * A single-line item field as it goes into a prompt: every line-rule character (a C0 control, DEL,
+ * U+0085, U+2028, U+2029) becomes a space, then `oneLine` collapses whitespace and cuts the value to
+ * `max` characters. `oneLine`'s `\s` does not match U+0085 or U+001C-U+001E, so the line rule runs
+ * first. An ordinary value comes out unchanged.
+ */
+function field(value: string, max: number): string {
+  let spaced = "";
+  for (const ch of value) spaced += lineRuleChar(ch.codePointAt(0) ?? 0) ? " " : ch;
+  return oneLine(spaced, max);
+}
+
+/** A list field as one line: each entry a `field` of `entryMax`, empty entries dropped, the joined
+ * line cut to `lineMax`. */
+function fieldList(value: unknown, entryMax: number, lineMax: number): string {
+  return field(list(value).map((v) => field(v, entryMax)).filter((v) => v !== "").join(", "), lineMax);
 }
 
 /**
@@ -181,13 +199,14 @@ export function buildPrompt(
     const parts: string[] = [];
     const prefs = clip(str(seed.preferences), MAX_PREFS_CHARS);
     if (prefs !== "") parts.push(`The student's stated preferences:\n${prefs}`);
-    parts.push(`Course slug: ${str(seed.course) || "null"}`);
+    parts.push(`Course slug: ${field(str(seed.course), 40) || "null"}`);
     const weights = clip(str(seed.weights), MAX_WEIGHTS_CHARS);
     if (weights !== "") parts.push(`Grade weights:\n${weights}`);
-    parts.push(`Title: ${oneLine(str(item.title), 200)}`);
+    parts.push(`Title: ${field(str(item.title), 200)}`);
     // An absent due date is absent, never the word "None": a model shown "Due: None" reliably
     // treats it as a date it failed to read rather than as an assignment without one.
-    if (str(item.due) !== "") parts.push(`Due: ${str(item.due)}`);
+    const due = field(str(item.due), 40);
+    if (due !== "") parts.push(`Due: ${due}`);
     const body = clip(str(item.body).trim(), MAX_BODY_CHARS);
     if (body !== "") parts.push(`Body:\n${body}`);
     return { system, user: parts.join("\n"), schema };
@@ -195,14 +214,16 @@ export function buildPrompt(
 
   if (kind === "event") {
     const parts = [
-      `Title: ${oneLine(str(item.title), 200)}`,
-      `When: ${str(item.start)} to ${str(item.end)}`,
-      `Source: ${str(item.source)}`,
+      `Title: ${field(str(item.title), 200)}`,
+      `When: ${field(str(item.start), 40)} to ${field(str(item.end), 40)}`,
+      `Source: ${field(str(item.source), 120)}`,
     ];
-    if (str(item.organizer) !== "") parts.push(`Organizer: ${oneLine(str(item.organizer), 120)}`);
-    if (str(item.location) !== "") parts.push(`Location: ${oneLine(str(item.location), 120)}`);
-    if (list(item.categories).length > 0) parts.push(`Categories: ${list(item.categories).join(", ")}`);
-    if (list(item.audiences).length > 0) parts.push(`Audiences: ${list(item.audiences).join(", ")}`);
+    if (str(item.organizer) !== "") parts.push(`Organizer: ${field(str(item.organizer), 120)}`);
+    if (str(item.location) !== "") parts.push(`Location: ${field(str(item.location), 120)}`);
+    const categories = fieldList(item.categories, 60, 200);
+    if (categories !== "") parts.push(`Categories: ${categories}`);
+    const audiences = fieldList(item.audiences, 60, 200);
+    if (audiences !== "") parts.push(`Audiences: ${audiences}`);
     const description = clip(str(item.description).trim(), MAX_BODY_CHARS);
     if (description !== "") parts.push(`Description:\n${description}`);
     const interests = clip(str(seed.interests), MAX_PREFS_CHARS);
@@ -210,7 +231,7 @@ export function buildPrompt(
     return { system: systemTemplate("event"), user: parts.join("\n"), schema };
   }
 
-  const known = list(seed.known_courses);
+  const known = list(seed.known_courses).map((c) => field(c, 40)).filter((c) => c !== "");
   // The scrub site (provider swap Task 3): the one place both the Gmail-read path
   // (`gmail-read/handler.ts`) and the device's `judge-email` path build the email prompt, because
   // both hand their item straight to `judge()`, which calls `buildPrompt` here. `From` is NEVER
@@ -218,9 +239,9 @@ export function buildPrompt(
   // feature, and `scrub`/`scrubForPrompt` would replace an email address in it.
   const subject = scrubForPrompt(str(item.subject));
   const parts = [
-    `Subject: ${oneLine(subject, 200)}`,
-    `From: ${oneLine(str(item.from), 200)}`,
-    `Date: ${str(item.date)}`,
+    `Subject: ${field(subject, 200)}`,
+    `From: ${field(str(item.from), 200)}`,
+    `Date: ${field(str(item.date), 80)}`,
   ];
   if (known.length > 0) parts.push(`Known course slugs: ${known.join(", ")}`);
   // Scrub before clip, not after: clipping a token in half would leave a partial secret on the
@@ -383,13 +404,13 @@ export function mailPromptText(text: string): string {
  */
 export function buildMailClaimPrompt(item: Record<string, unknown>, seed: Record<string, unknown>): Prompt {
   const parts = [
-    `Subject: ${oneLine(scrubForPrompt(str(item.subject)), 200)}`,
-    `From: ${oneLine(str(item.from), 200)}`,
-    `Date: ${oneLine(str(item.date), 80)}`,
+    `Subject: ${field(scrubForPrompt(str(item.subject)), 200)}`,
+    `From: ${field(str(item.from), 200)}`,
+    `Date: ${field(str(item.date), 80)}`,
   ];
-  const known = list(seed.known_courses).map((c) => oneLine(c, 40)).filter((c) => c !== "");
+  const known = list(seed.known_courses).map((c) => field(c, 40)).filter((c) => c !== "");
   if (known.length > 0) parts.push(`Known course codes: ${known.join(", ")}`);
-  const zone = oneLine(str(seed.time_zone), 64);
+  const zone = field(str(seed.time_zone), 64);
   if (zone !== "") parts.push(`Time zone: ${zone}`);
   const raw = scrubForPrompt(str(item.text).trim());
   const text = mailPromptText(str(item.text));
@@ -418,15 +439,15 @@ function wireDue(value: unknown): string {
 export function buildMailResolvePrompt(batch: Record<string, unknown>): Prompt {
   const lines = ["Claims:"];
   for (const c of records(batch.claims)) {
-    const key = oneLine(str(c.key), 80);
+    const key = field(str(c.key), 80);
     if (key !== "") {
-      lines.push(`- claim ${key} | names: ${oneLine(str(c.target), 200)} | due: ${wireDue(c.due)}`);
+      lines.push(`- claim ${key} | names: ${field(str(c.target), 200)} | due: ${wireDue(c.due)}`);
     }
   }
   lines.push("Candidates:");
   for (const c of records(batch.candidates)) {
-    const id = oneLine(str(c.id), 80);
-    if (id !== "") lines.push(`- id ${id} | title: ${oneLine(str(c.title), 200)} | due: ${wireDue(c.due)}`);
+    const id = field(str(c.id), 80);
+    if (id !== "") lines.push(`- id ${id} | title: ${field(str(c.title), 200)} | due: ${wireDue(c.due)}`);
   }
   return { system: mailSystemTemplate("mail_resolve"), user: lines.join("\n"), schema: MAIL_RESOLVE_SCHEMA };
 }

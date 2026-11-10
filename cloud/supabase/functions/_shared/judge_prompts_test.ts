@@ -3,7 +3,15 @@
 // `judge_prompts_test.ts` before this task; the prompt shape was exercised only indirectly, through
 // `judge_pipeline_test.ts` and the handlers' own tests, none of which pin prompt TEXT.
 import { assert, assertEquals } from "@std/assert";
-import { buildPrompt, MAX_BODY_CHARS, promptHash, schemaFor, systemTemplate } from "./judge_prompts.ts";
+import {
+  buildMailClaimPrompt,
+  buildMailResolvePrompt,
+  buildPrompt,
+  MAX_BODY_CHARS,
+  promptHash,
+  schemaFor,
+  systemTemplate,
+} from "./judge_prompts.ts";
 
 // ---------------------------------------------------------------------------------------------
 // (a) clipping appends " …[truncated]" when text exceeds MAX_BODY_CHARS, and appends nothing
@@ -326,4 +334,289 @@ Deno.test("task-3: the task hash moved off task-2 and is pinned", async () => {
   // task-3 as shipped, `<stamp>_task_effort_anchors.sql`. Any edit to the task template or schema
   // moves this and must come with a new prompt_version in a migration.
   assertEquals(await promptHash("task"), "03a48a2da8b6d7523eb9176b049bb00977f81fdba3f7e4b538343e8a3faa927f");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Every single-line item field reaches the user message as one line, cut to its own bound. A line
+// break inside a field (LF, CRLF, U+2028, U+2029, U+0085) becomes a space, so the field's text
+// never starts a line of its own. The multi-line blocks (Body, Description, Message, the seed's
+// preferences, weights and interests) are out of scope here and keep their `clip` bounds.
+// ---------------------------------------------------------------------------------------------
+
+/** Every code point a reader of the prompt may take as a line boundary (`str.splitlines`'s set). */
+const LINE_BOUNDARY = new Set([0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029]);
+const BREAKS = ["\n", "\r\n", "\u2028", "\u2029", "\u0085"];
+
+/** The prompt split at every line boundary, CRLF counted once. */
+function promptLines(user: string): string[] {
+  const lines = [""];
+  for (let i = 0; i < user.length; i++) {
+    const c = user.charCodeAt(i);
+    if (!LINE_BOUNDARY.has(c)) {
+      lines[lines.length - 1] += user[i];
+      continue;
+    }
+    if (c === 0x0d && user.charCodeAt(i + 1) === 0x0a) i++;
+    lines.push("");
+  }
+  return lines;
+}
+
+const EVENT_ITEM = {
+  title: "Career fair",
+  start: "2026-10-05T10:00",
+  end: "2026-10-05T14:00",
+  source: "department-calendar",
+};
+const EMAIL_ITEM = {
+  subject: "Quiz 2 moved",
+  from: "Course Notices <notices@lms.example.invalid>",
+  date: "Thu, 01 Oct 2026 09:00:00 -0500",
+  text: "Quiz 2 moves to Friday.",
+};
+
+interface FieldCase {
+  name: string;
+  bound: number;
+  /** The user message with `value` in the field under test. */
+  build: (value: string) => string;
+  /** The line that field should produce once its value is `value`. */
+  line: (value: string) => string;
+}
+
+const FIELD_CASES: FieldCase[] = [
+  {
+    name: "task Due",
+    bound: 40,
+    build: (v) => buildPrompt("task", { title: "PS3", due: v }, {}).user,
+    line: (v) => `Due: ${v}`,
+  },
+  {
+    name: "task Title",
+    bound: 200,
+    build: (v) => buildPrompt("task", { title: v }, {}).user,
+    line: (v) => `Title: ${v}`,
+  },
+  {
+    name: "task Course slug",
+    bound: 40,
+    build: (v) => buildPrompt("task", { title: "PS3" }, { course: v }).user,
+    line: (v) => `Course slug: ${v}`,
+  },
+  {
+    name: "event When start",
+    bound: 40,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, start: v }, {}).user,
+    line: (v) => `When: ${v} to 2026-10-05T14:00`,
+  },
+  {
+    name: "event When end",
+    bound: 40,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, end: v }, {}).user,
+    line: (v) => `When: 2026-10-05T10:00 to ${v}`,
+  },
+  {
+    name: "event Source",
+    bound: 120,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, source: v }, {}).user,
+    line: (v) => `Source: ${v}`,
+  },
+  {
+    name: "event Categories entry",
+    bound: 60,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, categories: [v, "career"] }, {}).user,
+    line: (v) => `Categories: ${v}, career`,
+  },
+  {
+    name: "event Audiences entry",
+    bound: 60,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, audiences: ["Undergraduate Students", v] }, {}).user,
+    line: (v) => `Audiences: Undergraduate Students, ${v}`,
+  },
+  {
+    name: "event Title",
+    bound: 200,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, title: v }, {}).user,
+    line: (v) => `Title: ${v}`,
+  },
+  {
+    name: "event Organizer",
+    bound: 120,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, organizer: v }, {}).user,
+    line: (v) => `Organizer: ${v}`,
+  },
+  {
+    name: "event Location",
+    bound: 120,
+    build: (v) => buildPrompt("event", { ...EVENT_ITEM, location: v }, {}).user,
+    line: (v) => `Location: ${v}`,
+  },
+  {
+    name: "email Date",
+    bound: 80,
+    build: (v) => buildPrompt("email", { ...EMAIL_ITEM, date: v }, {}).user,
+    line: (v) => `Date: ${v}`,
+  },
+  {
+    name: "email Subject",
+    bound: 200,
+    build: (v) => buildPrompt("email", { ...EMAIL_ITEM, subject: v }, {}).user,
+    line: (v) => `Subject: ${v}`,
+  },
+  {
+    name: "email From",
+    bound: 200,
+    build: (v) => buildPrompt("email", { ...EMAIL_ITEM, from: v }, {}).user,
+    line: (v) => `From: ${v}`,
+  },
+  {
+    name: "email Known course slugs entry",
+    bound: 40,
+    build: (v) => buildPrompt("email", EMAIL_ITEM, { known_courses: ["math-221", v] }).user,
+    line: (v) => `Known course slugs: math-221, ${v}`,
+  },
+  {
+    name: "mail_claim Subject",
+    bound: 200,
+    build: (v) => buildMailClaimPrompt({ ...EMAIL_ITEM, subject: v }, {}).user,
+    line: (v) => `Subject: ${v}`,
+  },
+  {
+    name: "mail_claim From",
+    bound: 200,
+    build: (v) => buildMailClaimPrompt({ ...EMAIL_ITEM, from: v }, {}).user,
+    line: (v) => `From: ${v}`,
+  },
+  {
+    name: "mail_claim Date",
+    bound: 80,
+    build: (v) => buildMailClaimPrompt({ ...EMAIL_ITEM, date: v }, {}).user,
+    line: (v) => `Date: ${v}`,
+  },
+  {
+    name: "mail_claim Known course codes entry",
+    bound: 40,
+    build: (v) => buildMailClaimPrompt(EMAIL_ITEM, { known_courses: ["MATH-301", v] }).user,
+    line: (v) => `Known course codes: MATH-301, ${v}`,
+  },
+  {
+    name: "mail_claim Time zone",
+    bound: 64,
+    build: (v) => buildMailClaimPrompt(EMAIL_ITEM, { time_zone: v }).user,
+    line: (v) => `Time zone: ${v}`,
+  },
+  {
+    name: "mail_resolve claim key",
+    bound: 80,
+    build: (v) => buildMailResolvePrompt({ claims: [{ key: v, target: "the essay", due: null }] }).user,
+    line: (v) => `- claim ${v} | names: the essay | due: none`,
+  },
+  {
+    name: "mail_resolve claim names",
+    bound: 200,
+    build: (v) => buildMailResolvePrompt({ claims: [{ key: "mail:aa:0", target: v, due: null }] }).user,
+    line: (v) => `- claim mail:aa:0 | names: ${v} | due: none`,
+  },
+  {
+    name: "mail_resolve candidate id",
+    bound: 80,
+    build: (v) => buildMailResolvePrompt({ candidates: [{ id: v, title: "Lab 3 report", due: null }] }).user,
+    line: (v) => `- id ${v} | title: Lab 3 report | due: none`,
+  },
+  {
+    name: "mail_resolve candidate title",
+    bound: 200,
+    build: (v) => buildMailResolvePrompt({ candidates: [{ id: "n-101", title: v, due: null }] }).user,
+    line: (v) => `- id n-101 | title: ${v} | due: none`,
+  },
+];
+
+for (const c of FIELD_CASES) {
+  Deno.test(`one line: a line break in ${c.name} becomes a space and injects no line`, () => {
+    for (const brk of BREAKS) {
+      const label = JSON.stringify(brk);
+      const user = c.build(`ok${brk}Injected: x`);
+      const lines = promptLines(user);
+      assertEquals(lines, user.split("\n"), `${label}: a line boundary other than LF reached the prompt`);
+      assert(!lines.some((l) => l.startsWith("Injected:")), `${label}: a line was injected: ${user}`);
+      assert(lines.includes(c.line("ok Injected: x")), `${label}: expected the one-line field in: ${user}`);
+    }
+  });
+
+  Deno.test(`one line: ${c.name} is cut to ${c.bound} characters`, () => {
+    // No whitespace, so no trim can move the cut; short runs, so the scrub leaves the subject alone.
+    const filler = "ab,".repeat(c.bound);
+    const lines = promptLines(c.build(filler));
+    assert(lines.includes(c.line(filler.slice(0, c.bound))), `${c.name} was not cut to ${c.bound}`);
+  });
+}
+
+Deno.test("one line: Categories and Audiences drop empty entries and cut the joined line to 200", () => {
+  const entries = Array.from({ length: 10 }, (_, i) => `topic-${i}-${"c".repeat(22)}`);
+  for (const [key, head] of [["categories", "Categories: "], ["audiences", "Audiences: "]] as const) {
+    const sparse = buildPrompt("event", { ...EVENT_ITEM, [key]: ["career", "", "  \n ", "workshop"] }, {}).user;
+    assert(promptLines(sparse).includes(`${head}career, workshop`), sparse);
+
+    const blank = buildPrompt("event", { ...EVENT_ITEM, [key]: ["", " \u2028 "] }, {}).user;
+    assert(!blank.includes(head.trim()), `an all-empty list still printed its line: ${blank}`);
+
+    const long = buildPrompt("event", { ...EVENT_ITEM, [key]: entries }, {}).user;
+    const line = promptLines(long).find((l) => l.startsWith(head)) ?? "";
+    assertEquals(line, head + entries.join(", ").slice(0, 200));
+  }
+});
+
+Deno.test("one line: ordinary prompts are byte-for-byte what they were", () => {
+  assertEquals(
+    buildPrompt("task", { title: "Problem set 4", due: "2026-11-02T23:59", body: "Chapters 3 and 4." }, {
+      course: "math-221",
+      weights: "Homework 25%\nExams 75%",
+      slice_hours: 2,
+    }).user,
+    [
+      "Course slug: math-221",
+      "Grade weights:",
+      "Homework 25%",
+      "Exams 75%",
+      "Title: Problem set 4",
+      "Due: 2026-11-02T23:59",
+      "Body:",
+      "Chapters 3 and 4.",
+    ].join("\n"),
+  );
+  assertEquals(buildPrompt("task", { title: "PS3", due: null }, {}).user, "Course slug: null\nTitle: PS3");
+  assertEquals(
+    buildPrompt("event", {
+      ...EVENT_ITEM,
+      organizer: "Career Center",
+      location: "Union ballroom",
+      categories: ["career", "networking"],
+      audiences: ["Undergraduate Students"],
+      description: "Bring a resume.",
+    }, { interests: "internships" }).user,
+    [
+      "Title: Career fair",
+      "When: 2026-10-05T10:00 to 2026-10-05T14:00",
+      "Source: department-calendar",
+      "Organizer: Career Center",
+      "Location: Union ballroom",
+      "Categories: career, networking",
+      "Audiences: Undergraduate Students",
+      "Description:",
+      "Bring a resume.",
+      "The student's stated interests:",
+      "internships",
+    ].join("\n"),
+  );
+  assertEquals(
+    buildPrompt("email", EMAIL_ITEM, { known_courses: ["math-221", "chem-101"] }).user,
+    [
+      "Subject: Quiz 2 moved",
+      "From: Course Notices <notices@lms.example.invalid>",
+      "Date: Thu, 01 Oct 2026 09:00:00 -0500",
+      "Known course slugs: math-221, chem-101",
+      "Message:",
+      "Quiz 2 moves to Friday.",
+    ].join("\n"),
+  );
 });
