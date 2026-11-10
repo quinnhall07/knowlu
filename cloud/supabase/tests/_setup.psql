@@ -18,7 +18,7 @@ alter default privileges in schema tests grant execute on functions to anon, aut
 -- D3's matrix, filled by `_matrix.psql`: one row per relation in `public` and `admin`. The checks
 -- make a malformed row fail the whole file loud, never silently skip a probe.
 create table tests.matrix (
-  rel              text primary key check (rel ~ '^(public|admin)\.[a-z_]+$'),
+  rel              text primary key check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
   kind             text not null check (kind in ('table', 'view')),
   access           text not null check (access in ('own', 'service', 'invoker_view', 'closed_view')),
   key_col          text,
@@ -36,7 +36,7 @@ create table tests.matrix (
 -- `schema.name`. No identity or generated column: `_matrix.psql` fills it with
 -- `insert ... select * from tests.rpc_allowlist`, which cannot write one.
 create table tests.rpc_allowlist (
-  fn text primary key check (fn ~ '^(public|admin)\.[a-z_]+$')
+  fn text primary key check (fn ~ '^(public|admin)\.[a-z_][a-z0-9_]*$')
 );
 
 -- Impersonation, as PostgREST does it (D5): the claims go in `request.jwt.claims`, then
