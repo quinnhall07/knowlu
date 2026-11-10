@@ -738,6 +738,30 @@ models, in the style of `run_eval_test.ts`. Behaviours:
 | Review r1 M5 | No exception or adapter text in CI output | T5a, T5b | T5a's error-message test |
 | (plan) | Prompt hashes and existing tests unchanged by the policy | T2b | `judge_prompts_test.ts`, `judge_prompts_mail_test.ts` and the other named tests green unedited |
 
+### 4.3.1 Amendments from T1a's review (controller rulings, 2026-11-09)
+
+These bind T1b, T2b and every later test of the policy, and win over any wording above.
+- **Only the final label decides.** Extension-list and TLD-list tests apply to a token's final label
+  only; `report.pdf.example.com` and `lab3.py.example` are hosts.
+- **A-labels.** A final label of `xn--` followed by one or more of `[a-z0-9-]` counts as a TLD-shaped
+  label in the oracle (alongside the `\p{L}` rule).
+- **Port then path.** On an extension-list final label, `:` and digits are a file-and-line reference
+  only when the digits are not followed by a URL tail (`/`, or `?`/`#` before a non-space).
+  `example.zip:8080/x` is a host; `main.rs:42` is not.
+- **Matching form.** NFKC, then remove every `Default_Ignorable_Code_Point` (`\p{DI}`), then map
+  U+3002, U+FF0E and U+FF61 to `.`, then `toLowerCase()` (JavaScript's simple lowercase, named so the
+  oracle and the enforcement cannot differ).
+- **Scrub tokens.** Only the six exact tokens, `<` + word + `>`, are exempt, and each is removed
+  leaving nothing behind (so `<<url>b>` reads `<b>` and is flagged). Near misses (`<note x=y>`,
+  `<url/>`, `<urls>`) are markup.
+- **Line rule and tab.** Output carries no C0 control, tab included; R11's tab allowance is about
+  folding input, not output.
+- **Order and `plantedIn`.** `policyBreaches` returns classes in the order line, url, markup;
+  `plantedIn` normalises both sides and returns the planted strings as given, in planted order.
+- **Example hosts on TLDs with no reserved name (amends §1 and §5).** Where a TLD has no reserved
+  name (`ai md pl py rs sh`), the oracle's tests use `example.<label>`; these are never fetched and
+  never appear in a fixture. Every host in a test uses the `example` label.
+
 ## 9. Records (T0 fills)
 
 - Execution branch and base SHA: `security/output-policy` (worktree `knowlu-policy`), base `c61c7cec`.
