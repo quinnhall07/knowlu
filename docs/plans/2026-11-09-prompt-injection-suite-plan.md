@@ -779,6 +779,18 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
     `socket.io`, `os.path` in the oracle's open-ended rule), run-together typos (`Friday.Bring`),
     `lab1.py/lab2.py`. Honest-twin fixtures (T7) and T2b's must-not-flag rows avoid them; a title
     refused for one costs one card's title.
+- **T2b review rulings (controller, 2026-11-09).** Oracle and enforcement both follow these:
+  - A bidi embedding, override or isolate control (U+202A to U+202E, U+2066 to U+2069) anywhere in
+    the original value is a `markup` breach: it can make a host display other than it reads.
+  - Before the TLD lookup, the final label is put through NFD, combining marks are stripped, and a
+    small map turns Cyrillic and Greek look-alikes of Latin letters into those letters; a label that
+    then names a listed TLD is a host (`example.cоm`, `example.οrg`, `example.cóm`).
+  - The division slash U+2215 and fraction slash U+2044 count as slashes.
+  - A free-text value longer than four times its bound is refused before any scan.
+  - Accepted residual: bare hosts on extension-list TLDs (`examplebank.ai`), `example.zip:8080` with no
+    path, file names whose extension is a TLD missing from the extension list (`main.cc`), and
+    `[10:30:45]` or `HTTP: the protocol` refused as honest text. A model-written literal
+    `[link removed](` is neutralised, not refused: the console escapes every field.
 - **Example hosts on TLDs with no reserved name (amends §1 and §5).** Where a TLD has no reserved
   name (`ai md pl py rs sh`), the oracle's tests use `example.<label>`; these are never fetched and
   never appear in a fixture. Every host in a test uses the `example` label.
