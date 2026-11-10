@@ -505,4 +505,33 @@ fn the_rls_job_is_shaped_to_be_required_runs_hosted_linux_and_holds_no_secret() 
         assert!(job[..i].ends_with("bash "), "a scripts/ci/ call is `bash scripts/ci/...`, never a bare path: {}", job[i..].lines().next().unwrap_or(""));
     }
     assert!(!job.contains(r"scripts\ci"), "cloud-rls is bash on Linux: no Windows paths");
+    // T4 (D2): every image is pinned by digest. `baseline` saves the runner's own images, `pull`
+    // fetches the locked digests before the CLI could pull anything, and `verify` (not `list`)
+    // fails the job when an image new since the baseline is not locked, even after a red suite.
+    let at = |needle: &str| -> usize {
+        let hits: Vec<usize> = code.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect();
+        assert_eq!(hits.len(), 1, "cloud-rls runs `{needle}` exactly once: {hits:?}");
+        hits[0]
+    };
+    let order = [
+        at("bash scripts/ci/supabase-images.sh baseline"),
+        at("bash scripts/ci/supabase-images.sh pull"),
+        at("supabase --workdir cloud db start"),
+        at("supabase --workdir cloud test db"),
+        at("bash scripts/ci/supabase-images.sh verify"),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "cloud-rls order is baseline, pull, db start, test db, verify: {order:?}");
+    assert!(!job.contains("supabase-images.sh list"), "`verify` replaces `list`: it diffs and fails, `list` only prints");
+    let verify = steps.iter().find(|s| s.contains("supabase-images.sh verify")).expect("a verify step");
+    assert_eq!(ifs(verify), ["always() && needs.changes.outputs.code != 'false'"], "verify runs even after a red suite: {verify}");
+    let lock = std::fs::read_to_string(root().join("cloud/supabase/tests/images.lock")).expect("cloud/supabase/tests/images.lock");
+    let pin = regex::Regex::new(r"^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$").unwrap();
+    let pins: Vec<&str> = lock.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).collect();
+    assert!(!pins.is_empty(), "images.lock names no image");
+    for l in &pins {
+        assert!(pin.is_match(l), "images.lock: every line is repo:tag@sha256:<digest>, got `{l}`");
+    }
+    for repo in ["supabase/postgres:", "supabase/pg_prove:"] {
+        assert!(pins.iter().any(|l| l.contains(repo)), "images.lock pins the {repo} image the suite needs");
+    }
 }

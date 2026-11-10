@@ -307,10 +307,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         if: needs.changes.outputs.code != 'false'
         with: { persist-credentials: false }
-      # The hosted image ships images of its own; the baseline lets `list` name only the new ones.
+      # The hosted image ships images of its own; the baseline lets `verify` judge only the new ones.
       - name: images already on the runner
         if: needs.changes.outputs.code != 'false'
         run: bash scripts/ci/supabase-images.sh baseline
+      # Every image the CLI runs, pulled by the digest in cloud/supabase/tests/images.lock and tagged
+      # as the CLI names it, so `db start` and `test db` find them locally and pull nothing.
+      - name: the database images, pulled by digest
+        if: needs.changes.outputs.code != 'false'
+        run: bash scripts/ci/supabase-images.sh pull
       - name: the supabase CLI, checked before it runs
         if: needs.changes.outputs.code != 'false'
         run: |
@@ -327,6 +332,8 @@ jobs:
       - name: pgTAP
         if: needs.changes.outputs.code != 'false'
         run: supabase --workdir cloud test db
-      - name: images used
+      # Fails when an image new since the baseline is not in images.lock, or a locked tag points at
+      # another digest: a CLI bump that changes an image needs images.lock in the same diff.
+      - name: nothing ran that is not locked
         if: always() && needs.changes.outputs.code != 'false'
-        run: bash scripts/ci/supabase-images.sh list
+        run: bash scripts/ci/supabase-images.sh verify

@@ -1,0 +1,11 @@
+# Every container image the `cloud-rls` job's supabase CLI runs (`db start`, `test db`), pinned by
+# digest (docs/plans/2026-11-09-rls-pgtap-plan.md, D2). One `repo:tag@sha256:<digest>` per line;
+# lines starting with `#` and blank lines are ignored. `bash scripts/ci/supabase-images.sh pull`
+# pulls these before the CLI runs, and `... verify` fails the job when any other image ran.
+# To refresh after a CLI bump: the first run's `verify` names each new image with its digest (as
+# `list` would); put exactly those lines here, in the same diff as the new SUPABASE_CLI_VERSION.
+public.ecr.aws/supabase/gotrue:v2.197.0@sha256:1736a63078f5922b198c4cbe50f80ab9a2d3b54fe8b7b6cfb2e9dc5dbbc12c6b
+public.ecr.aws/supabase/pg_prove:3.36@sha256:eda7c5e68719e9c8287e78c017118407b48df904a51c935f5ab6098b8c0bc6bc
+public.ecr.aws/supabase/postgres:17.11.0.018@sha256:7c31363a3f7434ff14945f1b8a4880e6eca8b362e197e88b87c476c77aa3cf8c
+public.ecr.aws/supabase/realtime:v2.154.0@sha256:c56af0fbfd06362a1d3bea30a6419cc616240852d2a50cb4c2f41aeef5ee7b00
+public.ecr.aws/supabase/storage-api:v1.90.1@sha256:b2a04ca607b6cfdeafc47f5fa8cc22fc386d40cc25e7f11bbfda65954f3ae949

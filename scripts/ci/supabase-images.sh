@@ -5,13 +5,15 @@
 #
 #   baseline  save the images already on the runner, before the CLI pulls anything
 #   list      print every image that is new since the baseline
-#   pull      pull each image in cloud/supabase/tests/images.lock by digest and tag it, so the CLI
-#             finds it locally and pulls nothing (T4 wires this in)
-#   verify    fail when an image new since the baseline is not in the lock, or a locked tag points
-#             at another digest (T4 wires this in)
+#   pull      pull each image in cloud/supabase/tests/images.lock by digest and tag it as the CLI
+#             names it (a digest pull keeps no tag), so the CLI finds it locally and pulls nothing
+#   verify    fail when an image new since the baseline is not in the lock, or a locked tag is
+#             missing or points at another digest. A locked image that nothing ran is not a failure:
+#             `pull` makes every one of them new, so use cannot be told apart from the pull (D2).
 #
-# One image per line, `repo:tag@sha256:<digest>`, the shape the lock uses. Names and digests only:
-# nothing here prints a credential.
+# One image per line, `repo:tag@sha256:<digest>`, the shape the lock uses; in the lock, lines that
+# start with `#` and blank lines are skipped. Names and digests only: nothing here prints a credential.
+# Every docker call inside a `while read` loop reads /dev/null, so none can eat the loop's input.
 set -euo pipefail
 
 lock="cloud/supabase/tests/images.lock"
@@ -73,8 +75,9 @@ case "${1:-}" in
     lines="$(locked)"
     while IFS= read -r line; do
       split_ref "$line"
-      docker pull --quiet "$repo@$digest"
-      docker tag "$repo@$digest" "$repo:$tag"
+      docker pull --quiet "$repo@$digest" < /dev/null
+      docker tag "$repo@$digest" "$repo:$tag" < /dev/null
+      echo "supabase-images: $repo:$tag is $digest"
     done <<< "$lines"
     ;;
   verify)
@@ -101,8 +104,10 @@ case "${1:-}" in
     done <<< "$new"
     while IFS= read -r line; do
       split_ref "$line"
-      if ! docker image inspect --format '{{join .RepoDigests "\n"}}' "$repo:$tag" | grep -qxF "$repo@$digest"; then
-        echo "supabase-images: $repo:$tag is not the locked $digest" >&2
+      # Captured, not piped: under pipefail, `grep -q` quitting early could fail docker with SIGPIPE.
+      held="$(docker image inspect --format '{{join .RepoDigests "\n"}}' "$repo:$tag" < /dev/null 2> /dev/null || true)"
+      if ! grep -qxF "$repo@$digest" <<< "$held"; then
+        echo "supabase-images: $repo:$tag is missing or is not the locked $digest" >&2
         bad=1
       fi
     done <<< "$lines"
