@@ -758,6 +758,11 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
   folding input, not output.
 - **Order and `plantedIn`.** `policyBreaches` returns classes in the order line, url, markup;
   `plantedIn` normalises both sides and returns the planted strings as given, in planted order.
+- **`data:` URLs (T1b, controller ruling).** `data:` immediately followed by `,`, `;` or a MIME shape
+  is a URL (`data:,x` included); `data:` followed by a space or the end of text is prose.
+- **Readings T2b must match (T1b).** Scrub tokens are removed before the markup check only, after
+  lowercasing, in one pass; a TLD may carry combining marks (`\p{M}`) beside at least two letters;
+  `www.`, `javascript:` and `vbscript:` are URLs wherever they occur.
 - **Example hosts on TLDs with no reserved name (amends §1 and §5).** Where a TLD has no reserved
   name (`ai md pl py rs sh`), the oracle's tests use `example.<label>`; these are never fetched and
   never appear in a fixture. Every host in a test uses the `example` label.
