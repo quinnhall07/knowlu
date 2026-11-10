@@ -29,16 +29,90 @@ async function everyMigrationFile(): Promise<Array<[string, string]>> {
   return out;
 }
 
-/** Strips every `--` line comment, as `migrations/migrations_test.ts` does, so a commented-out
- * statement is neither counted nor parsed. Line-based: it never removes a newline. */
-function stripLineComments(sql: string): string {
-  return sql
-    .split("\n")
-    .map((line) => {
-      const at = line.indexOf("--");
-      return at === -1 ? line : line.slice(0, at);
-    })
-    .join("\n");
+/** SQL text with every comment blanked, and the ranges of its literals. */
+interface Lexed {
+  code: string;
+  literals: Array<[number, number]>;
+}
+
+const DOLLAR_TAG = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/y;
+const PLAIN_IDENT = /^[a-z_][a-z0-9_]*$/;
+
+/**
+ * One pass over `sql`. It blanks `--` line comments and `/* … *\/` block comments, nested as Postgres
+ * nests them, so a commented-out statement is neither counted nor parsed (a `/* down: drop table x; *\/`
+ * must never drop `x`). Blanking keeps every newline and offset, so line numbers survive. It records
+ * the range of each top-level single-quoted string and dollar-quoted (`$tag$ … $tag$`) body. The text
+ * inside a body is still lexed, so a plpgsql comment there is blanked too. It fails loud on:
+ * - an unterminated comment, string or body;
+ * - a `*\/` with no `/*` before it;
+ * - a quoted identifier with an uppercase or non-word character (the parser reads names unquoted and
+ *   lowercased, so `"Foo"` or `"a b"` would be read as some other name).
+ */
+function lex(file: string, sql: string): Lexed {
+  const out = sql.split("");
+  const literals: Array<[number, number]> = [];
+  const dollars: Array<{ tag: string; at: number }> = [];
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  let i = 0;
+  while (i < sql.length) {
+    if (sql.startsWith("--", i)) {
+      const nl = sql.indexOf("\n", i);
+      const stop = nl === -1 ? sql.length : nl;
+      blank(i, stop);
+      i = stop;
+    } else if (sql.startsWith("/*", i)) {
+      let depth = 0;
+      let j = i;
+      while (j < sql.length) {
+        if (sql.startsWith("/*", j)) {
+          depth += 1;
+          j += 2;
+        } else if (sql.startsWith("*/", j)) {
+          depth -= 1;
+          j += 2;
+          if (depth === 0) break;
+        } else j += 1;
+      }
+      assert(depth === 0, `${file}: a /* block comment is never closed`);
+      blank(i, j);
+      i = j;
+    } else if (sql.startsWith("*/", i)) {
+      throw new Error(`${file}: a */ with no /* before it`);
+    } else if (sql[i] === "'") {
+      let j = i + 1;
+      while (j < sql.length && !(sql[j] === "'" && sql[j + 1] !== "'")) j += sql[j] === "'" ? 2 : 1;
+      assert(j < sql.length, `${file}: a string is never closed`);
+      if (dollars.length === 0) literals.push([i, j + 1]);
+      i = j + 1;
+    } else if (sql[i] === '"') {
+      const j = sql.indexOf('"', i + 1);
+      assert(j !== -1, `${file}: a quoted identifier is never closed`);
+      assert(
+        PLAIN_IDENT.test(sql.slice(i + 1, j)),
+        `${file}: a quoted identifier with an uppercase or non-word character; this twin reads names ` +
+          `unquoted and lowercased, so it would read another name`,
+      );
+      i = j + 1;
+    } else {
+      DOLLAR_TAG.lastIndex = i;
+      const m = sql[i] === "$" ? DOLLAR_TAG.exec(sql) : null;
+      if (!m) {
+        i += 1;
+        continue;
+      }
+      const top = dollars[dollars.length - 1];
+      if (top && top.tag === m[0]) {
+        dollars.pop();
+        if (dollars.length === 0) literals.push([top.at, i + m[0].length]);
+      } else dollars.push({ tag: m[0], at: i });
+      i += m[0].length;
+    }
+  }
+  assert(dollars.length === 0, `${file}: a ${dollars[0]?.tag} body is never closed`);
+  return { code: out.join(""), literals };
 }
 
 /** A relation name: unqualified (the C2 files' spelling; `search_path` puts it in `public`) or
@@ -108,6 +182,10 @@ const SHAPES: Record<Shape, { loose: RegExp; strict: RegExp }> = {
 const UNFOLLOWED =
   /\balter\s+(?:table|view|materialized\s+view|policy)\b[^;]*?\b(?:rename\s+to|set\s+schema)\b/gi;
 
+/** A drop inside a literal: a `do $$ … $$` block runs at migration time, a function body does not, and
+ * the text alone cannot tell them apart, so any occurrence fails loud. */
+const DROP_ANY = /\bdrop\s+(?:materialized\s+)?(?:table|view|policy)\b/gi;
+
 function qualified(schema: string | undefined, name: string): string {
   return `${(schema ?? "public").toLowerCase()}.${name.toLowerCase()}`;
 }
@@ -116,15 +194,23 @@ function qualified(schema: string | undefined, name: string): string {
  * The relations `files` (sorted, earliest first) leave, with the policies on each live table and every
  * `create schema` name. Statements apply in file order and, within a file, in text order: a
  * `drop table` removes the table and its policies; a later `create table` brings the name back with
- * none; a `create policy` must name a table that is live at that point. Every file passes the
- * parse-count check for every shape, and holds no rename or schema move.
+ * none; a `create policy` must name a table that is live at that point. Every file lexes cleanly
+ * (`lex`), passes the parse-count check for every shape, and holds no rename, no schema move and no
+ * drop inside a string or a dollar-quoted body.
  */
 export function liveRelations(files: Array<[string, string]>): Live {
   const relations = new Map<string, Kind>();
   const policies = new Map<string, Set<string>>();
   const schemas: string[] = [];
   for (const [file, raw] of files) {
-    const sql = stripLineComments(raw);
+    const { code: sql, literals } = lex(file, raw);
+    for (const d of sql.matchAll(DROP_ANY)) {
+      const at = d.index ?? -1;
+      assert(
+        !literals.some(([from, to]) => at >= from && at < to),
+        `${file}: a drop inside a string or a dollar-quoted body; this twin cannot tell whether it runs`,
+      );
+    }
     const unfollowed = sql.match(UNFOLLOWED) ?? [];
     assert(
       unfollowed.length === 0,
@@ -202,48 +288,90 @@ export interface Row {
   viewInsertCode: string | null;
 }
 
+/** D3's columns, in order: the matrix insert's column list must be exactly this. */
+const MATRIX_COLUMNS = [
+  "rel",
+  "kind",
+  "access",
+  "key_col",
+  "touch_col",
+  "grants",
+  "policies",
+  "view_insert_code",
+];
+const MATRIX_INSERT = /\binsert\s+into\s+tests\s*\.\s*matrix\b/gi;
+const MATRIX_HEAD = /\binsert\s+into\s+tests\s*\.\s*matrix\s*\(([^)]*)\)\s*values\b/gi;
+
 /**
- * One matrix row, the whole line: two spaces, then the eight D3 columns in order, then `,` or `;`.
- * Spaces after a comma may pad a column; a trailing `--` comment is stripped first. The shape (the
- * values are the matrix's to state):
+ * The matrix is one statement, and only its rows are read. The `values` keyword ends its line, and
+ * each row is a whole line of its own: leading whitespace, then the eight D3 columns in order, then
+ * `,` (or `;` on the last row). Spaces after a comma may pad a column, and a trailing `--` comment is
+ * blanked first. The shape (the values are the matrix's to state):
  *
- *   ('public.accounts', 'table', 'own', 'id', 'tos_version', 'default', '{accounts_select_own}', null),
- *   ('admin.testers', 'view', 'closed_view', null, null, 'revoked', '{}', '42501');
+ *   insert into tests.matrix (rel, kind, access, key_col, touch_col, grants, policies, view_insert_code) values
+ *     ('public.accounts', 'table', 'own', 'id', 'tos_version', 'default', '{accounts_select_own}', null),
+ *     ('admin.testers', 'view', 'closed_view', null, null, 'revoked', '{}', '42501');
  *
- * `rel` is schema-qualified (`public` or `admin`); `policies` is a text-array literal, `'{}'` for
- * none; `view_insert_code` is one of the SQLSTATEs the V3 probe catches, or `null`.
+ * `rel` is schema-qualified (`public` or `admin`). `policies` is a text-array literal, `'{}'` for
+ * none. `view_insert_code` is one of the SQLSTATEs the V3 probe catches, or `null`. Rows in any other
+ * statement (a future `tests.rpc_allowlist` row) are not this parser's.
  */
 const ROW = new RegExp(
-  String.raw`^  \('((?:public|admin)\.[a-z_][a-z0-9_]*)',\s*'(table|view)',\s*` +
+  String.raw`^\s+\('((?:public|admin)\.[a-z_][a-z0-9_]*)',\s*'(table|view)',\s*` +
     String.raw`'(own|service|invoker_view|closed_view)',\s*(null|'[a-z_][a-z0-9_]*'),\s*` +
     String.raw`(null|'[a-z_][a-z0-9_]*'),\s*'(default|revoked)',\s*` +
     String.raw`'\{((?:[a-z_][a-z0-9_]*)(?:,[a-z_][a-z0-9_]*)*)?\}',\s*` +
     String.raw`(null|'(?:42501|55000|0A000)')\)\s*[,;]\s*$`,
 );
-/** Every line that is meant to be a row: it begins `  ('`. */
-const ROW_START = /^ {2}\('/;
+/** Every line inside the matrix insert that is meant to be a row: whitespace, then `(`. */
+const ROW_START = /^\s+\(/;
 
 function unquote(v: string): string | null {
   return v === "null" ? null : v.slice(1, -1);
 }
 
-/** The rows of `_matrix.psql`'s text. The count check: every line that begins `  ('` must be read
- * by the strict `ROW` regex, and the failure names each line that was not. */
+/**
+ * The rows of `_matrix.psql`'s text, read from its one `insert into tests.matrix (…) values … ;`
+ * statement, whose column list must be D3's. The count check: every line inside the statement that
+ * begins with whitespace and `(` must be read by the strict `ROW` regex; any other non-blank text
+ * there is unreadable too; the failure names each such line.
+ */
 export function parseMatrix(text: string): Row[] {
-  const lines = stripLineComments(text).split("\n");
+  const code = lex("_matrix.psql", text).code;
+  const inserts = [...code.matchAll(MATRIX_INSERT)].length;
+  const heads = [...code.matchAll(MATRIX_HEAD)];
+  assert(
+    inserts === 1 && heads.length === 1,
+    `_matrix.psql: ${inserts} 'insert into tests.matrix' statement(s), ${heads.length} of them with a ` +
+      `column list and 'values'; there must be exactly one, with both`,
+  );
+  const head = heads[0];
+  assertEquals(
+    head[1].split(",").map((c) => c.trim().toLowerCase()),
+    MATRIX_COLUMNS,
+    "_matrix.psql: the matrix insert's column list must be D3's, in order",
+  );
+  const bodyStart = (head.index ?? 0) + head[0].length;
+  const semi = code.indexOf(";", bodyStart);
+  assert(semi !== -1, "_matrix.psql: the matrix insert has no terminating ';'");
+  const firstLine = code.slice(0, bodyStart).split("\n").length;
   const rows: Row[] = [];
   const unread: number[] = [];
   let started = 0;
-  lines.forEach((line, i) => {
-    if (!ROW_START.test(line)) return;
+  code.slice(bodyStart, semi + 1).split("\n").forEach((line, k) => {
+    const lineNo = firstLine + k;
+    if (k === 0 || !ROW_START.test(line)) {
+      if (line.trim() !== "") unread.push(lineNo);
+      return;
+    }
     started += 1;
     const m = line.match(ROW);
     if (!m) {
-      unread.push(i + 1);
+      unread.push(lineNo);
       return;
     }
     rows.push({
-      line: i + 1,
+      line: lineNo,
       rel: m[1],
       kind: m[2] as Kind,
       access: m[3] as Access,
@@ -255,9 +383,9 @@ export function parseMatrix(text: string): Row[] {
     });
   });
   assert(
-    rows.length === started,
-    `_matrix.psql: ${started} line(s) begin "  ('" but the strict row regex read ${rows.length}; ` +
-      `unreadable line(s): ${unread.join(", ")}`,
+    rows.length === started && unread.length === 0,
+    `_matrix.psql: ${started} row line(s) in the matrix insert, ${rows.length} read by the strict row ` +
+      `regex; unreadable line(s): ${unread.join(", ")}`,
   );
   return rows;
 }
@@ -402,9 +530,62 @@ Deno.test("a spelling the strict parser misses fails the parse-count check loud"
       "strict parser",
     );
   }
-  assertThrows(() => liveRelations([["a.sql", "alter table x rename to y;"]]), Error, "rename");
+  for (
+    const sql of [
+      "alter table x rename to y;",
+      "alter view v rename to w;",
+      "alter policy p on x rename to q;",
+      "alter table x set schema admin;",
+    ]
+  ) {
+    assertThrows(() => liveRelations([["a.sql", sql]]), Error, "rename or schema move", sql);
+  }
   // A commented-out statement is neither counted nor parsed.
   assertEquals(liveRelations([["a.sql", "-- create table ghost (id uuid);\n"]]).relations.size, 0);
+});
+
+Deno.test("a block comment hides its statements, nested as Postgres nests them", () => {
+  const live = liveRelations([[
+    "a.sql",
+    "create table grade_cache (id uuid);\n/* down: drop table grade_cache; */\n" +
+    "/* outer /* inner */ drop table grade_cache; */\n/* -- a dash pair inside */ create table y (id uuid);\n",
+  ]]);
+  assertEquals([...live.relations].sort(), [["public.grade_cache", "table"], ["public.y", "table"]]);
+  assertThrows(
+    () => liveRelations([["a.sql", "/* never closed\ncreate table x (id uuid);"]]),
+    Error,
+    "never closed",
+  );
+  assertThrows(() => liveRelations([["a.sql", "/* a /* b */ c */ d */"]]), Error, "no /* before it");
+});
+
+Deno.test("a drop inside a string or a dollar-quoted body fails loud", () => {
+  for (
+    const sql of [
+      "create table x (id uuid);\ndo $$ begin drop table x; end $$;",
+      "create table x (id uuid);\ncreate function f() returns void as $fn$ drop view v; $fn$ language sql;",
+      "create table x (id uuid);\ncomment on table x is 'drop policy p on x;';",
+    ]
+  ) {
+    assertThrows(() => liveRelations([["a.sql", sql]]), Error, "drop inside a string", sql);
+  }
+});
+
+Deno.test("a quoted identifier with an uppercase or non-word character fails loud", () => {
+  assertEquals([...liveRelations([["a.sql", 'create table "public"."x" (id uuid);']]).relations.keys()], [
+    "public.x",
+  ]);
+  for (const sql of ['create table "Grades" (id uuid);', 'create view "grade cache" as select 1;']) {
+    assertThrows(() => liveRelations([["a.sql", sql]]), Error, "quoted identifier", sql);
+  }
+});
+
+Deno.test("a dropped view is gone", () => {
+  const live = liveRelations([[
+    "a.sql",
+    "create view v as select 1;\ncreate or replace view admin.w as select 1;\ndrop view if exists v;\n",
+  ]]);
+  assertEquals([...live.relations], [["admin.w", "view"]]);
 });
 
 Deno.test("a policy on a table that is not live is caught", () => {
@@ -415,22 +596,47 @@ Deno.test("a policy on a table that is not live is caught", () => {
   );
 });
 
+const COLUMNS = "(rel, kind, access, key_col, touch_col, grants, policies, view_insert_code)";
+
+/** A matrix statement around `rows`: the last row's trailing `,` becomes the closing `;`. */
+function matrix(...rows: string[]): string {
+  const body = rows.join("\n").replace(/,(\s*(?:--[^\n]*)?)$/, ";$1");
+  return `insert into tests.matrix ${COLUMNS} values\n${body}\n`;
+}
+
 Deno.test("a malformed matrix row trips the count check, naming its line", () => {
   const good = "  ('public.x', 'table', 'service', 'account_id', 'note', 'default', '{}', null),";
-  assertEquals(parseMatrix(`insert into tests.matrix values\n${good}\n`).length, 1);
+  assertEquals(parseMatrix(matrix(good, good.replace("public.x", "public.y"))).length, 2);
   for (
     const bad of [
       "  ('public.x', 'table', 'owner', 'account_id', 'note', 'default', '{}', null),", // unknown access
       "  ('x', 'table', 'service', 'account_id', 'note', 'default', '{}', null),", // unqualified rel
       "  ('public.x', 'table', 'service', 'account_id', 'note', 'default', '{}'),", // a column short
+      "public.x, table", // not a row at all, inside the statement
     ]
   ) {
-    assertThrows(
-      () => parseMatrix(`insert into tests.matrix values\n${good}\n${bad}\n`),
-      Error,
-      "line(s): 3",
-    );
+    assertThrows(() => parseMatrix(matrix(good, bad, good)), Error, "line(s): 3", bad);
   }
+  // A row on the `values` line is unreadable too.
+  assertThrows(
+    () => parseMatrix(`insert into tests.matrix ${COLUMNS} values ${good.trim().replace(/,$/, ";")}\n`),
+    Error,
+    "line(s): 1",
+  );
+});
+
+Deno.test("only the matrix insert's rows are read, at any indentation, under D3's column list", () => {
+  const row = "\t    ('public.x', 'table', 'service', 'account_id', 'note', 'default', '{}', null),";
+  const elsewhere = "insert into tests.rpc_allowlist (fn) values\n  ('public.f');\n";
+  assertEquals(parseMatrix(`${matrix(row)}${elsewhere}`).map((r) => r.rel), ["public.x"]);
+  const swapped = COLUMNS.replace("key_col, touch_col", "touch_col, key_col");
+  assertThrows(
+    () => parseMatrix(`insert into tests.matrix ${swapped} values\n${row.replace(/,$/, ";")}\n`),
+    Error,
+    "column list must be D3's",
+  );
+  assertThrows(() => parseMatrix(elsewhere), Error, "exactly one");
+  assertThrows(() => parseMatrix(matrix(row) + matrix(row)), Error, "exactly one");
 });
 
 Deno.test("each stray is named: an unlisted relation, a row with no relation, a misstated policy", () => {
@@ -438,10 +644,10 @@ Deno.test("each stray is named: an unlisted relation, a row with no relation, a 
     "a.sql",
     "create table x (id uuid);\ncreate table y (id uuid);\ncreate policy y_own on y\n",
   ]]);
-  const rows = parseMatrix([
+  const rows = parseMatrix(matrix(
     "  ('public.y', 'table', 'service', 'id', 'note', 'default', '{y_own}', null),",
-    "  ('public.z', 'view', 'closed_view', null, null, 'revoked', '{}', '55000');",
-  ].join("\n"));
+    "  ('public.z', 'view', 'closed_view', null, null, 'revoked', '{}', '55000'),",
+  ));
   assertEquals(coverageProblems(live, rows), [
     "public.x: a live table with no matrix row",
     "public.z: a matrix row with no live relation",
@@ -452,5 +658,20 @@ Deno.test("each stray is named: an unlisted relation, a row with no relation, a 
   ]);
   assertEquals(schemaProblems(liveRelations([["a.sql", "create schema if not exists other;"]])), [
     "create schema other: only admin is allowed",
+  ]);
+});
+
+Deno.test("the row-shape checks fire: kind against access, view_insert_code, an own row with no policy", () => {
+  const live = liveRelations([["a.sql", "create table t (id uuid);\ncreate view v as select 1;\n"]]);
+  const rows = parseMatrix(matrix(
+    "  ('public.t', 'table', 'own', 'id', 'note', 'default', '{t_own}', '55000'),",
+    "  ('public.v', 'view', 'service', null, null, 'revoked', '{}', null),",
+  ));
+  assertEquals(policyProblems(live, rows), [
+    "public.t: view_insert_code is for view rows, and every view row needs one",
+    "public.t: an own row, but no live policy names the table",
+    "public.t: live policies {}, the row lists {t_own}",
+    "public.v: a view row with access service",
+    "public.v: view_insert_code is for view rows, and every view row needs one",
   ]);
 });
