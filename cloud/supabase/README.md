@@ -152,3 +152,31 @@ Every `index.ts` is a thin wire: it reads the environment, builds a `Deps` objec
 `handler.ts` is pure over that `Deps`, so the tests need no Docker, no Supabase runtime and no network. **No
 test here makes an outbound request** — the one thing `deno test` fetches is the assertion library, once, into
 Deno's own cache.
+
+### The row-level security suite (`cloud/supabase/tests/`)
+
+A pgTAP suite proves what the migrations leave in `public` and `admin`: every relation is in a matrix, row-level
+security and policies are what the matrix says, `anon` reads and writes nothing, a signed-in student reads only
+their own rows and changes none of another's, the service-only tables refuse a client, and the client-callable
+functions, the platform schemas (`storage`, `realtime`) and the views behave as designed. It runs in the `cloud-rls`
+job of `ci.yml` against a local database built from the migrations. With Docker, a developer runs it with two
+commands from the repository root:
+
+```powershell
+supabase --workdir cloud db start
+supabase --workdir cloud test db
+```
+
+- **A new table or view** needs a row in `tests/_matrix.psql` and a case in `tests/_setup.psql`'s `tests.insert_sql`
+  (`tests.slot_where` too, for a global table). `_fixtures.psql` loops over the matrix, so it needs no edit.
+  Coverage fails by name until both exist.
+- **A new trigger** on a table 02 or 03 probes must be in the set `tests.unmask_triggers` finds (an AFTER row trigger
+  on insert or update, which those files switch off for their write probes) or in `tests.stamp_only`; otherwise
+  coverage check C9 fails. `tests.stamp_only` pins the body of `public.sync_notes_stamp_rev()` by `md5`, so changing
+  that function means re-pinning in the same commit. That failure is deliberate.
+- **A new check** needs its own planted fault in `09_self_test_test.sql` first: 09 shows every check failing
+  against its fault, so a test that can never fail cannot be added green.
+- **A CLI bump** updates `SUPABASE_CLI_VERSION`, `SUPABASE_CLI_SHA256` (both in the `cloud-rls` job) and
+  `tests/images.lock` in one commit. The first run's `verify` step names each new image and its digest.
+- Fixtures are random UUIDs and `@example.invalid` addresses; nothing real is used. The suite runs against a
+  database of its own, never staging or production.

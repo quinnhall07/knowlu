@@ -1063,6 +1063,41 @@ Files: `cloud/supabase/tests/05_functions_test.sql`, `06_platform_test.sql` (new
   folded in. §13 maps each to where it is answered.
 - **r1 to r2 (plan review r2, 2026-11-09, PASS with notes).** Ten notes, all folded in; §13.1 maps them.
   The `probe_keep` savepoint mechanism of r1 is replaced by the single-call `tests.probe_write`.
+- **Built suite, 2026-11-10 (deviations and residuals, as at `c94be2da`).**
+  - **`sync_usage_bump`:** the invoker usage triggers on `sync_records` and `sync_notes` mask a real
+    insert or update hole with their own -2. 02 and 03 run insert, upsert and update probes with them off,
+    through `tests.unmasked` (`_setup.psql`); 09 proves it for `anon` and `authenticated` on both tables.
+    Delete probes keep them on.
+  - **Slot placement (T6a M2):** C7 proves each slot's insert lands one row, not that it lands in the
+    slot a probe later targets. The owner re-reads in 03 and 04 show that per case.
+  - **F3's call forms:** F3 runs through `tests.call_outcome` and counts a denial only when the error
+    names a function; 09 proves both forms with `tests.f3_calls()`' own text. A nested "permission denied
+    for function" inside a definer's body would also read as denied (accepted; no such definer today). A
+    future SECURITY DEFINER procedure would re-raise ("for procedure"), so the run stops loudly.
+  - **Shared helpers (T9b):** `tests.unmask_triggers`/`tests.unmasked`, `tests.stamp_only`,
+    `tests.pk_where`, `tests.f3_calls`, `tests.p4_client_policies` and `tests.p5_rls_on` were added to
+    `_setup.psql` after review. This deviates from D5's list.
+  - **Global tables in 04:** targeted by an owner-resolved primary-key literal (`tests.pk_where`).
+    `rule_evidence`'s slot filter reads `rules` and `judgments`, which a student cannot see, so it
+    would have made S1 by key, S3 and S5 vacuous. The S4 skip on globals stands: S3 by literal key proves
+    no update reaches the row.
+  - **The S2 carry:** on `rules`, `gmail_queue`, `eval_cases` and `eval_runs` (bigserial, default
+    grants) S2 expects -2, because `nextval` runs before the WITH CHECK. A -1 would be a
+    sequence-rights change and fails loudly.
+  - **`realtime.messages` (P4, P5):** 06 asserts no client policy exists and RLS is on. On the CI image
+    the test role cannot act as the table's owner, so 09 proves both functions on a scratch table
+    (`tests.zz_rt`); the diag line names the target. The check reads only the catalog.
+  - **Out of 06's reach (residuals):** Realtime broadcast authorisation beyond `realtime.messages`'
+    policies and RLS (such as a trigger calling `realtime.broadcast_changes` into a channel guarded only
+    by a policy elsewhere); buckets declared in `config.toml`, which CI's `db start` does not seed.
+  - **The stamp body pin:** C9 pins `md5(prosrc)` of `sync_notes_stamp_rev`. Without it, an
+    UPDATE-only rewrite of that function could re-mask 02's A3 and 03's O6 to O8, because 09's unmask
+    proofs are insert-only.
+  - **The README's "a fixture case and nothing else" (T10):** the case lives in `tests.insert_sql`
+    (and `tests.slot_where` for a global table) in `_setup.psql`; `_fixtures.psql` loops over the matrix
+    and needs no edit. A new trigger also needs the unmask set or `tests.stamp_only`.
+  - **Leaks to the log:** a probe that raises can show a fixture UUID in the error CONTEXT lines
+    (accepted at T5b). Descriptions and diag lines never print one.
 
 ## 12. Out of scope
 
