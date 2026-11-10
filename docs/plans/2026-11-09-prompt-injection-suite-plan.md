@@ -791,6 +791,17 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
     path, file names whose extension is a TLD missing from the extension list (`main.cc`), and
     `[10:30:45]` or `HTTP: the protocol` refused as honest text. A model-written literal
     `[link removed](` is neutralised, not refused: the console escapes every field.
+- **T2b re-review rulings (controller, 2026-11-10).**
+  - The look-alike map covers capitals in their own right, not only through lower-casing: Cyrillic
+    А В Е К М Н О Р С Т Х and Greek Α Β Ε Ζ Η Ι Κ Μ Ν Ο Ρ Τ Υ Χ, plus ϲ ς Ϲ (to c), ϳ (to j),
+    ɡ (to g), ı (to i) and Armenian օ (to o).
+  - The big solidus U+29F8 and the box-drawing diagonal U+2571 count as slashes, beside U+2215 and
+    U+2044.
+  - Accepted residual: RLM, LRM and ALM are stripped, not flagged; they can reorder a host only in a
+    right-to-left display, and the console is left-to-right (no `dir` or `unicode-bidi` in
+    `app/static`), which keeps it safe. A title holding a bidi isolate around Hebrew or Arabic is
+    refused. A neutralised `why` or `evidence` is NFKC'd and loses its default-ignorables (ZWJ, ZWNJ)
+    as a whole. A run-together Cyrillic typo whose last label maps to a TLD (`Конец.со`) is a host.
 - **Example hosts on TLDs with no reserved name (amends §1 and §5).** Where a TLD has no reserved
   name (`ai md pl py rs sh`), the oracle's tests use `example.<label>`; these are never fetched and
   never appear in a fixture. Every host in a test uses the `example` label.
