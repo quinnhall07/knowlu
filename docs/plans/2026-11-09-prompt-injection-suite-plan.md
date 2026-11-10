@@ -811,7 +811,7 @@ These bind T1b, T2b and every later test of the policy, and win over any wording
 - Execution branch and base SHA: `security/output-policy` (worktree `knowlu-policy`), base `c61c7cec`.
 - Q6: (b), ruled by Quinn 2026-11-09 (§10).
 - The IANA root-zone list's version line (T0; replaced by the line T2b fetched, if newer): `# Version 2026110900, Last Updated Mon Nov  9 07:07:01 2026 UTC`.
-- Quinn's go for the production deploy, asked at T9a's PASS (date, before PR A's push):
+- Quinn's go for the production deploy, asked at T9a's PASS (date, before PR A's push): 2026-11-10, "Deploy, then push" (production deploy of b2d8fb4b before the push).
 - The five pins on staging (model id, upstream, versions, `max_tokens`, prices): see the lane ledger (T0, 2026-11-09). All five are OpenRouter rows.
 - The recomputed run cost and worst-case month: about $0.15 a run at the output bound, $0.44 with every call retried 3x; worst-case month $6.20 (over half the cap: Quinn decides before T6).
 
