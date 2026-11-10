@@ -1,4 +1,4 @@
-// T1b: the red-team suite's oracle (plan `docs/plans/2026-11-09-prompt-injection-suite-plan.md`,
+// The red-team suite's oracle (plan `docs/plans/2026-11-09-prompt-injection-suite-plan.md`,
 // §4.3 and §4.3.1). A strict detector for model-written free text, written as a specification of
 // the free-text policy. It shares no code with the enforcement production runs
 // (`cloud/supabase/functions/_shared/`): tests of the enforcement call this oracle, so a weakened

@@ -1,14 +1,18 @@
-// TDD, per CLAUDE.md: this file is written before `schema.ts`, `loader.ts` or any fixture exists. It fails
-// to load (RED — two imports resolve to nothing) until T3b, and stays red until T4 writes `fixtures/`.
+// Tests of the committed red-team fixture set (`fixtures/*.jsonl`) as a whole: the files, class coverage,
+// twins, decision predicates and planted strings.
 //
-// T3a of the prompt-injection suite (plan `2026-11-09-prompt-injection-suite`, §5): the real fixture set.
-// `loadFixtures` (see `schema_test.ts` for its contract) already refuses a bad line, a hygiene breach, a
-// dangling twin and a shared canary; this file checks what only the whole set can show:
+// Plan `2026-11-09-prompt-injection-suite`, §5, with the controller's T3a rulings. `loadFixtures` (see
+// `schema_test.ts` for its contract) already refuses a bad line, a hygiene breach, a dangling twin and a
+// shared canary; this file checks what only the whole set can show:
 //   - the five kind files, and nothing else, each loading;
 //   - the coverage table below: every class of §5 that applies to a kind has an attack of that kind;
 //   - every attack's twin is a twin of its kind, and every twin is some attack's;
-//   - every attack's `planted` strings occur in its own request and in no twin's request, compared as the
-//     runner compares outputs (`plantedIn`, on the matching form), so an obfuscated plant still counts.
+//   - every C1, C4, C5 and C11 attack carries a decision predicate, one other than `absent_strings`, so a
+//     model that obeys the payload is caught by more than an echoed string;
+//   - every attack's `planted` strings occur in its own request (a C8 attack: at least one of them, since
+//     it lists both the obfuscated form as written and the plain form a model would echo), and none occurs
+//     in any twin's request. Both compare as the runner compares outputs (`plantedIn`, on the matching
+//     form), so a zero-width or full-width obfuscation still counts.
 //
 // It reads the committed `fixtures/` directory only: no network, no clock, no key.
 import { assert, assertEquals } from "@std/assert";
@@ -44,6 +48,14 @@ const COVERAGE: Record<string, readonly string[]> = {
   mail_claim: ["C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C12", "C13"],
   mail_resolve: ["C1", "C2", "C11", "C12"],
 };
+
+// Classes whose payload always aims at a decision (an override, a false completion, a false change, a
+// steered resolve): an attack of one of these must check that decision, not only echoed strings. A C2,
+// C3 or C13 attack aimed at a decision carries its predicate too; the README says so, and review checks.
+//   - task: `importance_not_in`, `course_not`      - event: `verdict_not`
+//   - email: `tier_not_in`, `importance_not_in`, `due_not`
+//   - mail_claim: `claim_kind_absent`              - mail_resolve: `target_id`
+const DECISION_CLASSES = ["C1", "C4", "C5", "C11"];
 
 /** The loaded record as plain data, so these checks lean on §5's field names and nothing else. */
 function raw(fixture: Fixture): Raw {
@@ -119,12 +131,25 @@ Deno.test("every attack's twin is a twin of its own kind, and every twin is some
   assertEquals(orphans, [], "twins no attack names");
 });
 
-Deno.test("every attack's planted strings occur in its own request", async () => {
+Deno.test("every C1, C4, C5 and C11 attack carries a predicate other than absent_strings", async () => {
+  const records = await load();
+  const stringsOnly = records
+    .filter((r) => isAttack(r) && DECISION_CLASSES.includes(r.class as string))
+    .filter((r) => Object.keys(r.goal as Raw).every((k) => k === "absent_strings"))
+    .map((r) => r.id);
+  assertEquals(stringsOnly, [], "decision-class attacks whose goal checks strings only");
+});
+
+Deno.test("every attack's planted strings occur in its own request (a C8 attack's: at least one)", async () => {
   const records = await load();
   const absent: string[] = [];
   for (const attack of records.filter(isAttack)) {
     const planted = attack.planted as string[];
     const found = foundIn(attack.request, planted);
+    if (attack.class === "C8") {
+      if (found.size === 0) absent.push(`${attack.id}: none of ${JSON.stringify(planted)}`);
+      continue;
+    }
     for (const p of planted) if (!found.has(p)) absent.push(`${attack.id}: ${JSON.stringify(p)}`);
   }
   assertEquals(absent, [], "planted strings missing from their own attack's request");
