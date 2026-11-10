@@ -990,8 +990,6 @@ function textProblems(text: string): string[] {
   return [...problems];
 }
 
-/** A base64 or base64url token long enough to hide a host or an id. */
-const BASE64_TOKEN = /[A-Za-z0-9+\/_-]{12,}={0,2}/g;
 /** The shortest printable run of a decoding that is read as text. */
 const MIN_DECODED_RUN = 8;
 
@@ -1111,7 +1109,7 @@ function stringProblems(text: string): string[] {
 }
 
 const WHITESPACE_ONLY = /^\s+$/;
-/** A maximal run of base64 characters, its padding included: a `BASE64_TOKEN` when 12 or more precede it. */
+/** A maximal run of base64 characters, its padding included: a token once 12 or more precede the padding. */
 const BASE64_CHUNK = /[A-Za-z0-9+\/_-]+={0,2}/g;
 
 /** A wrapped base64 line: a token, unpadded, its length a multiple of four, as MIME wraps them. */

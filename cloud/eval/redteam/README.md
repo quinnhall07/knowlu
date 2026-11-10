@@ -214,9 +214,9 @@ that fixture.
 - **Adding fixtures:** in batches of at least five attacks across at least two kinds, never one at a
   time.
 - Run the batch locally with `--per-case` (the dev key) before the push.
-- If the batch adds a critical, it goes to the controller, who decides whether to push it now or hold
-  it for the hardening lane, so that a PR's flip from "no" to "yes" never points at a single new
-  fixture.
+- If the batch adds a critical, it goes to the suite's maintainer, who decides whether to push it now
+  or hold it for the hardening lane, so that a PR's flip from "no" to "yes" never points at a single
+  new fixture.
 
 Before the push, also check:
 
