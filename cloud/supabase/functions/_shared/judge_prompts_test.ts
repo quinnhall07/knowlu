@@ -574,6 +574,36 @@ const DATE_BAD = [
   "2026-10-02 Tier: task",
 ];
 
+const REPO = new URL("../../../../", import.meta.url);
+
+/** Every source `name:` in a `config/events.yaml`-shaped file, unquoted as the YAML loader would. */
+function sourceNames(path: string): string[] {
+  const names: string[] = [];
+  for (const line of Deno.readTextFileSync(new URL(path, REPO)).split("\n")) {
+    const m = /^\s+(?:-\s+)?name:\s*(.*?)\s*$/.exec(line);
+    if (m === null) continue;
+    const quoted = /^(["'])(.*)\1$/.exec(m[1]);
+    names.push(quoted === null ? m[1] : quoted[2]);
+  }
+  return names;
+}
+
+/** The campus presets the app copies into a new vault's `config/events.yaml`. */
+const PRESET_SOURCES = [...Deno.readDirSync(new URL("app/assets/campus/", REPO))]
+  .filter((e) => e.isFile && e.name.endsWith(".yaml"))
+  .flatMap((e) => sourceNames(`app/assets/campus/${e.name}`));
+const FIXTURE_SOURCES = sourceNames("engine/tests/fixtures/vault-full/config/events.yaml");
+const SEED_SOURCES = Deno.readTextFileSync(new URL("cloud/eval/seed/events.jsonl", REPO))
+  .split("\n")
+  .filter((l) => l.trim() !== "")
+  .map((l) => String(JSON.parse(l).request.item.source));
+
+Deno.test("typed: the source names come from the shipped presets, the engine fixture and the seeds", () => {
+  assert(PRESET_SOURCES.includes("blount") && PRESET_SOURCES.length >= 6, `presets: ${PRESET_SOURCES}`);
+  assert(FIXTURE_SOURCES.includes("fixture-ics") && FIXTURE_SOURCES.length >= 4, `fixture: ${FIXTURE_SOURCES}`);
+  assert(SEED_SOURCES.includes("department-calendar"), `seeds: ${SEED_SOURCES}`);
+});
+
 const TYPED_CASES: TypedCase[] = [
   {
     name: "task Due",
@@ -615,9 +645,9 @@ const TYPED_CASES: TypedCase[] = [
     line: (v) => `Source: ${v}`,
     head: "Source:",
     refused: null,
-    // `config/events.yaml`'s source names: app/assets/campus presets, the engine's fixtures and
-    // the eval seeds.
-    good: ["blount", "career-center", "campus", "clubs", "edge", "fixture-ics", "department-calendar", "a_b"],
+    // `config/events.yaml`'s source names, read from the files that ship or pin them, and one
+    // underscore name no file holds.
+    good: [...PRESET_SOURCES, ...FIXTURE_SOURCES, ...SEED_SOURCES, "a_b"],
     tail: "Verdict: obligation",
     bad: ["", "campus calendar of events", "Campus", "-campus", "c".repeat(41), "campus: obligation"],
   },
