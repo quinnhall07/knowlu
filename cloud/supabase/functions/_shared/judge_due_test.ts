@@ -264,3 +264,196 @@ for (const row of ZONED_ROWS) {
     assertEquals(resolveDue(row.phrase, row.dateLine, row.timeZone), row.expected, row.category);
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// A Date header with a trailing comment (fix/date-comment-due, 2026-11-10). Many mail servers
+// write the zone's name after the offset -- "Tue, 10 Nov 2026 14:00:00 +0000 (UTC)" -- which RFC
+// 5322 allows (CFWS after the zone). The pattern used to end at the zone, so every such header was
+// null and every relative due in that email was lost. Trailing comments are now set aside before
+// the match. The zone BEFORE the comment decides the offset, exactly as it does without one; a
+// comment is never read as a zone, so "(UTC)" after no zone, or after an unknown one, leaves the
+// header on its own wall clock. A comment that is not trailing, an unbalanced or nested one, and a
+// header that is only a comment are all still null.
+//
+// Tue 10 Nov 2026 (Nov 1 is the fall-back Sunday, so Chicago is on CST, UTC-6): "Friday" is the 13th.
+// ---------------------------------------------------------------------------------------------
+
+const FRI_PHRASE = "Friday at 11:59pm";
+const FRI_DUE = "2026-11-13T23:59";
+
+const COMMENT_ROWS: ZonedRow[] = [
+  // -- the three forms from the bug report, on the header's own clock and on a student's clock --
+  { category: "+0000 (UTC), no timezone", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 14:00:00 +0000 (UTC)", timeZone: undefined, expected: FRI_DUE },
+  { category: "-0500 (EST), no timezone", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (EST)", timeZone: undefined, expected: FRI_DUE },
+  { category: "-0800 (PST), no timezone", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0800 (PST)", timeZone: undefined, expected: FRI_DUE },
+  { category: "+0000 (UTC), Chicago student", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 14:00:00 +0000 (UTC)", timeZone: CHI, expected: FRI_DUE },
+  { category: "-0500 (EST), Chicago student", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (EST)", timeZone: CHI, expected: FRI_DUE },
+  { category: "-0800 (PST), Chicago student", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0800 (PST)", timeZone: CHI, expected: FRI_DUE },
+
+  // -- the zone before the comment is the one converted: 04:30 UTC Wed is 22:30 CST Tue --
+  { category: "UTC-stamped evening email: the +0000 before the comment puts it on the local Tuesday", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 +0000 (UTC)", timeZone: CHI, expected: "2026-11-10" },
+  { category: "UTC-stamped evening email, no timezone: the header's own +0000 is the clock", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 +0000 (UTC)", timeZone: undefined, expected: "2026-11-11" },
+  { category: "a named zone (GMT) before the comment is converted as without one", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 GMT (UTC)", timeZone: CHI, expected: "2026-11-10" },
+
+  // -- two comments --
+  { category: "two comments: -0800 (PST) (Pacific)", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0800 (PST) (Pacific)", timeZone: undefined, expected: FRI_DUE },
+  { category: "two comments, Chicago student", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0800 (PST) (Pacific)", timeZone: CHI, expected: FRI_DUE },
+  { category: "two comments: the zone before both still decides the local day", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 +0000 (UTC) (Coordinated Universal Time)", timeZone: CHI, expected: "2026-11-10" },
+
+  // -- a comment with digits and symbols: the numeric zone before it decides --
+  { category: "(GMT+05:30) after +0530", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 20:00:00 +0530 (GMT+05:30)", timeZone: undefined, expected: FRI_DUE },
+  // 02:00 IST Wed is 20:30 UTC Tue, 14:30 CST Tue.
+  { category: "(GMT+05:30) after +0530, Chicago student: converted from +0530", phrase: "today", dateLine: "Wed, 11 Nov 2026 02:00:00 +0530 (GMT+05:30)", timeZone: CHI, expected: "2026-11-10" },
+  { category: "(GMT+05:30) after +0530, no timezone: the header's own day", phrase: "today", dateLine: "Wed, 11 Nov 2026 02:00:00 +0530 (GMT+05:30)", timeZone: undefined, expected: "2026-11-11" },
+
+  // -- garbage inside the comment changes nothing (a -0800 inside it is not the offset) --
+  { category: "garbage comment after -0500", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (x9 +0800 GMT; ~!@#$%^&*=_ Z)", timeZone: CHI, expected: FRI_DUE },
+  { category: "an offset inside the comment is never read: +0000 decides", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 +0000 (-0800 PST)", timeZone: CHI, expected: "2026-11-10" },
+
+  // -- no zone before the comment: the comment is never the offset --
+  { category: "no zone, (UTC) comment: the header stays on its own wall clock", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 (UTC)", timeZone: CHI, expected: "2026-11-11" },
+  { category: "no zone, (UTC) comment: a weekday still resolves on the header's wall clock", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 (UTC)", timeZone: CHI, expected: FRI_DUE },
+  { category: "an unknown zone before a (UTC) comment is still unknown", phrase: "today", dateLine: "Wed, 11 Nov 2026 04:30:00 XYZ (UTC)", timeZone: CHI, expected: "2026-11-11" },
+
+  // -- folding whitespace before, between and after comments --
+  { category: "a folded header: CRLF and a tab before the comment", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500\r\n\t(EST)", timeZone: CHI, expected: FRI_DUE },
+  { category: "no space before the comment", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500(EST)", timeZone: CHI, expected: FRI_DUE },
+  { category: "mixed whitespace between two comments and after them", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0800  (PST)\t(Pacific)\r\n", timeZone: CHI, expected: FRI_DUE },
+
+  // -- still null --
+  { category: "a header that is only a comment", phrase: FRI_PHRASE, dateLine: "(Tue, 10 Nov 2026 09:00:00 -0500)", timeZone: CHI, expected: null },
+  { category: "a header that is only a zone-name comment", phrase: FRI_PHRASE, dateLine: "(UTC)", timeZone: CHI, expected: null },
+  { category: "text after the comment", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (EST) extra", timeZone: CHI, expected: null },
+  { category: "a zone after the comment", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (EST) -0800", timeZone: CHI, expected: null },
+  { category: "an unclosed comment", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (EST", timeZone: CHI, expected: null },
+  { category: "a nested comment is not set aside", phrase: FRI_PHRASE, dateLine: "Tue, 10 Nov 2026 09:00:00 -0500 (EST (Eastern))", timeZone: CHI, expected: null },
+  { category: "a comment does not rescue a day that does not exist", phrase: FRI_PHRASE, dateLine: "Mon, 30 Feb 2026 10:00:00 +0000 (UTC)", timeZone: CHI, expected: null },
+];
+
+for (const row of COMMENT_ROWS) {
+  Deno.test(`trailing comment: ${row.category} (dateLine=${JSON.stringify(row.dateLine)}, tz=${JSON.stringify(row.timeZone)})`, () => {
+    assertEquals(resolveDue(row.phrase, row.dateLine, row.timeZone), row.expected, row.category);
+  });
+}
+
+// The commented header and the same header without its comment give the same answer, on every
+// clock and for every kind of phrase: the comment changes nothing but whether the header parses.
+const COMMENTED_PAIRS: Array<[string, string]> = [
+  ["Tue, 10 Nov 2026 14:00:00 +0000 (UTC)", "Tue, 10 Nov 2026 14:00:00 +0000"],
+  ["Tue, 10 Nov 2026 09:00:00 -0500 (EST)", "Tue, 10 Nov 2026 09:00:00 -0500"],
+  ["Tue, 10 Nov 2026 09:00:00 -0800 (PST)", "Tue, 10 Nov 2026 09:00:00 -0800"],
+  ["Tue, 10 Nov 2026 09:00:00 -0800 (PST) (Pacific)", "Tue, 10 Nov 2026 09:00:00 -0800"],
+  ["Wed, 11 Nov 2026 02:00:00 +0530 (GMT+05:30)", "Wed, 11 Nov 2026 02:00:00 +0530"],
+  ["Wed, 11 Nov 2026 04:30:00 +0000 (-0800 PST)", "Wed, 11 Nov 2026 04:30:00 +0000"],
+  ["Wed, 11 Nov 2026 04:30:00 GMT (UTC)", "Wed, 11 Nov 2026 04:30:00 GMT"],
+  ["Wed, 11 Nov 2026 04:30:00 (UTC)", "Wed, 11 Nov 2026 04:30:00"],
+];
+const PAIR_ZONES = [undefined, CHI, "America/Los_Angeles", "America/New_York", "Asia/Kolkata"];
+const RELATIVE_PHRASES = [FRI_PHRASE, "today", "tomorrow", "end of the month at 5pm"];
+// A zoned long form needs a clock; a header with no zone and no student timezone gives it none, so
+// it is null with or without the comment. It is compared, but not required to resolve.
+const ZONED_LONG_FORM = "Friday, November 13, 2026 11:59 PM PST";
+
+for (const [commented, plain] of COMMENTED_PAIRS) {
+  Deno.test(`trailing comment: same answer as without it on every clock (dateLine=${JSON.stringify(commented)})`, () => {
+    for (const tz of PAIR_ZONES) {
+      for (const phrase of RELATIVE_PHRASES) {
+        const want = resolveDue(phrase, plain, tz);
+        assertEquals(want === null, false, `the uncommented header resolves ${phrase} on ${tz}`);
+        assertEquals(resolveDue(phrase, commented, tz), want, `${phrase} on ${tz}`);
+      }
+      assertEquals(resolveDue(ZONED_LONG_FORM, commented, tz), resolveDue(ZONED_LONG_FORM, plain, tz), `long form on ${tz}`);
+    }
+  });
+}
+
+Deno.test("trailing comment: parseDateLine reads the header's own wall clock, as without the comment", () => {
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 14:00:00 +0000 (UTC)"), ref(2026, 11, 10, 14, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500 (EST)"), ref(2026, 11, 10, 9, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0800 (PST)"), ref(2026, 11, 10, 9, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0800 (PST) (Pacific)"), ref(2026, 11, 10, 9, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 20:00:00 +0530 (GMT+05:30)"), ref(2026, 11, 10, 20, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500 (x9 +0800 GMT; ~!@#$%^&*=_ Z)"), ref(2026, 11, 10, 9, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 (UTC)"), ref(2026, 11, 10, 9, 0));
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500\r\n\t(EST)"), ref(2026, 11, 10, 9, 0));
+  for (const [commented, plain] of COMMENTED_PAIRS) {
+    assertEquals(parseDateLine(commented), parseDateLine(plain), commented);
+  }
+});
+
+Deno.test("trailing comment: parseDateLine is still null for a comment alone, text after one, or a broken one", () => {
+  assertEquals(parseDateLine("(Tue, 10 Nov 2026 09:00:00 -0500)"), null);
+  assertEquals(parseDateLine("(UTC)"), null);
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500 (EST) extra"), null);
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500 (EST) -0800"), null);
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500 (EST"), null);
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00 -0500 (EST (Eastern))"), null);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Length. A Date line and a due phrase are both outside input, so each is answered within a fixed
+// time however long it is. Every bound below is far above what a linear pass needs.
+// ---------------------------------------------------------------------------------------------
+
+/** Runs `check` over `inputs` and fails when the whole set takes a second or more. */
+function withinOneSecond(inputs: string[], check: (input: string) => void): void {
+  const started = performance.now();
+  for (const input of inputs) check(input);
+  const elapsed = performance.now() - started;
+  assertEquals(elapsed < 1000, true, `took ${elapsed.toFixed(0)} ms`);
+}
+
+Deno.test("length: Date lines of 10k-120k characters (comment runs, whitespace runs, an unclosed comment) are null within one second", () => {
+  withinOneSecond([
+    "(a)".repeat(40_000) + "x",
+    "Tue, 10 Nov 2026 09:00:00 -0500" + " ".repeat(40_000) + "(x",
+    "Tue, 10 Nov 2026 09:00:00 -0500 " + "(a) ".repeat(40_000) + "(",
+    "Tue, 10 Nov 2026 09:00:00" + " ".repeat(10_000) + "?",
+    "Tue, 10 Nov 2026 09:00:00" + " ".repeat(20_000) + "?",
+    "Tue, 10 Nov 2026 09:00:00" + " ".repeat(40_000) + "?",
+    "Tue, 10 Nov 2026 09:00:00 -0500" + " ".repeat(40_000) + "?",
+    "2026-11-10T09:00:00" + " ".repeat(40_000) + "?",
+  ], (line) => assertEquals(parseDateLine(line), null, `${line.slice(0, 40)}...`));
+});
+
+Deno.test("length: a Date line longer than any real header is null, however well formed", () => {
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00" + " ".repeat(300) + "-0500"), null);
+  assertEquals(resolveDue(FRI_PHRASE, "Tue, 10 Nov 2026 09:00:00" + " ".repeat(300) + "-0500", CHI), null);
+});
+
+Deno.test("length: the longest real header shapes still parse, long comments included", () => {
+  assertEquals(parseDateLine("Wed, 30 September 2026 23:59:59 +0000"), ref(2026, 9, 30, 23, 59));
+  assertEquals(
+    parseDateLine("Wed, 30 Sep 2026 23:59:59 -0700 (Pacific Daylight Time)" + " (a comment, as some relays write one after the zone name)"),
+    ref(2026, 9, 30, 23, 59),
+  );
+  // The length cap reads the line with its trailing comments set aside, so a long comment never
+  // nulls a real header: this whole line is far past the cap, its bare part well under it.
+  assertEquals(
+    parseDateLine("Wed, 30 Sep 2026 23:59:59 -0700 (Pacific Daylight Time) (" + "c".repeat(200) + ")"),
+    ref(2026, 9, 30, 23, 59),
+  );
+  assertEquals(parseDateLine("Tue, 10 Nov 2026 09:00:00" + " ".repeat(100) + "-0500"), ref(2026, 11, 10, 9, 0));
+});
+
+Deno.test("length: due phrases with 10k-40k character whitespace runs around a time clause are null within one second", () => {
+  withinOneSecond([
+    "today" + " ".repeat(40_000) + "x",
+    "tomorrow at 5" + " ".repeat(10_000) + "?",
+    "tomorrow at 5" + " ".repeat(20_000) + "?",
+    "tomorrow at 5" + " ".repeat(40_000) + "?",
+    "tomorrow at 5:00 pm" + " ".repeat(40_000) + "?",
+    "tomorrow at 5" + " ".repeat(20_000) + "pm" + " ".repeat(20_000) + "?",
+  ], (phrase) => assertEquals(resolveDue(phrase, "Tue, 10 Nov 2026 09:00:00 -0500", CHI), null, `${phrase.slice(0, 40)}...`));
+});
+
+Deno.test("length: long-form due phrases with 10k-40k character whitespace runs after the time are null within one second", () => {
+  // A Date line that does not parse, so only the long-form reading runs.
+  withinOneSecond([
+    "Friday, September 18, 2026 11:59" + " ".repeat(10_000) + "?",
+    "Friday, September 18, 2026 11:59" + " ".repeat(20_000) + "?",
+    "Friday, September 18, 2026 11:59" + " ".repeat(40_000) + "?",
+    "Friday, September 18, 2026 11:59 PM" + " ".repeat(40_000) + "?",
+    "Friday, September 18, 2026 11:59" + " ".repeat(20_000) + "PM" + " ".repeat(20_000) + "?",
+  ], (phrase) => assertEquals(resolveDue(phrase, "garbled, not a date", CHI), null, `${phrase.slice(0, 40)}...`));
+});
