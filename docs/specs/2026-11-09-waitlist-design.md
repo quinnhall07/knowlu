@@ -862,6 +862,8 @@ It sets this entry's `credited_at` and adds one to the referrer's `credits`. A r
 
 ### 6.1 The gate: no offer anywhere until Quinn's amendment signs it
 
+*(superseded 2026-11-11: the cloud design's Amendment 2026-10-16b open item is answered by its Amendment 2026-11-10, ruling (3): there is no founding price, so no offer is ever made. That amendment's consequences list what the waitlist plan leaves out.)*
+
 The prototype carries "$6.99 a month for the first year, then $9.99, for people who join before launch".
 **No signed amendment holds that offer.** Amendment 2026-10-16b leaves the quiet release's "discounted
 price" open (cloud design `:829-831`), and nothing in billing would honour it. **Quinn ruled (Q4, Quinn,
@@ -1963,7 +1965,7 @@ folding) was not asked; §3.2 sets it as a default.
 | **W-D5** | **Double opt-in.** A signup counts only after the confirm link | §3.5, §4.2-§4.3, §8 |
 | **Q2** | **A privacy version bump**, not a separate notice page. `PRIVACY_VERSION` moves through `contract-engineer` and `contract-reviewer`; every account gets the email and the re-consent panel; production joins open after that release | §9.7, P2, W6 |
 | **Q3** | **One first-party script on the index, `waitlist.js`, and the download button off the index.** The privacy page stays script-free; `site.rs:29` becomes a check that `releases/Knowlu-setup.exe` is still served | §9.6, §10.1, §10.6, §13.6 |
-| **Q4** | **No offer anywhere until an amendment signs it.** Already settled for that amendment: **one discount, shared with quiet-release buyers**; **a Pell student pays the lower price, never both**; **earlier joiners qualify**; **the claim expires when the list closes** | §6.1-§6.3, §10.2, §13.6 |
+| **Q4** | *(superseded 2026-11-11 by the cloud design's Amendment 2026-11-10, ruling (3): no founding price)* **No offer anywhere until an amendment signs it.** Already settled for that amendment: **one discount, shared with quiet-release buyers**; **a Pell student pays the lower price, never both**; **earlier joiners qualify**; **the claim expires when the list closes** | §6.1-§6.3, §10.2, §13.6 |
 | **Q5** | **"Move up" orders invitations to the spring 2027 release**: a week earlier per confirmed friend, up to five weeks. No position number or status page in v1 | §5.4-§5.5, §9.2 |
 | **Q6** | **A separate Resend account for the list, on a paid plan, with its own sending subdomain, before any list mail, staging's included** | §4.8, §7.6, §14.1, P0 |
 | **Q7** | **The shared draft-first deploy**, with Quinn's approval on every release (the `pages` environment's required reviewer) and a `v*` tag ruleset. **The 2026-10-20 ruling against a site-only deploy (`HANDOFF.md:563`) is superseded** | §11, §12, P1, W5, W8 |
