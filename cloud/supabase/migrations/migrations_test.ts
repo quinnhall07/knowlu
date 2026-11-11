@@ -575,13 +575,197 @@ revoke execute on function public.leaky_trigger() from public;
   assertThrows(() => assertDefinerRevoked([["synthetic-definer-trigger.sql", sql]]), Error, "leaky_trigger");
 });
 
+// Security leftovers R4 (plan 2026-11-11, cases 1 to 8): the definer guard reads PUBLIC, whole
+// signatures and every grant and revoke form Postgres accepts. Each case is a synthetic string
+// through the exported `assertDefinerRevoked`, written before the guard changes (T1b). The plan's
+// `f` and `g` are `definer_fn` and `other_fn` here, so a refusal is seen to name the function; and
+// `definer_fn` is defined unqualified, so a message that says `public` names the role, never a
+// schema the function was printed with.
+
+/** A SECURITY DEFINER `definer_fn` whose parameter list is `args`. */
+const definerFn = (args: string) => `
+create function definer_fn(${args}) returns int
+language sql security definer set search_path = public as $$ select 1 $$;
+`;
+/** A full revoke: every role that holds EXECUTE on a new function, by name. */
+const FULL_REVOKE = "revoke execute on function definer_fn(uuid) from public, anon, authenticated;\n";
+
+/** The definer guard's refusal of `sql` as one file, or `undefined` when it passes. */
+function definerRefusal(sql: string): string | undefined {
+  try {
+    assertDefinerRevoked([["synthetic-r4.sql", sql]]);
+    return undefined;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** The labels of `cases` the guard lets through, or refuses without naming `definer_fn`. */
+function notRefused(cases: Array<[string, string]>): string[] {
+  return cases.filter(([, sql]) => !definerRefusal(sql)?.includes("definer_fn")).map(([label]) => label);
+}
+
+/** Each case of `cases` the guard refuses, with its message. */
+function refusedOf(cases: Array<[string, string]>): string[] {
+  return cases.flatMap(([label, sql]) => {
+    const message = definerRefusal(sql);
+    return message === undefined ? [] : [`${label}: ${message}`];
+  });
+}
+
+Deno.test("R4 case 1: a revoke from anon and authenticated alone is refused, naming the function and public", () => {
+  // A new function's EXECUTE belongs to PUBLIC as well as to the two roles Supabase names, and both
+  // client roles inherit PUBLIC's, so a from-list without `public` leaves the function callable.
+  const message = definerRefusal(
+    definerFn("p uuid") + "revoke execute on function definer_fn(uuid) from anon, authenticated;\n",
+  );
+  assert(message !== undefined, "a revoke that leaves PUBLIC's EXECUTE must be refused");
+  assert(message.includes("definer_fn") && /\bpublic\b/.test(message), message);
+});
+
+Deno.test("R4 case 2: from-list roles are whole tokens, so anon_reader is not anon", () => {
+  assertEquals(
+    notRefused([[
+      "from public, anon_reader, authenticated",
+      definerFn("p uuid") + "revoke execute on function definer_fn(uuid) from public, anon_reader, authenticated;\n",
+    ]]),
+    [],
+    "a from-list naming anon_reader, not anon, must be refused",
+  );
+});
+
+Deno.test("R4 case 3: a revoke of another overload is refused", () => {
+  // `definer_fn(text)` is another function; revoking it leaves `definer_fn(uuid)` callable. The
+  // second definition has a parenthesised default before a later parameter, so the argument list
+  // does not end at the first `)`.
+  assertEquals(
+    notRefused([
+      ["(p uuid) revoked as (text)", definerFn("p uuid") + "revoke execute on function definer_fn(text) from public, anon, authenticated;\n"],
+      [
+        "(a int default g(), b uuid) revoked as (integer)",
+        definerFn("a int default g(), b uuid") + "revoke execute on function definer_fn(integer) from public, anon, authenticated;\n",
+      ],
+    ]),
+    [],
+    "each revoke of a signature the definition does not have must be refused",
+  );
+});
+
+Deno.test("R4 case 3: the revoke of the defined signature passes", () => {
+  assertEquals(
+    refusedOf([
+      ["(p uuid) revoked as (uuid)", definerFn("p uuid") + FULL_REVOKE],
+      [
+        "(a int default g(), b uuid) revoked as (integer, uuid)",
+        definerFn("a int default g(), b uuid") +
+        "revoke execute on function definer_fn(integer, uuid) from public, anon, authenticated;\n",
+      ],
+    ]),
+    [],
+  );
+});
+
+Deno.test("R4 case 4: modes, defaults, aliases and a named revoke list normalise to one signature", () => {
+  // `int4`, `timestamptz` and `bool` are `integer`, `timestamp with time zone` and `boolean`; an
+  // `inout` or `variadic` argument keeps its type, an `out` one is no part of the signature, a
+  // default is dropped, and the revoke's own `p_n` is a name, not a type.
+  const sql = definerFn("p_n int4, p_at timestamptz default now(), inout p_io bool, variadic p_v text[], out r text") +
+    "revoke execute on function definer_fn(p_n integer, timestamp with time zone, inout boolean, text[]) " +
+    "from public, anon, authenticated;\n";
+  assertEquals(definerRefusal(sql), undefined);
+});
+
+Deno.test("R4 case 5: an array type, a type modifier and an empty list each match their revoke", () => {
+  // `store_google_grant`'s shape; Postgres ignores a type modifier in a signature; `()` is zero
+  // arguments (`handle_new_user` and `trim_user_metadata` are), never one empty argument.
+  assertEquals(
+    refusedOf([
+      [
+        "(p_account uuid, p_scopes text[]) revoked as (uuid, text[])",
+        definerFn("p_account uuid, p_scopes text[]") +
+        "revoke execute on function definer_fn(uuid, text[]) from public, anon, authenticated;\n",
+      ],
+      [
+        "(p_amount numeric(10,2)) revoked as (numeric)",
+        definerFn("p_amount numeric(10,2)") + "revoke execute on function definer_fn(numeric) from public, anon, authenticated;\n",
+      ],
+      ["() revoked as ()", definerFn("") + "revoke execute on function definer_fn() from public, anon, authenticated;\n"],
+    ]),
+    [],
+  );
+});
+
+Deno.test("R4 case 5: an empty argument inside a non-empty list fails closed, naming the function", () => {
+  assertEquals(notRefused([["(p uuid,)", definerFn("p uuid,") + FULL_REVOKE]]), [], "(p uuid,) must fail closed");
+});
+
+Deno.test("R4 case 6: a client re-grant after the last full revoke is refused, in every form Postgres accepts", () => {
+  const regrants = [
+    "grant execute on function definer_fn to anon;",
+    "grant execute on function other_fn(text), definer_fn(uuid) to authenticated;",
+    "grant execute on routine definer_fn(uuid) to anon;",
+    "grant all privileges on function definer_fn(uuid) to public;",
+    "grant all on procedure definer_fn(uuid) to anon;",
+    "grant execute on all functions in schema public to public;",
+    "grant execute on all routines in schema public to authenticated;",
+    `grant execute on function definer_fn(uuid) to "anon";`,
+  ];
+  assertEquals(
+    notRefused(regrants.map((g): [string, string] => [g, definerFn("p uuid") + FULL_REVOKE + g + "\n"])),
+    [],
+    "each re-grant after the full revoke must be refused",
+  );
+});
+
+Deno.test("R4 case 6: a grant to service_role, a client grant before the full revoke and a quoted from-list pass", () => {
+  // `public.` in an object list is a schema, never the PUBLIC grantee; a grantee is compared with
+  // its double quotes removed.
+  assertEquals(
+    refusedOf([
+      ["later grant to service_role", definerFn("p uuid") + FULL_REVOKE + "grant execute on function definer_fn(uuid) to service_role;\n"],
+      [
+        "later qualified grant to service_role",
+        definerFn("p uuid") + FULL_REVOKE + "grant execute on function public.definer_fn(uuid) to service_role;\n",
+      ],
+      ["client grant, then the full revoke", definerFn("p uuid") + "grant execute on function definer_fn(uuid) to anon;\n" + FULL_REVOKE],
+      [
+        "quoted from-list",
+        definerFn("p uuid") + `revoke execute on function definer_fn(uuid) from "public", "anon", "authenticated";\n`,
+      ],
+    ]),
+    [],
+  );
+});
+
+Deno.test("R4 case 7: revoke all, by routine, in a list and without an argument list each qualify", () => {
+  const revokes = [
+    "revoke all on function definer_fn(uuid) from public, anon, authenticated;",
+    "revoke all privileges on routine definer_fn(uuid) from public, anon, authenticated;",
+    "revoke execute on function other_fn(text), definer_fn(uuid) from public, anon, authenticated;",
+    "revoke execute on function definer_fn from public, anon, authenticated;",
+  ];
+  assertEquals(refusedOf(revokes.map((r): [string, string] => [r, definerFn("p uuid") + r + "\n"])), []);
+});
+
+Deno.test("R4 case 8: a revoke above the definition in the same file is refused", () => {
+  // The search starts at the definition, not at the top of its file (R4 (d)): a revoke written above
+  // the creation is not the one that guards it, and the re-grant rule needs that order.
+  assertEquals(notRefused([["revoke, then the definition", FULL_REVOKE + definerFn("p uuid")]]), []);
+});
+
 Deno.test("the definer revoke migration revokes handle_new_user from client roles and changes nothing else", async () => {
   // Found by suffix, never its stamp (M4), and stamped after every other file (forward-only).
   const files = await everyMigrationFile();
   const mine = files.filter(([n]) => /^\d{14}_definer_trigger_execute\.sql$/.test(n));
   assertEquals(mine.length, 1, "exactly one <stamp>_definer_trigger_execute.sql");
   const [name, sql] = mine[0];
-  assertEquals(files.at(-1)?.[0], name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+  // Stamped after every other file but the named later ones, by suffix, never stamp (M4): the client
+  // table rights (2026-11-11).
+  assertEquals(
+    files.map(([n]) => n).filter((n) => n > name).map((n) => n.replace(/^\d{14}_(client_table_rights)\.sql$/, "<stamp>_$1.sql")),
+    ["<stamp>_client_table_rights.sql"],
+    `${name}: stamped after every other file but the named later ones`,
+  );
   const code = stripLineComments(sql);
   assert(
     /revoke\s+execute\s+on\s+function\s+public\.handle_new_user\(\)\s+from\s+public,\s*anon,\s*authenticated;/i.test(code),
@@ -597,6 +781,38 @@ Deno.test("the definer revoke migration revokes handle_new_user from client role
     /grant\s+execute\s+on\s+function\s+public\.handle_new_user\(\)\s+to\s+supabase_auth_admin;/i.test(code),
     "supabase_auth_admin keeps execute explicitly",
   );
+});
+
+Deno.test("the client table rights migration is exactly its four revokes: no table DDL right, no trigger-function EXECUTE", async () => {
+  // Security leftovers R2 (plan 2026-11-11). Every `public` table gave both client roles every table
+  // right through `postgres`'s default privileges; TRUNCATE skips row-level security, and MAINTAIN is
+  // PG17's member of the same class. One revoke covers every relation, so no list has to stay
+  // complete; the default revoke keeps a later table from regaining them; the two SECURITY INVOKER
+  // trigger functions lose EXECUTE, which the trigger manager never checks. Select, insert, update
+  // and delete are untouched. A revoke by a non-grantor only warns, so 01's C10 and C11 read the
+  // result; this pins the statements. Found by suffix, never its stamp (M4).
+  const files = await everyMigrationFile();
+  const mine = files.filter(([n]) => /^\d{14}_client_table_rights\.sql$/.test(n));
+  assertEquals(mine.length, 1, "exactly one <stamp>_client_table_rights.sql");
+  const [name, raw] = mine[0];
+  assertEquals(files.at(-1)?.[0], name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+  const code = stripLineComments(raw);
+  // House style (the last_lapsed_at pin): comments stripped, split on `;`, whitespace collapsed.
+  const statements = code.split(";").map((s) => s.replace(/\s+/g, " ").trim().toLowerCase()).filter((s) => s !== "");
+  assertEquals(statements, [
+    "revoke truncate, references, trigger, maintain on all tables in schema public from anon, authenticated",
+    "alter default privileges for role postgres in schema public " +
+    "revoke truncate, references, trigger, maintain on tables from anon, authenticated",
+    "revoke execute on function public.sync_notes_stamp_rev() from public, anon, authenticated",
+    "revoke execute on function public.sync_usage_bump() from public, anon, authenticated",
+  ], `${name}: R2's four statements, and nothing else`);
+  // The triggers and C9's `md5(prosrc)` pin stay as they are: no function is created or replaced.
+  assertEquals((code.match(RAW_FUNCTION_KEYWORD) ?? []).length, 0, `${name}: no function is created or replaced`);
+  assert(!/\bgrant\b/i.test(code), `${name}: grants nothing`);
+  // ci.yml's eval gate runs, and spends, for any changed migration whose raw text names the pin table,
+  // comments included, in any case. The word is built in halves so this file never carries it here.
+  const pinTable = new RegExp(`\\b${"mod"}${"els"}\\b`, "i");
+  assert(!pinTable.test(raw), `${name}: names the pin table, which would run the paid eval gate`);
 });
 
 // R-C2-E37: five synthetic-SQL regression cases, one per adversarial shape the re-review found.
@@ -1984,8 +2200,10 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   // A later lane's file is named by its suffix, never its stamp (stamp rule M4); L8's testers file
   // is left out by its suffix (friends-testers §8.4, M4), so its restamp moves no line here; so is
   // its S6 follow-up, <stamp>_comp_guards.sql, the task-3 re-pin, <stamp>_task_effort_anchors.sql,
-  // and the definer revoke, <stamp>_definer_trigger_execute.sql.
-  const LATER_LANES = /^\d{14}_(?:testers|comp_guards|task_effort_anchors|definer_trigger_execute)\.sql$/;
+  // the definer revoke, <stamp>_definer_trigger_execute.sql, and the client table rights,
+  // <stamp>_client_table_rights.sql.
+  const LATER_LANES =
+    /^\d{14}_(?:testers|comp_guards|task_effort_anchors|definer_trigger_execute|client_table_rights)\.sql$/;
   assertEquals(
     files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n))
       .map((n) => EVENT_ALLOWANCE.test(n) ? "<stamp>_event_allowance.sql" : n),
@@ -3335,13 +3553,22 @@ Deno.test("the_follow_ups_migration_is_found_by_suffix_and_stamped_after_every_o
   const { name } = await followUpsMigration();
   // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands,
   // by its suffix, never its stamp (M4): L8's testers file, restamped after this one (C1, 2026-10-20),
-  // its S6 follow-up after that, the task-3 re-pin (effort anchors, 2026-10-23) after both, and the
-  // definer revoke (2026-11-09) last.
+  // its S6 follow-up after that, the task-3 re-pin (effort anchors, 2026-10-23) after both, the
+  // definer revoke (2026-11-09), and the client table rights (2026-11-11) last.
   assertEquals(
     names.filter((n) => n > name).map((n) =>
-      n.replace(/^\d{14}_(testers|comp_guards|task_effort_anchors|definer_trigger_execute)\.sql$/, "<stamp>_$1.sql")
+      n.replace(
+        /^\d{14}_(testers|comp_guards|task_effort_anchors|definer_trigger_execute|client_table_rights)\.sql$/,
+        "<stamp>_$1.sql",
+      )
     ),
-    ["<stamp>_testers.sql", "<stamp>_comp_guards.sql", "<stamp>_task_effort_anchors.sql", "<stamp>_definer_trigger_execute.sql"],
+    [
+      "<stamp>_testers.sql",
+      "<stamp>_comp_guards.sql",
+      "<stamp>_task_effort_anchors.sql",
+      "<stamp>_definer_trigger_execute.sql",
+      "<stamp>_client_table_rights.sql",
+    ],
     `${name}: stamped after every other file but the named later ones`,
   );
   for (const applied of [MAIL_LAST_LAPSED_AT, MAIL_MAX_TOKENS_REPIN]) {
@@ -3510,13 +3737,13 @@ Deno.test("S6 follow-up: the guards file is found by suffix and stamped after ev
   const { name } = await compGuardsMigration();
   const { name: testers } = await testersMigration();
   const names = (await everyMigrationFile()).map(([n]) => n);
-  // A later migration is named here when it lands, by its suffix: the task-3 re-pin (2026-10-23)
-  // and the definer revoke (2026-11-09).
+  // A later migration is named here when it lands, by its suffix: the task-3 re-pin (2026-10-23),
+  // the definer revoke (2026-11-09) and the client table rights (2026-11-11).
   assertEquals(
     names.filter((n) => n > name).map((n) =>
-      n.replace(/^\d{14}_(task_effort_anchors|definer_trigger_execute)\.sql$/, "<stamp>_$1.sql")
+      n.replace(/^\d{14}_(task_effort_anchors|definer_trigger_execute|client_table_rights)\.sql$/, "<stamp>_$1.sql")
     ),
-    ["<stamp>_task_effort_anchors.sql", "<stamp>_definer_trigger_execute.sql"],
+    ["<stamp>_task_effort_anchors.sql", "<stamp>_definer_trigger_execute.sql", "<stamp>_client_table_rights.sql"],
     `${name}: stamped after every other file but the named later ones`,
   );
   assert(name > testers, `${name}: after ${testers}, which stays as applied`);
@@ -3642,10 +3869,13 @@ async function taskEffortAnchorsMigration(): Promise<{ name: string; raw: string
 Deno.test("task-3: the effort-anchors file is found by suffix and stamped after every other file", async () => {
   const { name } = await taskEffortAnchorsMigration();
   const names = (await everyMigrationFile()).map(([n]) => n);
-  // A later migration is named here when it lands, by its suffix: the definer revoke (2026-11-09).
+  // A later migration is named here when it lands, by its suffix: the definer revoke (2026-11-09)
+  // and the client table rights (2026-11-11).
   assertEquals(
-    names.filter((n) => n > name).map((n) => n.replace(/^\d{14}_(definer_trigger_execute)\.sql$/, "<stamp>_$1.sql")),
-    ["<stamp>_definer_trigger_execute.sql"],
+    names.filter((n) => n > name).map((n) =>
+      n.replace(/^\d{14}_(definer_trigger_execute|client_table_rights)\.sql$/, "<stamp>_$1.sql")
+    ),
+    ["<stamp>_definer_trigger_execute.sql", "<stamp>_client_table_rights.sql"],
     `${name}: stamped after every other file but the named later ones`,
   );
 });

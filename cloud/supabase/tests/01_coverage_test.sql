@@ -1,7 +1,9 @@
--- Coverage (RLS pgTAP plan, D3 C1 to C8, D4; C9 from the T6b and T7 reviews): every relation in
--- `public` and `admin` is in the matrix, and each one's row-level security, policies, view
--- options, client grants, fixture rows and triggers are exactly what the matrix and the probes
--- assume. This is the real run against the migrated schema.
+-- Coverage (RLS pgTAP plan, D3 C1 to C8, D4; C9 from the T6b and T7 reviews; C10 and C11 from the
+-- security-leftovers plan, R3): every relation in `public` and `admin` is in the matrix, and each
+-- one's row-level security, policies, view options, client grants, fixture rows and triggers are
+-- exactly what the matrix and the probes assume; no client role holds a table right outside the
+-- four verbs, and no default privilege hands one to a table created later. This is the real run
+-- against the migrated schema.
 --
 -- Every check is the expression `09_self_test_test.sql` first showed failing against its own
 -- planted fault, kept here in the same text: each is a psql variable (`\gset`) and `:x` runs it as
@@ -41,9 +43,9 @@ begin
   end loop;
 end $$;
 
--- 21 fixed cases (C1 to C6 one each, C7's count and its validity aggregate, C8's twelve, C9),
--- plus one per C7 slot.
-select plan(21 + (
+-- 23 fixed cases (C1 to C6, C10 and C11 one each, C7's count and its validity aggregate, C8's
+-- twelve, C9), plus one per C7 slot.
+select plan(23 + (
   select count(*)::int
     from tests.matrix m
    cross join (values ('A'), ('B')) w(who)
@@ -128,6 +130,44 @@ select $c$array(select m.rel || ':' || r.role || ':' || v.verb
    order by 1)::text$c$ as c6 \gset
 select is(:c6, '{}',
   'C6: every table''s select, insert, update and delete for anon and authenticated match grants');
+
+-- C10: no relation in `public` (a table, a partitioned table, a view, a materialized view or a
+-- foreign table) lets anon or authenticated truncate, reference, trigger or maintain it. TRUNCATE
+-- skips row-level security, so on an owner-read table it is the dangerous one; MAINTAIN is PG17's
+-- member of the same class. C6 checks the four verbs and nothing else, so these four are read here,
+-- for every relation, not only the matrix's. `has_table_privilege` counts PUBLIC, so a grant to
+-- PUBLIC is named for both roles. A hit is `schema.relation:role:privilege`, the schema read from
+-- `pg_namespace`: a `regclass` cast follows `search_path` and would print `issues`, not
+-- `public.issues`. 09: truncate on `issues` to authenticated; maintain on the revoked
+-- `mail_accounts` to anon; references and trigger on `judgments` to PUBLIC.
+select $c$array(select n.nspname || '.' || c.relname || ':' || r.role || ':' || p.priv
+   from pg_class c
+   join pg_namespace n on n.oid = c.relnamespace
+   cross join (values ('anon'), ('authenticated')) r(role)
+   cross join (values ('truncate'), ('references'), ('trigger'), ('maintain')) p(priv)
+   where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
+     and has_table_privilege(r.role::name, c.oid, p.priv)
+   order by 1)::text$c$ as c10 \gset
+select is(:c10, '{}',
+  'C10: anon and authenticated hold no truncate, references, trigger or maintain on a public relation');
+
+-- C11: `postgres`'s default privileges on tables give anon, authenticated and PUBLIC nothing
+-- beyond select, insert, update and delete, so a table a later migration creates does not start
+-- with C10's four rights. Two entries apply to a table `postgres` creates in `public`: the schema's
+-- and the global one (`defaclnamespace = 0`); the global one adds to the schema's, and no
+-- per-schema revoke removes it, so both are read. PUBLIC is grantee 0 and is named `PUBLIC`. A hit
+-- is `grantee:privilege`; a right both entries carry is named twice. 09: truncate on tables granted
+-- to anon in the schema entry; trigger on tables granted to PUBLIC in a global entry.
+select $c$array(select coalesce(nullif(a.grantee::regrole::text, '-'), 'PUBLIC') || ':' || a.privilege_type
+   from pg_default_acl d
+   cross join lateral aclexplode(d.defaclacl) a
+   where d.defaclrole = 'postgres'::regrole::oid and d.defaclobjtype = 'r'
+     and d.defaclnamespace in (0::oid, 'public'::regnamespace::oid)
+     and a.grantee in (0::oid, 'anon'::regrole::oid, 'authenticated'::regrole::oid)
+     and a.privilege_type not in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+   order by 1)::text$c$ as c11 \gset
+select is(:c11, '{}',
+  'C11: postgres''s table defaults give anon, authenticated and PUBLIC only the four verbs');
 
 -- C7: the fixtures are not vacuous. Each table with an account key holds a row for A and a row
 -- for B, and each global table its one row, in the slot `tests.slot_where` names. 09: B's

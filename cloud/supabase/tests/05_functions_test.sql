@@ -1,9 +1,10 @@
 -- Functions and the admin schema (RLS pgTAP plan, D3 F1 to F5): no client role may call a
--- SECURITY DEFINER function, execute any other function in `public` or `admin` that is not a
--- trigger function (beyond the RPC allowlist, empty today), or reach `admin`. F2 leaves trigger
--- functions out: the two SECURITY INVOKER trigger functions `sync_notes_stamp_rev` and
--- `sync_usage_bump` stay executable by the client roles (plan section 1), and Postgres refuses
--- to call a trigger function outside a trigger. This is the real run against the migrated schema.
+-- SECURITY DEFINER function, execute any other function in `public` or `admin` (beyond the RPC
+-- allowlist, empty today), or reach `admin`. F2 has no trigger exemption (security-leftovers plan,
+-- R3): Postgres does not check EXECUTE when a trigger fires, so a client role needs none on a
+-- trigger function, and `20261111000100_client_table_rights.sql` revokes it on the two SECURITY
+-- INVOKER trigger functions, `sync_notes_stamp_rev` and `sync_usage_bump`, which were the only
+-- client-executable ones. This is the real run against the migrated schema.
 --
 -- F1, F2 and F5 are the checks `09_self_test_test.sql` first showed failing against their own
 -- planted faults, in the same text. F3 goes through `tests.call_outcome`, which reads `denied`
@@ -62,18 +63,18 @@ select is(
      order by fn)::text, '{}',
   'F1: no SECURITY DEFINER function in public or admin is executable by authenticated');
 
--- F2: no function that is not a trigger function, and not on the RPC allowlist (empty today), is
--- executable by a client role. 09: `sync_prune` granted to anon.
+-- F2: no function outside the RPC allowlist (empty today), a trigger function included, is
+-- executable by a client role. 09: `sync_prune` granted to anon; the trigger function
+-- `sync_notes_stamp_rev` granted to authenticated; the trigger function `sync_usage_bump` granted
+-- to PUBLIC, seen for both roles.
 select is(
   array(select c.fn from tests.client_functions('anon') c
-     where not c.is_trigger
-       and not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
+     where not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
      order by c.fn)::text, '{}',
   'F2: no function in public or admin outside the RPC allowlist is executable by anon');
 select is(
   array(select c.fn from tests.client_functions('authenticated') c
-     where not c.is_trigger
-       and not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
+     where not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
      order by c.fn)::text, '{}',
   'F2: no function in public or admin outside the RPC allowlist is executable by authenticated');
 
