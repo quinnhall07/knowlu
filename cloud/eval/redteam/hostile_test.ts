@@ -1,4 +1,4 @@
-// T2a: Layer 1 of the red-team suite, the hostile model (plan `2026-11-09-prompt-injection-suite`,
+// Layer 1 of the red-team suite, the hostile model (plan `2026-11-09-prompt-injection-suite`,
 // §4.1, §4.3 and §4.3.1). `ScriptedModel` plays a fully compromised model: it returns the worst
 // schema-shaped answers an injection could produce, and each case drives the real code path, step for
 // step as production runs it, then asserts on what would reach the device:
