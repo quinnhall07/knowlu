@@ -9,3 +9,5 @@
 TMP = { value = "target", relative = true, force = true }
 TEMP = { value = "target", relative = true, force = true }
 GIT_CEILING_DIRECTORIES = { value = "target", relative = true, force = true }
+# Loopback tests bind 127.0.0.1:0; ureq would otherwise send them through a developer's HTTP_PROXY or ALL_PROXY.
+NO_PROXY = { value = "127.0.0.1,localhost", force = true }

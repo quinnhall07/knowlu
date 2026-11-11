@@ -15,13 +15,14 @@
 --   an account id: the two C8 UUIDs are fresh and compared inside `ok()`.
 --
 -- T5a writes the cases that need no fixture rows; T5b and T5c append the rest; T9b appends the
--- review fixes' cases (the masking triggers, C9, the literal key, F3's call forms, P4, P5).
+-- review fixes' cases (the masking triggers, C9, the literal key, F3's call forms, P4, P5). The
+-- security-leftovers plan (R3) adds C10 and C11 and F2's trigger-function cases.
 begin;
 \ir _setup.psql
 \ir _matrix.psql
 \ir _fixtures.psql
 
-select plan(164);
+select plan(174);
 
 -- The platform facts P1 to P3 depend on: no migration creates a bucket, a storage policy or a
 -- publication, so whatever these print is the image's own. Names and counts only.
@@ -235,23 +236,32 @@ select is(tests.under_fault(:'f1_fault', :'f4'), 'executed',
 select is(:f4, 'denied', 'F4 control: A''s call naming B''s grant is denied, naming a function');
 
 -- F2: one SECURITY INVOKER, non-trigger function granted to anon alone. F2 lists it for anon only,
--- and F1 does not list it, so the role and the definer flag both discriminate.
+-- and F1 does not list it, so the role and the definer flag both discriminate. F2 has no trigger
+-- exemption (security-leftovers plan, R3), so a SECURITY INVOKER trigger function granted back is
+-- listed like any other: `sync_notes_stamp_rev` to authenticated alone, and `sync_usage_bump` to
+-- PUBLIC, which both client roles inherit.
 select
   $f$grant execute on function public.sync_prune(int) to anon$f$ as f2_fault,
   $c$array(select c.fn from tests.client_functions('anon') c
-     where not c.is_trigger
-       and not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
+     where not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
      order by c.fn)::text$c$ as f2_anon,
   $c$array(select c.fn from tests.client_functions('authenticated') c
-     where not c.is_trigger
-       and not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
-     order by c.fn)::text$c$ as f2_auth \gset
+     where not exists (select 1 from tests.rpc_allowlist a where a.fn = c.fn)
+     order by c.fn)::text$c$ as f2_auth,
+  $f$grant execute on function public.sync_notes_stamp_rev() to authenticated$f$ as f2_trig_fault,
+  $f$grant execute on function public.sync_usage_bump() to public$f$ as f2_public_fault \gset
 select is(tests.under_fault(:'f2_fault', :'f2_anon'), '{public.sync_prune}',
   'F2 sees a planted fault: a function anon may execute is listed');
 select is(tests.under_fault(:'f2_fault', :'f2_auth'), '{}',
   'F2 under the same fault: authenticated, which was not granted, lists nothing');
 select is(tests.under_fault(:'f2_fault', :'f1_anon'), '{}',
   'F1 under F2''s fault: an invoker function is not listed as a definer one');
+select is(tests.under_fault(:'f2_trig_fault', :'f2_auth'), '{public.sync_notes_stamp_rev}',
+  'F2 sees a planted fault: a trigger function authenticated may execute is listed');
+select is(tests.under_fault(:'f2_public_fault', :'f2_anon'), '{public.sync_usage_bump}',
+  'F2 sees a planted fault: a trigger function granted to PUBLIC is listed for anon');
+select is(tests.under_fault(:'f2_public_fault', :'f2_auth'), '{public.sync_usage_bump}',
+  'F2 sees a planted fault: a trigger function granted to PUBLIC is listed for authenticated');
 select is(:f2_anon, '{}', 'F2 control: no unlisted function is executable by anon');
 select is(:f2_auth, '{}', 'F2 control: no unlisted function is executable by authenticated');
 
@@ -579,6 +589,71 @@ select is(
 select is(tests.under_fault(:'c6_fault', :'o1')::bigint, -1::bigint,
   'C6''s fault seen by O1: A''s count of public.issues is a privilege refusal (-1)');
 select is(:c6, '{}', 'C6 control: every table''s client verbs match the matrix');
+
+-- C10: no relation in `public` lets anon or authenticated truncate, reference, trigger or maintain
+-- it. One right on a default-grant owner-read table, one on a revoked table, and two granted to
+-- PUBLIC, which `has_table_privilege` counts for both roles, so one grant names four hits. Each hit
+-- is spelled `public.<relation>`, from `pg_namespace`, never a `regclass` cast.
+select $c$array(select n.nspname || '.' || c.relname || ':' || r.role || ':' || p.priv
+   from pg_class c
+   join pg_namespace n on n.oid = c.relnamespace
+   cross join (values ('anon'), ('authenticated')) r(role)
+   cross join (values ('truncate'), ('references'), ('trigger'), ('maintain')) p(priv)
+   where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f')
+     and has_table_privilege(r.role::name, c.oid, p.priv)
+   order by 1)::text$c$ as c10 \gset
+select is(tests.under_fault($f$grant truncate on public.issues to authenticated$f$, :'c10'),
+  '{public.issues:authenticated:truncate}',
+  'C10 sees a planted fault: truncate authenticated holds on an owner-read table is named');
+select is(tests.under_fault($f$grant maintain on public.mail_accounts to anon$f$, :'c10'),
+  '{public.mail_accounts:anon:maintain}',
+  'C10 sees a planted fault: maintain anon holds on a revoked table is named');
+select is(
+  tests.under_fault($f$grant references, trigger on public.judgments to public$f$, :'c10'),
+  '{public.judgments:anon:references,public.judgments:anon:trigger,'
+    || 'public.judgments:authenticated:references,public.judgments:authenticated:trigger}',
+  'C10 sees a planted fault: references and trigger granted to PUBLIC are named for both roles');
+select is(:c10, '{}',
+  'C10 control: no client role holds truncate, references, trigger or maintain on a public relation');
+
+-- C11: `postgres`'s default privileges on tables, its `public` schema entry and its global entry,
+-- give anon, authenticated and PUBLIC nothing beyond the four verbs. One fault per entry: truncate
+-- for anon in the schema entry, and trigger for PUBLIC in a global entry, so both the global read
+-- and the PUBLIC grantee are seen. A new global entry starts from the built-in defaults, which give
+-- PUBLIC no table right, so the second fault names exactly one hit. Changing `postgres`'s default
+-- privileges needs a role that may act as `postgres` (`pg_has_role(..., 'SET')`, which a superuser
+-- always may); the diag names this file's role, and without that right both faults fail by name
+-- rather than abort the file.
+select $c$array(select coalesce(nullif(a.grantee::regrole::text, '-'), 'PUBLIC') || ':' || a.privilege_type
+   from pg_default_acl d
+   cross join lateral aclexplode(d.defaclacl) a
+   where d.defaclrole = 'postgres'::regrole::oid and d.defaclobjtype = 'r'
+     and d.defaclnamespace in (0::oid, 'public'::regnamespace::oid)
+     and a.grantee in (0::oid, 'anon'::regrole::oid, 'authenticated'::regrole::oid)
+     and a.privilege_type not in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+   order by 1)::text$c$ as c11 \gset
+select pg_has_role(current_user, 'postgres', 'SET') as c11_plant \gset
+select diag('C11 faults: ' || case when :'c11_plant'::boolean
+  then 'planted as ' || current_user
+  else 'not planted, ' || current_user || ' may not act as postgres' end);
+\if :c11_plant
+select is(
+  tests.under_fault(
+    $f$alter default privileges for role postgres in schema public
+         grant truncate on tables to anon$f$, :'c11'),
+  '{anon:TRUNCATE}',
+  'C11 sees a planted fault: a public schema default granting anon truncate is named');
+select is(
+  tests.under_fault(
+    $f$alter default privileges for role postgres grant trigger on tables to public$f$, :'c11'),
+  '{PUBLIC:TRIGGER}',
+  'C11 sees a planted fault: a global default granting PUBLIC trigger is named');
+\else
+select fail('C11 sees a planted fault: this role may not act as postgres, so no schema default is planted');
+select fail('C11 sees a planted fault: this role may not act as postgres, so no global default is planted');
+\endif
+select is(:c11, '{}',
+  'C11 control: postgres''s table defaults give anon, authenticated and PUBLIC only the four verbs');
 
 -- C7: the fixtures are not vacuous. Each table with an account key holds a row for A and a row
 -- for B, and each global table holds its one row (named `global`): in every case the slot
