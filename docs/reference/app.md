@@ -261,6 +261,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   registered** — a self-hosted runner on a public repository runs any fork's pull request on the
   runner's machine, so the switch stays off for as long as the repository is public. Workflow runs
   from outside contributors need a maintainer's approval (`all_external_contributors`).
+  A third workflow, `redteam-weekly.yml`, replays the red-team suite (`cloud/eval/redteam/`) against the pinned judgment models on `main`, Mondays 07:41 UTC and on manual dispatch; it is report-only and blocks nothing.
 - Desktop safety: a live shared desktop — never synthetic keyboard/mouse input; screenshots by
   window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
   vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
