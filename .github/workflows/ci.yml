@@ -215,9 +215,10 @@ jobs:
     runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && fromJSON('["self-hosted","windows","x64","knowlu-ci"]') || 'ubuntu-latest' }}
     needs: [changes, cloud]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-    # The `eval suite` step's own 20 plus the `red-team suite` step's own 30: a job that runs out its
-    # clock fails this required check, past any step's continue-on-error.
-    timeout-minutes: 50
+    # The `eval suite` step's own 20 plus the `red-team suite` step's own 30, plus ten for checkout,
+    # setup and the earlier steps: a job that runs out its clock fails this required check, past any
+    # step's continue-on-error, so the steps' own bounds must always trip first.
+    timeout-minutes: 60
     # A-6: the staging project's host, named once at job level and referenced below (each suite
     # step's own `SUPABASE_URL` and its `--allow-net` list; the `red-team suite` step reads it as a
     # shell variable) — the literal used to appear twice, independently, which is exactly the

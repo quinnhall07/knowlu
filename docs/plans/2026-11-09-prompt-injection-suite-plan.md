@@ -960,3 +960,13 @@ Rulings taken while executing T3a to T8 that refine the text above. Each was rev
   hardening lane widens it before it removes `continue-on-error`.
 - **Merge (T9).** PR B merges only once `OPENROUTER_REDTEAM_API_KEY` exists: without it the PR step
   reports a harness fault and the weekly run is red. T7's first live run follows the key.
+- **The key's cap (T9).** Quinn set it at $10 a month on the key itself, superseding the $5
+  recommendation in §6, §8 and §10. T6 was built on the plan's design before that answer; no code
+  depends on the figure, and the runner's printed ceiling stays the per-run bound.
+- **T9's fixes.** `eval-gate`'s clock is 60 minutes (the two steps' 20 and 30 plus ten for setup),
+  so a step's own bound always trips before the required check's; `workflows.rs` pins the weekly
+  workflow's `STAGING_HOST` to `eval-gate`'s, byte for byte.
+- **Carries.** The step runs on every push to a PR that touches its trigger, and `ci.yml` has no
+  concurrency group, so a PR pushed many times spends once a push: the hardening lane adds a per-PR
+  concurrency group for the step before it removes `continue-on-error`. T6's proof on a real PR (a
+  README-only change runs the step, a `docs/`-only change runs neither) is owed before merge.

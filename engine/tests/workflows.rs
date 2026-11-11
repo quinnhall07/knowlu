@@ -403,6 +403,22 @@ fn the_red_team_key_is_named_only_in_the_red_team_suite_step_and_the_weekly_work
         runner_line("ci.yml", step_block(job_block(&ci, "eval-gate"), "red-team suite")),
         "the weekly runner line differs from ci.yml's red-team suite runner line"
     );
+    // The host the runner may reach is eval-gate's, byte for byte: the weekly run can never point
+    // at another project while the PR step points at staging.
+    let host_line = |name: &str, text: &str| -> String {
+        let lines: Vec<String> = code_lines(text)
+            .into_iter()
+            .filter(|l| l.trim_start().starts_with("STAGING_HOST:"))
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert_eq!(lines.len(), 1, "{name}: exactly one STAGING_HOST line: {lines:?}");
+        lines.into_iter().next().unwrap()
+    };
+    assert_eq!(
+        host_line("redteam-weekly.yml", &workflow("redteam-weekly.yml")),
+        host_line("ci.yml eval-gate", job_block(&ci, "eval-gate")),
+        "the weekly workflow's STAGING_HOST differs from eval-gate's"
+    );
 }
 
 /// A secret reaches a step only by its own name. `toJSON(secrets)` dumps every secret into one value

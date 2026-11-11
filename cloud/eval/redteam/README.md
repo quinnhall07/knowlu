@@ -214,10 +214,10 @@ that fixture.
   `continue-on-error: true`, so a critical shows as a failed step inside a green job. The weekly run
   blocks nothing, so a red weekly run is the alert.
 - The PR step's trigger (the `redteam` pattern in `ci.yml`'s `touched` step) is narrower than the
-  runner's imports. Files `run_redteam.ts` imports, such as `cloud/eval/run_eval.ts`,
-  `cloud/eval/score.ts` and the shared `judge_*.ts` files (`judge_provider.ts`, `judge_pipeline.ts`,
-  `judge_prompts.ts`, `judge_models.ts`, `judge_anthropic.ts`, `judge_db.ts`, `judge_caps.ts`,
-  `judge_validate.ts`) and `scrub.ts`, don't start the step on their own. The weekly run is the net.
+  runner's imports. Some files `run_redteam.ts` imports don't start the step on their own:
+  `cloud/eval/run_eval.ts`, `cloud/eval/score.ts`, and the shared `judge_provider.ts`,
+  `judge_openrouter.ts`, `judge_anthropic.ts`, `judge_db.ts` and `judge_caps.ts`. The weekly run is
+  the net.
   The hardening lane must widen the trigger to every file the runner imports before it removes
   `continue-on-error`.
 
