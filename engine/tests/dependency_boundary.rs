@@ -143,3 +143,17 @@ fn the_sync_module_holds_no_key_and_no_envelope() {
         assert!(!src.contains(gone), "engine/src/sync.rs still names {gone}");
     }
 }
+
+/// Loopback tests never go through a developer's proxy: ureq reads ALL_PROXY, HTTPS_PROXY and HTTP_PROXY, so
+/// `.cargo/config.toml` forces NO_PROXY for every process cargo starts, over a developer's own (plan R5).
+#[test]
+fn every_cargo_test_process_bypasses_a_proxy_for_loopback() {
+    let no_proxy = std::env::var("NO_PROXY").unwrap_or_default();
+    let hosts: Vec<&str> = no_proxy.split(',').map(str::trim).collect();
+    for host in ["127.0.0.1", "localhost"] {
+        assert!(hosts.contains(&host), "NO_PROXY must name {host}, got `{no_proxy}`");
+    }
+    let line = r#"NO_PROXY = { value = "127.0.0.1,localhost", force = true }"#;
+    let config = include_str!("../../.cargo/config.toml");
+    assert!(config.lines().any(|l| l.trim() == line), "`.cargo/config.toml` must force NO_PROXY: {line}");
+}
