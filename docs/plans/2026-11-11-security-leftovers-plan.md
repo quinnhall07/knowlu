@@ -1,7 +1,8 @@
 # Security leftovers (advisor gate, client table rights, guard gaps, loopback proxy): plan
 
-**Status: r1, for plan review r2.** Plan review r1 (`docs/reports/2026-11-11-security-leftovers-plan-review-r1.md`)
-returned FAIL (0 Critical, 3 Important, 10 Minor); §9 maps each finding to its answer. **Date:** 2026-11-11.
+**Status: executed.** Plan reviews r1 and r2 (`docs/reports/2026-11-11-security-leftovers-plan-review-r{1,2}.md`)
+returned FAIL; §9 maps r1's findings to their answers, and the closing paragraph records r2's. The branch review is
+`docs/reports/2026-11-11-security-leftovers-review.md` (PASS). **Date:** 2026-11-11.
 **Size: Contract** (a migration). **Branch:** `security/leftovers` (worktree `../knowlu-leftovers`, from `origin/main`
 at `0926f0c1`). The branch and this plan stay local until production has the migration (R7).
 
@@ -364,6 +365,9 @@ O1–O3 and O7 of r0 were accepted at review r1 and are closed.
   and the corpus passes it (F-I).
 - **O5 (F-J).** *Recommended:* carry `assertExecuteRevoked`'s gaps to a later lane; F2 reads every function's real
   rights, and T1b's helpers make the change one call.
+  *Carried with it (branch review m1):* the definer guard still reads `to group anon` as no grantee, misses a re-grant
+  whose list also names a function `\w+` cannot read, drops schema qualifiers (T1b's ruling), assumes `public` for an
+  unqualified definition, and folds `"F"` into `f`. No migration uses these forms, and F1 and F2 read real rights.
 - **O6.** This plan's additions, each to strike if unwanted: PUBLIC in C11, R5's `force = true` check, the no-`models`
   assertion, R4 (d), the queries' local runs before C2, and the `toolchain.md` line.
 - **O8 (new, r1 M2).** If the red run's C11 names a global (`defaclnamespace = 0`) `postgres` table default granting a

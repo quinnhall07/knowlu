@@ -184,6 +184,8 @@ commands, for instance `$env:SUPABASE_DB_PORT = "55322"`.
   on insert or update, which those files switch off for their write probes) or in `tests.stamp_only`; otherwise
   coverage check C9 fails. `tests.stamp_only` pins the body of `public.sync_notes_stamp_rev()` by `md5`, so changing
   that function means re-pinning in the same commit. That failure is deliberate.
+- **A new trigger function** needs `revoke execute on function … from public, anon, authenticated` in its migration:
+  F2 (`05_functions_test.sql`) exempts no trigger function, so one left executable by a client role fails by name.
 - **A new check** needs its own planted fault in `09_self_test_test.sql` first: 09 shows every check failing
   against its fault, so a test that can never fail cannot be added green.
 - **A CLI bump** updates `SUPABASE_CLI_VERSION`, `SUPABASE_CLI_SHA256` (both in the `cloud-rls` job) and
