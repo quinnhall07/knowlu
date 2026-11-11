@@ -522,13 +522,204 @@ Deno.test("a trigger function is exempt from the execute-revoke guard by kind, n
   );
 });
 
+// Security leftovers R4 (plan 2026-11-11): the helpers the definer guard below reads signatures and
+// grant and revoke statements with. `FUNCTION_DEFINITION` is left as it is: its `\([^)]*\)` stops at
+// the first `)`, which is enough to find a definition, and four readers take its third group as the
+// dollar tag, so a signature is read by a separate scan instead.
+
+/** The text inside the `(` at `open` and its matching `)`, and that `)`'s offset, skipping `'…'`
+ * literals and `"…"` identifiers; `undefined` when it never closes. */
+function balancedParens(text: string, open: number): { inner: string; close: number } | undefined {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"') {
+      const end = text.indexOf(ch, i + 1);
+      if (end === -1) return undefined;
+      i = end;
+    } else if (ch === "(") {
+      depth++;
+    } else if (ch === ")" && --depth === 0) {
+      return { inner: text.slice(open + 1, i), close: i };
+    }
+  }
+  return undefined;
+}
+
+/** `text` split at each `sep` outside parentheses, brackets, `'…'` and `"…"`. */
+function splitTopLevel(text: string, sep: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let quote = "";
+  let cur = "";
+  for (const ch of text) {
+    if (quote !== "") {
+      if (ch === quote) quote = "";
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === "(" || ch === "[") {
+      depth++;
+    } else if (ch === ")" || ch === "]") {
+      depth--;
+    } else if (ch === sep && depth === 0) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/** One argument without its top-level `default …` or `= …` tail. */
+function withoutDefault(arg: string): string {
+  let depth = 0;
+  for (let i = 0; i < arg.length; i++) {
+    const ch = arg[i];
+    if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    else if (depth === 0 && (ch === "=" || (/\s/.test(arg[i - 1] ?? " ") && /^default\b/i.test(arg.slice(i))))) {
+      return arg.slice(0, i);
+    }
+  }
+  return arg;
+}
+
+/** A first word that may start a type of several words, so it is never a parameter's name. */
+const MULTI_WORD_TYPE_START = new Set(["timestamp", "time", "character", "double", "bit", "interval", "national"]);
+/** The spellings a signature may use for one type, each to the name Postgres prints. */
+const TYPE_ALIASES: Record<string, string> = {
+  int: "integer",
+  int4: "integer",
+  int8: "bigint",
+  bool: "boolean",
+  timestamptz: "timestamp with time zone",
+  varchar: "character varying",
+  float8: "double precision",
+};
+
 /**
- * `files`, sorted: every SECURITY DEFINER function, a `returns trigger` one included, needs a
- * `revoke execute … from …` naming both `anon` and `authenticated` in its file or a later one. The
- * guard above exempts trigger functions by kind, and Postgres refuses a direct call to one, but the
- * Security Advisor (lints 0028/0029) still reads a definer function that client roles may EXECUTE as
- * exposed, so EXECUTE is not left granted to them either way. A trigger fires whatever EXECUTE says:
- * the trigger manager does not check it. Returns every definer name it checked.
+ * R4 (b): an argument list's signature, its input types in order. An empty list is no argument; each
+ * argument loses its default, is lower-cased with its whitespace collapsed, loses a leading `in`,
+ * `inout` or `variadic` (an `out` argument is no part of a signature), then its name (unless it is a
+ * single word or starts a type of several words), then every type modifier, which Postgres ignores in
+ * a signature; `[]` stays, and the aliases above are mapped. An empty argument in a non-empty list, or
+ * an argument left with no type, throws naming `fn`: a signature the guard cannot read is a failure.
+ */
+function signatureOf(list: string, fn: string): string[] {
+  if (list.trim() === "") return [];
+  const types: string[] = [];
+  for (const raw of splitTopLevel(list, ",")) {
+    const arg = withoutDefault(raw).toLowerCase().replace(/\s+/g, " ")
+      .replace(/ ?([([,]) ?/g, "$1").replace(/ ([)\]])/g, "$1").trim();
+    assert(arg !== "", `${fn}: an empty argument in (${list.trim()}), so the guard cannot read its signature`);
+    let words = splitTopLevel(arg, " ").filter((w) => w !== "");
+    if (words[0] === "out") continue;
+    if (["in", "inout", "variadic"].includes(words[0])) words = words.slice(1);
+    if (words.length > 1 && !MULTI_WORD_TYPE_START.has(words[0].replace(/[([].*$/, ""))) words = words.slice(1);
+    let type = words.join(" ");
+    while (/\([^()]*\)/.test(type)) type = type.replace(/\([^()]*\)/g, "");
+    const [, base, brackets] = /^(.*?)((?:\[\])*)$/.exec(type.replace(/\s+/g, " ").trim())!;
+    type = (TYPE_ALIASES[base] ?? base) + brackets;
+    assert(base !== "", `${fn}: an argument with no type in (${list.trim()}), so the guard cannot read its signature`);
+    types.push(type);
+  }
+  return types;
+}
+
+/** A role list after `to` or `from`, up to `with grant option`, `granted by`, `cascade` or
+ * `restrict`: each role unquoted and lower-cased. */
+function granteesOf(text: string): string[] {
+  const end = text.search(/\b(?:with\s+grant\s+option|granted\s+by|cascade|restrict)\b/i);
+  return (end === -1 ? text : text.slice(0, end)).split(",").map((r) => r.replace(/"/g, "").trim().toLowerCase())
+    .filter((r) => r !== "");
+}
+
+const CLIENT_GRANTEES = ["public", "anon", "authenticated"];
+
+/** One grant or revoke of a routine right, read from its keyword to the statement's `;`. */
+type RoutineRight = {
+  kind: "grant" | "revoke";
+  /** Whether the privileges include EXECUTE (`execute`, `all` or `all privileges`). */
+  execute: boolean;
+  /** Each named routine, by unquoted, lower-cased name, with its argument list when it has one. */
+  items: Array<{ name: string; args?: string }>;
+  /** For `all functions` or `all routines in schema …`: the schemas, unquoted and lower-cased. */
+  allIn?: string[];
+  grantees: string[];
+};
+
+/**
+ * R4 (c): `stmt` as a grant or revoke of a right on a routine, or `undefined` when it is some other
+ * statement. A revoke reads `revoke (execute | all [privileges]) on (function | routine) <list> from
+ * …`; a grant reads `grant <privileges> on (function | routine | procedure) <list> to …` or `grant
+ * <privileges> on all (functions | routines) in schema … to …`. The grantees are the list after the
+ * top-level `to` or `from` that follows the object list, so a schema qualifier in that list is never
+ * read as PUBLIC. A list item whose argument list does not close throws naming `fn`.
+ */
+function routineRight(stmt: string, fn: string): RoutineRight | undefined {
+  const m = /^(grant|revoke)\s+([\s\S]*?)\s+on\s+([\s\S]*)$/i.exec(stmt.trim());
+  if (m === null) return undefined;
+  const kind = m[1].toLowerCase() as "grant" | "revoke";
+  const privileges = m[2].split(",").map((p) => p.replace(/\s+/g, " ").trim().toLowerCase());
+  if (kind === "revoke" && (privileges.length !== 1 || !/^(?:execute|all(?: privileges)?)$/.test(privileges[0]))) {
+    return undefined;
+  }
+  const execute = privileges.some((p) => /^(?:execute|all(?: privileges)?)$/.test(p));
+  const target = m[3];
+  const keyword = kind === "grant" ? "to" : "from";
+  const all = new RegExp(`^all\\s+(?:functions|routines)\\s+in\\s+schema\\s+([\\s\\S]*?)\\s+${keyword}\\s+([\\s\\S]*)$`, "i")
+    .exec(target);
+  if (all !== null) {
+    if (kind === "revoke") return undefined;
+    return { kind, execute, items: [], allIn: granteesOf(all[1]), grantees: granteesOf(all[2]) };
+  }
+  const objects = (kind === "grant" ? /^(?:function|routine|procedure)\s+/i : /^(?:function|routine)\s+/i).exec(target);
+  if (objects === null) return undefined;
+  const items: Array<{ name: string; args?: string }> = [];
+  const ident = /\s*(?:"?\w+"?\s*\.\s*)?"?(\w+)"?\s*/y;
+  let at = objects[0].length;
+  for (;;) {
+    ident.lastIndex = at;
+    const id = ident.exec(target);
+    if (id === null) return undefined;
+    at = ident.lastIndex;
+    let args: string | undefined;
+    if (target[at] === "(") {
+      const scan = balancedParens(target, at);
+      assert(scan !== undefined, `${fn}: an argument list in '${stmt.trim()}' does not close`);
+      args = scan.inner;
+      at = scan.close + 1;
+    }
+    items.push({ name: id[1].toLowerCase(), args });
+    const next = /\s*(,?)/y;
+    next.lastIndex = at;
+    const sep = next.exec(target)!;
+    at = next.lastIndex;
+    if (sep[1] !== ",") break;
+  }
+  const tail = new RegExp(`^\\s*${keyword}\\s+([\\s\\S]*)$`, "i").exec(target.slice(at));
+  if (tail === null) return undefined;
+  return { kind, execute, items, grantees: granteesOf(tail[1]) };
+}
+
+/**
+ * `files`, sorted: every SECURITY DEFINER function, a `returns trigger` one included, needs EXECUTE
+ * revoked from `public`, `anon` and `authenticated`, and no client role given it back. The guard above
+ * exempts trigger functions by kind, and Postgres refuses a direct call to one, but the Security
+ * Advisor (lints 0028/0029) still reads a definer function that client roles may EXECUTE as exposed,
+ * so EXECUTE is not left granted to them either way. A trigger fires whatever EXECUTE says: the
+ * trigger manager does not check it.
+ *
+ * Security leftovers R4 (plan 2026-11-11). From the definition's own offset, through every later
+ * file, the guard reads each statement from a `grant` or `revoke` to its `;` (`routineRight`). A
+ * qualifying revoke names the function, with its signature (`signatureOf`, read by a balanced scan
+ * from the definition's `(`) or with no argument list, and revokes from `public`, `anon` and
+ * `authenticated` as whole roles: a new function's EXECUTE is PUBLIC's too, and both client roles
+ * inherit it. A re-grant gives EXECUTE to `public`, `anon` or `authenticated` on the function, or on
+ * every function or routine in its schema. The guard fails with no qualifying revoke, or with a
+ * re-grant after the last one. Returns every definer name it checked.
  */
 export function assertDefinerRevoked(files: Array<[string, string]>): string[] {
   const stripped = files.map(([name, sql]) => [name, stripLineComments(sql)] as [string, string]);
@@ -538,16 +729,44 @@ export function assertDefinerRevoked(files: Array<[string, string]>): string[] {
     for (const d of sql.matchAll(FUNCTION_DEFINITION)) {
       if (!/security\s+definer/i.test(d[0])) continue;
       const fn = d[2];
-      const rest = stripped.slice(i).map(([, s]) => s).join("\n");
-      const revokeRe = new RegExp(
-        `revoke\\s+execute\\s+on\\s+function\\s+${identPattern(fn)}\\s*\\([^)]*\\)\\s+from\\s+([^;]+);`,
-        "gi",
+      const head = new RegExp(
+        `create\\s+(?:or\\s+replace\\s+)?function\\s+(?:"?(public|admin)"?\\s*\\.\\s*)?"?${fn}"?\\s*\\(`,
+        "i",
+      ).exec(d[0]);
+      assert(head !== null, `${name}: SECURITY DEFINER ${fn}: its parameter list cannot be found`);
+      const schema = (head[1] ?? "public").toLowerCase();
+      const scan = balancedParens(d[0], head.index + head[0].length - 1);
+      assert(
+        scan !== undefined && scan.close < d[1].length,
+        `${name}: SECURITY DEFINER ${fn}: its parameter list does not close before its body`,
       );
-      const ok = [...rest.matchAll(revokeRe)].some((m) => {
-        const from = m[1].toLowerCase();
-        return from.includes("anon") && from.includes("authenticated");
-      });
-      assert(ok, `${name}: SECURITY DEFINER ${fn} has no revoke of execute naming both anon and authenticated`);
+      const signature = signatureOf(scan.inner, fn);
+      const names = (r: RoutineRight) =>
+        (r.allIn?.includes(schema) ?? false) ||
+        r.items.some((it) =>
+          it.name === fn.toLowerCase() &&
+          (it.args === undefined || JSON.stringify(signatureOf(it.args, fn)) === JSON.stringify(signature))
+        );
+      const rest = [sql.slice(d.index ?? 0), ...stripped.slice(i + 1).map(([, s]) => s)].join("\n");
+      let lastRevoke = -1;
+      const regrants: Array<[number, string]> = [];
+      for (const k of rest.matchAll(/\b(?:grant|revoke)\b/gi)) {
+        const at = k.index ?? 0;
+        const stop = rest.indexOf(";", at);
+        const stmt = rest.slice(at, stop === -1 ? undefined : stop);
+        const r = routineRight(stmt, fn);
+        if (r === undefined || !r.execute || !names(r)) continue;
+        if (r.kind === "revoke" && CLIENT_GRANTEES.every((g) => r.grantees.includes(g))) lastRevoke = at;
+        if (r.kind === "grant" && r.grantees.some((g) => CLIENT_GRANTEES.includes(g))) {
+          regrants.push([at, stmt.replace(/\s+/g, " ").trim()]);
+        }
+      }
+      assert(
+        lastRevoke !== -1,
+        `${name}: SECURITY DEFINER ${fn} has no later revoke of execute from public, anon and authenticated`,
+      );
+      const late = regrants.filter(([at]) => at > lastRevoke).map(([, s]) => s);
+      assertEquals(late, [], `${name}: SECURITY DEFINER ${fn} is granted execute to a client role after its last revoke`);
       checked.push(fn);
     }
   }
