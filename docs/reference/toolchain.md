@@ -41,6 +41,14 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   (2026-10-24), slowing every tool that lists it. `cargo clean` removes them. It is `target/` itself
   because the linker needs the directory to exist before anything is built, and
   `GIT_CEILING_DIRECTORIES` stops git there so a scratch dir still reads as "not a repository".
+- **Loopback tests bypass a developer's proxy.** `.cargo/config.toml` forces
+  `NO_PROXY=127.0.0.1,localhost` for every process cargo starts, so an `HTTP_PROXY` or `ALL_PROXY` in
+  the shell cannot send a test that binds `127.0.0.1:0` off the machine. Deno's loopback tests are not
+  covered by cargo's `[env]`.
+- **A reserved port range stops the local database.** Windows can reserve the default Supabase ports
+  (Hyper-V and WinNAT excluded ranges; `netsh interface ipv4 show excludedportrange protocol=tcp` lists
+  them). Set `SUPABASE_DB_PORT` (for example `55322`) in the shell before `supabase --workdir cloud db
+  start`; `config.toml` stays as it is. See `cloud/supabase/README.md`, Testing.
 - **Line endings: LF everywhere in this repo** (`.gitattributes`: `* text=auto eol=lf`; `*.ps1` are
   CRLF). `engine/tests/fixtures/**` is `-text`: those bytes are the contract — several are compared
   byte for byte and they are CRLF because vaults are — **never re-encode them**. The engine still

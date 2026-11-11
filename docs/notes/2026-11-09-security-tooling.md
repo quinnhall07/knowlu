@@ -16,10 +16,17 @@ This note records what is switched on, where it runs, and every exception with i
 | actionlint 1.7.12 (binary, SHA-256 checked) | `security.yml` | Fails on any finding |
 | gitleaks 8.30.1 (full history, binary, SHA-256 checked) | `security.yml` | Fails on any finding |
 | cargo-deny (`deny.toml`) | `security.yml` | `bans licenses sources` always fail; `advisories` fail on main and the Monday run, report-only on a PR |
+| Supabase Security Advisor's security lints, run by `supabase db advisors` (the CLI `cloud-rls` already pins and checksums) on the local database after pgTAP | `ci.yml`, job `cloud-rls` | Fails on any warning. Its lint set lacks 0028/0029 (definer functions a client role may execute); pgTAP's F1 and F2 read those |
 
 `security.yml` is not a required check; `ci.yml`'s three stay the required set. Every workflow is
 covered by `engine/tests/workflows.rs`'s SHA-pin and `pull_request_target` tests, which now read
 the whole `.github/workflows/` folder.
+
+2026-11-11, the first read of production's advisor: production and staging are identical. It
+reports 26 informational `rls_enabled_no_policy` lints, which are the service-only tables, by
+design, and one warning, `auth_leaked_password_protection`. That one is an Auth setting rather than
+SQL, so the local gate does not cover it; it is left to HANDOFF's Pilot row "C1b's open sign-in
+settings".
 
 ## Exceptions, each reviewed
 
@@ -40,6 +47,21 @@ the whole `.github/workflows/` folder.
 - `clipboard-win` 5.4.1 -> 5.4.3 (the old version was yanked).
 - `persist-credentials: false` on every `actions/checkout` (nothing after checkout uses git
   credentials; `gh release` reads `GH_TOKEN`).
+
+## Fixed 2026-11-11
+
+- Client roles (`anon`, `authenticated`) no longer hold TRUNCATE, REFERENCES, TRIGGER or MAINTAIN on
+  any `public` relation, nor through `postgres`'s default privileges for new tables. They also no
+  longer hold EXECUTE on the two trigger functions `sync_notes_stamp_rev` and `sync_usage_bump`.
+  Migration `20261111000100_client_table_rights.sql`; pgTAP checks C10 and C11 and the tightened F2
+  now hold this.
+- The static definer guard in `migrations_test.ts` now requires PUBLIC as well as the two client
+  roles in the revoke. It matches argument signatures (overloads) and fails on a later re-grant.
+- Cargo-run test processes force `NO_PROXY=127.0.0.1,localhost` (`.cargo/config.toml`), so a
+  developer's `HTTP_PROXY` cannot send loopback tests off the machine. Deno's loopback tests are not
+  covered by cargo's `[env]`.
+- GitHub secret-scanning alert #1 was resolved 2026-11-11 as used in tests. It was a fake key in the
+  scrubber tests, already listed in `.gitleaksignore`.
 
 ## Findings
 

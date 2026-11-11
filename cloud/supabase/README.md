@@ -165,7 +165,17 @@ commands from the repository root:
 ```powershell
 supabase --workdir cloud db start
 supabase --workdir cloud test db
+supabase --workdir cloud db advisors --type security --level warn --fail-on warn --output-format text
 ```
+
+The third command is the Supabase Security Advisor's security lints on the same local database, and `cloud-rls` runs
+it as its own step after the suite. It fails on any warning. Its lint set lacks 0028 and 0029 (definer functions a
+client role may execute); the suite's F1 and F2 read those.
+
+`SUPABASE_DB_PORT` (for example `55322`) overrides the local database port for one machine, without editing
+`config.toml`. Use it when Windows reserves the default port range (Hyper-V and WinNAT excluded ranges;
+`netsh interface ipv4 show excludedportrange protocol=tcp` lists them): set it in the shell before the three
+commands, for instance `$env:SUPABASE_DB_PORT = "55322"`.
 
 - **A new table or view** needs a row in `tests/_matrix.psql` and a case in `tests/_setup.psql`'s `tests.insert_sql`
   (`tests.slot_where` too, for a global table). `_fixtures.psql` loops over the matrix, so it needs no edit.
