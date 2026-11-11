@@ -118,11 +118,35 @@ function numericOffset(sign: string, hh: string, mm: string): number {
   return sign === "-" ? -minutes : minutes;
 }
 
+/** `s` without its trailing comments: what `/(?:\s*\([^()]*\))+$/` would remove, one or more
+ * `(...)` groups with no parenthesis inside, each with the whitespace before it. A comment is set
+ * aside, never read, so a zone name in one is never the offset. Done by hand from the end, in one
+ * pass over the line. A nested or unclosed comment stops the pass, and the pattern then fails on
+ * what is left. */
+function withoutTrailingComments(s: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === ")") {
+    const open = s.lastIndexOf("(", end - 1);
+    if (open === -1 || s.indexOf(")", open) !== end - 1) break;
+    end = open;
+    while (end > 0 && /\s/.test(s[end - 1])) end -= 1;
+  }
+  return s.slice(0, end);
+}
+
+/** The longest Date line, trailing comments set aside, that is read at all. A real one is under
+ * a hundred characters; anything longer is not a Date header, and is null. */
+const MAX_DATE_LINE = 200;
+
 function parseStamp(dateLine: string): Stamp | null {
   const s = dateLine.trim();
+  const bare = withoutTrailingComments(s);
+  if (bare.length > MAX_DATE_LINE) return null;
+  // The zone and the whitespace before it are one optional group, so the whitespace around an
+  // absent zone has one reading.
   const rfc =
-    /^(?:[A-Za-z]{3},\s*)?(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*\s+(\d{2,4})\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*([+-]\d{4}|[A-Za-z]{1,5})?\s*$/;
-  const m1 = rfc.exec(s);
+    /^(?:[A-Za-z]{3},\s*)?(\d{1,2})\s+([A-Za-z]{3})[A-Za-z]*\s+(\d{2,4})\s+(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*([+-]\d{4}|[A-Za-z]{1,5}))?\s*$/;
+  const m1 = rfc.exec(bare);
   if (m1) {
     const day = Number(m1[1]);
     const monthIdx = MONTHS.indexOf(m1[2].toLowerCase());
@@ -164,9 +188,10 @@ function parseStamp(dateLine: string): Stamp | null {
  * numeric `[+-]HHMM`, `UT`/`GMT`/`Z`, or one of the obsolete US zone names — or, defensively, a
  * plain ISO 8601 stamp (`YYYY-MM-DD[THH:MM[:SS]][zone]`), into the header's own wall clock. The
  * zone is matched so it is never mistaken for part of the date or time; `resolveDue` reads it
- * separately. Returns `null` for anything else, or for a date that is not a real calendar day
- * (`31 Feb`, an hour past 23, a minute past 59) — a reference this module cannot trust is a
- * phrase it cannot resolve.
+ * separately. Trailing comments after an RFC 5322 header, such as `(UTC)`, are ignored, and the
+ * zone before them is the zone. Returns `null` for anything else, for a line longer than any real
+ * header, or for a date that is not a real calendar day (`31 Feb`, an hour past 23, a minute past
+ * 59) -- a reference this module cannot trust is a phrase it cannot resolve.
  */
 export function parseDateLine(dateLine: string): ReferenceDate | null {
   return parseStamp(dateLine)?.local ?? null;
@@ -300,7 +325,9 @@ function clockTime(h: string, m: string | undefined, ampm: string | undefined): 
  * than silently dropping the time a student actually wrote.
  */
 function splitTime(phrase: string): { rest: string; time: { hour: number; minute: number } | null } {
-  const m = /\s*\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*$/i.exec(phrase);
+  // The match starts at "at" itself (the words before it are trimmed below), and am/pm and the
+  // whitespace before it are one optional group, so each run of whitespace has one reading.
+  const m = /\bat\s+(\d{1,2})(?::(\d{2}))?(?:\s*(am|pm))?\s*$/i.exec(phrase);
   if (!m) return { rest: phrase, time: null };
   const time = clockTime(m[1], m[2], m[3]);
   if (time === null) return { rest: phrase, time: null };
@@ -318,9 +345,13 @@ const WEEKDAY_NAMES: Record<string, number> = {
   sunday: 0, sun: 0, monday: 1, mon: 1, tuesday: 2, tues: 2, tue: 2, wednesday: 3, wed: 3,
   thursday: 4, thurs: 4, thur: 4, thu: 4, friday: 5, fri: 5, saturday: 6, sat: 6,
 };
+// After the time, am/pm and the whitespace before it are one optional group, as the zone and its
+// whitespace are, so each run of whitespace has one reading; trailing whitespace with neither is
+// its own alternative.
 const LONG_FORM_RE = new RegExp(
   "^(?:([a-z]+)\\.?,?\\s+)?([a-z]+)\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})" +
-    "(?:,?\\s+(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*([ap]\\.?m\\.?)?(?:\\s+([a-z]{1,5}))?)?$",
+    "(?:,?\\s+(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::(\\d{2}))?" +
+    "(?:(?:\\s*([ap]\\.?m\\.?))?(?:\\s+([a-z]{1,5}))?|\\s+))?$",
   "i",
 );
 
