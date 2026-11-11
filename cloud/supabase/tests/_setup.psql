@@ -1,0 +1,708 @@
+-- The suite's shared setup (RLS pgTAP plan, D1 and D5). Every pgTAP file includes it first, with
+-- psql's `\ir`, inside the file's own transaction, and the file ends in `rollback`: the `tests`
+-- schema, its tables and its helpers never outlive the file. pg_prove does not run it as a test
+-- (`supabase test db` runs `.sql` and `.pg` files only).
+--
+-- Runs as the database owner the CLI connects as. Nothing here names a real account, address or
+-- note: fixtures use random UUIDs and `@example.invalid` (D1).
+
+-- T4 decides whether pgTAP needs this (it does only if `extensions` is not already on the path):
+-- set search_path = public, extensions;
+
+create schema tests;
+-- The probe body runs under the client roles, so they may reach the schema's functions. The
+-- default privilege covers the helpers T5a adds below these; the tables stay the owner's.
+grant usage on schema tests to anon, authenticated;
+alter default privileges in schema tests grant execute on functions to anon, authenticated;
+
+-- D3's matrix, filled by `_matrix.psql`: one row per relation in `public` and `admin`. The checks
+-- make a malformed row fail the whole file loud, never silently skip a probe.
+create table tests.matrix (
+  rel              text primary key check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
+  kind             text not null check (kind in ('table', 'view')),
+  access           text not null
+                     check (access in ('own', 'service', 'invoker_view', 'closed_view')),
+  key_col          text,
+  touch_col        text,
+  grants           text not null check (grants in ('default', 'revoked')),
+  policies         text[] not null,
+  view_insert_code text check (view_insert_code ~ '^[0-9A-Z]{5}$'),
+  check ((kind = 'table') = (access in ('own', 'service'))),
+  check (kind = 'view' or touch_col is not null),
+  check (kind = 'table' or (key_col is null and touch_col is null)),
+  check ((kind = 'view') = (view_insert_code is not null))
+);
+
+-- Q3's allowlist (F2): the client-executable non-trigger functions that are so by design, as
+-- `schema.name`. No identity or generated column: `_matrix.psql` fills it with
+-- `insert ... select * from tests.rpc_allowlist`, which cannot write one.
+create table tests.rpc_allowlist (
+  fn text primary key check (fn ~ '^(public|admin)\.[a-z_][a-z0-9_]*$')
+);
+
+-- Impersonation, as PostgREST does it (D5): the claims go in `request.jwt.claims`, then
+-- `set local role`, both scoped to the transaction (or the subtransaction a probe rolls back).
+-- `auth.uid()` reads the legacy `request.jwt.claim.sub` first, so every helper clears it: a stale
+-- value can never shadow the claims. All four are SECURITY INVOKER.
+
+-- An authenticated session for account `p_sub`.
+create function tests.as_user(p_sub uuid) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', json_build_object(
+    'sub', p_sub, 'role', 'authenticated', 'aud', 'authenticated')::text, true);
+  execute 'set local role authenticated';
+end $$;
+
+-- A request with the anon key and no session.
+create function tests.as_anon() returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', json_build_object('role', 'anon')::text, true);
+  execute 'set local role anon';
+end $$;
+
+-- An authenticated session carrying exactly these claims (O12, O13: no `sub`, a stranger's `sub`).
+create function tests.as_claims(p_claims jsonb) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', p_claims::text, true);
+  execute 'set local role authenticated';
+end $$;
+
+-- Back to the owner the file connected as, with no claims at all.
+create function tests.as_owner() returns void language plpgsql as $$
+begin
+  execute 'set local role none';
+  perform set_config('request.jwt.claim.sub', '', true);
+  perform set_config('request.jwt.claims', '', true);
+end $$;
+
+-- The fixture accounts by name, written by `_fixtures.psql` (T5b). Only the owner reads it, inside
+-- `as_who`, before the role switch. Ids are never printed.
+create table tests.accounts (
+  who text primary key check (who in ('A', 'B')),
+  id  uuid not null unique
+);
+
+-- Who a probe runs as (D5): `owner`, `anon`, `A`, `B`, `nosub` (authenticated, no `sub`, O12) or
+-- `stranger` (authenticated, a fresh `sub` no account has, O13). Called as the owner.
+create function tests.as_who(p_who text) returns void language plpgsql as $$
+declare v_id uuid;
+begin
+  case p_who
+    when 'owner' then perform tests.as_owner();
+    when 'anon' then perform tests.as_anon();
+    when 'nosub' then
+      perform tests.as_claims(jsonb_build_object('role', 'authenticated', 'aud', 'authenticated'));
+    when 'stranger' then
+      perform tests.as_claims(jsonb_build_object(
+        'sub', gen_random_uuid(), 'role', 'authenticated', 'aud', 'authenticated'));
+    when 'A', 'B' then
+      select a.id into v_id from tests.accounts a where a.who = p_who;
+      if v_id is null then
+        raise exception 'tests.as_who: no fixture account %', p_who;
+      end if;
+      perform tests.as_user(v_id);
+    else
+      raise exception 'tests.as_who: unknown caller %', coalesce(p_who, '<null>');
+  end case;
+end $$;
+
+-- The one probe body (D3, r1 I2, I4c). It takes SQL text, never a regclass, so the relation is
+-- resolved here under the handler. A read (`select count(*) ...`) returns the count it saw, from
+-- exactly one row; a write (`insert`, `update`, `delete`, `merge` or `do` as its first word)
+-- returns the rows it touched. Anything else (another select, a CTE, a leading comment) raises
+-- 22023: its row count would read as rows seen. A 42501 is -1 (a privilege) or -2 (row-level
+-- security) by its English message; anything else, an unknown 42501 included, is re-raised.
+create function tests.run(p_sql text) returns bigint language plpgsql as $$
+declare n bigint; msg text;
+begin
+  if p_sql ~* '^\s*select\s+count\(\*\)' then
+    execute p_sql into strict n;
+  elsif p_sql ~* '^\s*(insert|update|delete|merge|do)\M' then
+    execute p_sql;
+    get diagnostics n = row_count;
+  else
+    raise exception using errcode = '22023',
+      message = 'tests.run: not a count read or a write statement';
+  end if;
+  return n;
+exception when insufficient_privilege then
+  get stacked diagnostics msg = message_text;
+  if msg like 'permission denied for %' then return -1; end if;
+  if msg like '%violates row-level security policy%' then return -2; end if;
+  raise;
+end $$;
+
+-- The driver (D5, r1 M4). Called by the owner: it clears the target slot as the owner when asked
+-- (r1 I4b), switches to the client, runs the probe, and returns to the owner. The subtransaction
+-- is always rolled back (KNRLS is this suite's own SQLSTATE), so a clear or a write that got
+-- through is undone, while its count crosses the rollback in the error's detail.
+create function tests.probe(p_who text, p_sql text, p_clear text default null) returns bigint
+language plpgsql as $$
+declare r bigint; d text;
+begin
+  begin
+    if p_clear is not null then execute p_clear; end if;
+    perform tests.as_who(p_who);
+    r := tests.run(p_sql);
+    perform tests.as_owner();
+    raise exception using errcode = 'KNRLS', detail = r::text;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return d::bigint;
+end $$;
+
+-- D6: plant a fault as the owner, evaluate a check, roll both back, return the check's value as
+-- text. The fault may be several statements; the check is one scalar SQL expression (a probe call
+-- or a catalog query), evaluated as the owner. A null value crosses the rollback as `n`, any other
+-- as `v` and its text, because an error's detail cannot be null.
+create function tests.under_fault(p_fault text, p_check text) returns text
+language plpgsql as $$
+declare r text; d text;
+begin
+  begin
+    execute p_fault;
+    execute format('select (%s)::text', p_check) into r;
+    raise exception using errcode = 'KNRLS', detail = coalesce('v' || r, 'n');
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return case when d = 'n' then null else substr(d, 2) end;
+end $$;
+
+-- The masking triggers (T6b review I1, T7 review; the T5b ruling in progress.md). A trigger that
+-- fires after a row has passed the table's grant and policies, and then writes elsewhere as the
+-- caller, can turn a write that got through into another table's refusal. `sync_records_usage`
+-- and `sync_notes_usage` run `sync_usage_bump`, which is SECURITY INVOKER and upserts the
+-- account's `sync_usage` row; a client's insert that passed a planted policy on either table would
+-- then read `sync_usage`'s -2, the very value an insert probe expects. The insert, upsert and
+-- update probes of 02 and 03 therefore run through `tests.unmasked` below.
+--
+-- The set, exactly: every trigger on table `p_rel` that is not internal (so never a foreign key's
+-- or another constraint's own), is row-level (tgtype bit 1), is neither BEFORE (bit 2) nor
+-- INSTEAD OF (bit 64), so fires AFTER, and fires on INSERT (bit 4) or UPDATE (bit 16). A user
+-- `create constraint trigger` is such a trigger and is in the set. A statement-level trigger, a
+-- BEFORE trigger or a DELETE-only one is not, and 01's C9 names it instead: every non-internal
+-- trigger on a relation 02 or 03 probes must be in this set or in `tests.stamp_only` below, so a
+-- new or rewritten trigger fails C9 loud rather than quietly leaving the set empty. 09 shows the
+-- mask is real and that `tests.unmasked` lifts it, for each sync table and each probing role.
+create function tests.unmask_triggers(p_rel text) returns text[] language sql stable as $$
+  select coalesce(array_agg(t.tgname::text order by t.tgname), '{}')
+    from pg_trigger t
+   where t.tgrelid = p_rel::regclass
+     and not t.tgisinternal
+     and (t.tgtype::int & 1) = 1
+     and (t.tgtype::int & (2 | 64)) = 0
+     and (t.tgtype::int & (4 | 16)) <> 0
+$$;
+
+-- C9's named stamp-only allowlist: a trigger that stays on in every probe because it only stamps
+-- the new row, pinned by relation, name, function and the function's body (`md5(prosrc)`); C9
+-- also requires it to be BEFORE and row-level. Today one: `sync_notes_rev_stamp`, whose
+-- `sync_notes_stamp_rev` sets `rev` (a fresh `nextval`) and `updated_at` on the row being written
+-- and touches no other table. The body pin is deliberate: "stamp-only" is a claim about what the
+-- body does, so any change to that function fails C9 until the same commit re-reads the new body
+-- and updates `src_md5` here. The value is the md5 of the text between `$$` and `$$` in
+-- 20260912000100_sync.sql, the one migration that defines it.
+create table tests.stamp_only (
+  rel     text not null check (rel ~ '^(public|admin)\.[a-z_][a-z0-9_]*$'),
+  tgname  text not null,
+  fn      text not null,
+  src_md5 text not null check (src_md5 ~ '^[0-9a-f]{32}$'),
+  primary key (rel, tgname)
+);
+insert into tests.stamp_only (rel, tgname, fn, src_md5)
+  values ('public.sync_notes', 'sync_notes_rev_stamp', 'public.sync_notes_stamp_rev()',
+          'cbd0b5c1bfd0e51570fc0ff7436aa1d3');
+
+-- A check (one owner-side SQL expression, a driver call) evaluated as text, with table `p_rel`'s
+-- `tests.unmask_triggers` disabled by owner DDL inside `tests.under_fault`, which always rolls the
+-- DDL back with the probe; evaluated as written when the set is empty. `alter table ... disable
+-- trigger` stops every event of the trigger, its DELETE arm included, but only inside that
+-- subtransaction. Disabling a trigger that fires after RLS can only remove an error raised once a
+-- row has passed the table's own grant and policies: it can unmask a hole, never make a refused
+-- write read as accepted.
+create function tests.unmasked(p_rel text, p_check text) returns text language plpgsql as $$
+declare v_ddl text; r text;
+begin
+  select string_agg(format('alter table %I.%I disable trigger %I', n.nspname, c.relname, g),
+                    '; ' order by g)
+    into v_ddl
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+   cross join unnest(tests.unmask_triggers(p_rel)) g
+   where c.oid = p_rel::regclass;
+  if v_ddl is null then
+    execute format('select (%s)::text', p_check) into r;
+    return r;
+  end if;
+  return tests.under_fault(v_ddl, p_check);
+end $$;
+
+-- A write probe and the owner's check of what it did, in one call (D3, D5, r1 I1, r2 note 4).
+-- As the owner it snapshots the target rows (`p_target_where` over `p_rel`) as one text per row,
+-- primary key, ctid and `touch_col`; runs `p_sql` as `p_who`; and re-reads the same snapshot as the
+-- owner. `changed` is true when the two differ: a row updated (any update gives it a new ctid),
+-- deleted, moved off its key, given a new `touch_col` value (the sentinel included) or added. All
+-- of it is rolled back.
+create function tests.probe_write(
+  p_who text, p_rel text, p_sql text, p_target_where text, out n bigint, out changed boolean)
+language plpgsql as $$
+declare v_touch text; v_pk text; v_snap text; v_before text[]; v_after text[]; d text;
+begin
+  select m.touch_col into v_touch from tests.matrix m where m.rel = p_rel and m.kind = 'table';
+  if v_touch is null then
+    raise exception 'tests.probe_write: % is not a matrix table', coalesce(p_rel, '<null>');
+  end if;
+  select string_agg(format('%I', a.attname), ', ' order by k.ord) into v_pk
+    from pg_index i
+    cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+   where i.indrelid = p_rel::regclass and i.indisprimary;
+  if v_pk is null then
+    raise exception 'tests.probe_write: % has no primary key', p_rel;
+  end if;
+  -- `p_rel` passed the matrix's name check, so it is safe to splice as written.
+  v_snap := format(
+    'select coalesce(array_agg(row(%1$s)::text || %4$L || ctid::text || %4$L'
+    || ' || coalesce(%2$I::text, %5$L) order by row(%1$s)::text), %6$L) from %3$s where %7$s',
+    v_pk, v_touch, p_rel, ' | ', '<null>', '{}', p_target_where);
+  begin
+    execute v_snap into v_before;
+    -- A probe aimed at no rows would read as "touched nothing, changed nothing" whatever the
+    -- policy says, so it is an error, never a refusal.
+    if cardinality(v_before) = 0 then
+      raise exception using errcode = '22023',
+        message = format('tests.probe_write: no target rows in %s', p_rel);
+    end if;
+    perform tests.as_who(p_who);
+    n := tests.run(p_sql);
+    perform tests.as_owner();
+    execute v_snap into v_after;
+    raise exception using errcode = 'KNRLS',
+      detail = n::text || ',' || (v_before is distinct from v_after)::text;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  n := split_part(d, ',', 1)::bigint;
+  changed := split_part(d, ',', 2)::boolean;
+end $$;
+
+-- An insert probe with its own outcome: V3 (r1 I4a, r2 note 1). `insert ... default values` into
+-- view `p_rel` as `p_who` returns the SQLSTATE: `00000` if it succeeded (then rolled back), or the
+-- caught 42501, 55000 or 0A000. A 42501 is caught only when it is a privilege refusal of the
+-- schema, the view or a table under it (`permission denied for schema|view|table ...`, T11 review
+-- M4); any other 42501 (an RLS refusal through an updatable view, or one a trigger raised) is
+-- re-raised, as `tests.run` does, and so is every other error.
+create function tests.view_insert(p_who text, p_rel text) returns text language plpgsql as $$
+declare d text; msg text;
+begin
+  if p_rel is null or p_rel !~ '^(public|admin)\.[a-z_][a-z0-9_]*$' then
+    raise exception 'tests.view_insert: bad relation name %', coalesce(p_rel, '<null>');
+  end if;
+  begin
+    perform tests.as_who(p_who);
+    begin
+      execute format('insert into %s default values', p_rel);
+      d := '00000';
+    exception
+      when insufficient_privilege then
+        get stacked diagnostics d = returned_sqlstate, msg = message_text;
+        if msg !~ '^permission denied for (schema|view|table) ' then
+          raise;
+        end if;
+      when object_not_in_prerequisite_state or feature_not_supported then
+        get stacked diagnostics d = returned_sqlstate;
+    end;
+    perform tests.as_owner();
+    raise exception using errcode = 'KNRLS', detail = d;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return d;
+end $$;
+
+-- F3 and F4 under a fault (r2 note 8): `denied` only for a refused call, a 42501 whose message
+-- starts `permission denied for function`. Any other 42501 (raised inside a function that did
+-- run) is re-raised, never counted as a deny. `executed` for success or any other error, because a
+-- definer function called with nulls may raise something of its own. Run as `p_who`, rolled back.
+create function tests.call_outcome(p_who text, p_sql text) returns text language plpgsql as $$
+declare d text; msg text;
+begin
+  begin
+    perform tests.as_who(p_who);
+    begin
+      execute p_sql;
+      d := 'executed';
+    exception
+      when insufficient_privilege then
+        get stacked diagnostics msg = message_text;
+        if msg not like 'permission denied for function %' then
+          raise;
+        end if;
+        d := 'denied';
+      when others then
+        d := 'executed';
+    end;
+    perform tests.as_owner();
+    raise exception using errcode = 'KNRLS', detail = d;
+  exception when sqlstate 'KNRLS' then
+    get stacked diagnostics d = pg_exception_detail;
+  end;
+  return d;
+end $$;
+
+-- C1 (D4): every relation in `public` or `admin` (tables, partitioned tables, views, materialized
+-- views, foreign tables) with no matrix row, and every matrix row with no such relation.
+-- Extension members are excluded. Each row names the relation, never its contents.
+create function tests.unlisted() returns table (rel text, problem text)
+language sql stable as $$
+  with live as (
+    select n.nspname || '.' || c.relname as name
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname in ('public', 'admin')
+       and c.relkind in ('r', 'p', 'v', 'm', 'f')
+       and not exists (
+         select 1 from pg_depend d
+          where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'e')
+  )
+  select l.name, 'not in the matrix' from live l
+   where not exists (select 1 from tests.matrix m where m.rel = l.name)
+  union all
+  select m.rel, 'no such relation' from tests.matrix m
+   where not exists (select 1 from live l where l.name = m.rel)
+  order by 1
+$$;
+
+-- F1 and F2: every function in `public` or `admin` that `p_role` may execute, extension members
+-- excluded. `fn` is `schema.name`, the form `tests.rpc_allowlist` holds. The caller filters on
+-- the two flags and the allowlist.
+create function tests.client_functions(p_role text)
+returns table (fn text, args text, is_definer boolean, is_trigger boolean)
+language sql stable as $$
+  select n.nspname || '.' || p.proname,
+         pg_get_function_identity_arguments(p.oid),
+         p.prosecdef,
+         p.prorettype = 'trigger'::regtype
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname in ('public', 'admin')
+     and not exists (
+       select 1 from pg_depend d
+        where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+     and has_function_privilege(p_role::name, p.oid, 'execute')
+   order by 1, 2
+$$;
+
+-- F3's calls (T9; shared since T9b, so 09 proves the very text 05 runs). Every SECURITY DEFINER
+-- function in `public` or `admin`, extension members excluded, as F1 reads them. `fn` names the
+-- function with its argument types, schema included; `call_sql` is the call, one typed null per
+-- argument; `via_do` marks a call made through a DO block. The call is
+-- `select count(*) from <fn>(...)`, unless the return type cannot sit in FROM (a pseudo-type other
+-- than `void`, so `trigger`, which Postgres rejects there at parse time, 42804, before any
+-- privilege check): then `do $d$ begin perform <fn>(...); end $d$`, and a procedure
+-- `do $d$ begin call ...; end $d$`. A STRICT function called with a null would be folded to null
+-- at plan time and never checked, which `tests.call_outcome` reads as `executed`, so such a
+-- function fails its case loud rather than pass.
+create function tests.f3_calls() returns table (fn text, call_sql text, via_do boolean)
+language sql stable as $$
+  select n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')',
+         case
+           when p.prokind = 'p' then
+             format('do $d$ begin call %I.%I(%s); end $d$', n.nspname, p.proname, a.nulls)
+           when t.typtype = 'p' and p.prorettype <> 'void'::regtype then
+             format('do $d$ begin perform %I.%I(%s); end $d$', n.nspname, p.proname, a.nulls)
+           else format('select count(*) from %I.%I(%s)', n.nspname, p.proname, a.nulls)
+         end,
+         p.prokind = 'p' or (t.typtype = 'p' and p.prorettype <> 'void'::regtype)
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    join pg_type t on t.oid = p.prorettype
+   cross join lateral (
+     select coalesce(string_agg(format('null::%s', format_type(x.typ, null)), ', '
+                                order by x.ord), '') as nulls
+       from unnest(p.proargtypes::oid[]) with ordinality as x(typ, ord)) a
+   where n.nspname in ('public', 'admin')
+     and p.prosecdef
+     and not exists (
+       select 1 from pg_depend d
+        where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+   order by 1
+$$;
+
+-- F4's call (T11 review M2; here so 09 proves the very text 05 runs): account A naming account
+-- B's Gmail grant through `read_google_grant`, in F3's select form. B's id is read here, as the
+-- owner, and spliced as a literal, since the caller cannot read `tests.accounts`; it is never
+-- printed. A grant-level deny, not an account-scoping proof: the function has no `auth.uid()`
+-- binding, and its revoke is the whole defence (r1 M3).
+create function tests.f4_call() returns text language plpgsql as $$
+declare v_b uuid;
+begin
+  select a.id into strict v_b from tests.accounts a where a.who = 'B';
+  return format('select count(*) from public.read_google_grant(%L::uuid, %L)',
+    v_b, 'https://www.googleapis.com/auth/gmail.readonly');
+end $$;
+
+-- P4 and P5 (06), each one expression over a relation, so 06 asks it of `realtime.messages` and
+-- 09 shows it failing on whatever relation the image lets this owner plant a fault on (the table
+-- itself, or a scratch table), the relation argument the only difference. Called with
+-- `to_regclass(...)`: a null relation (the table is absent) has no policy and no RLS flag.
+-- P4: the names of the policies on `p_rel` that apply to anon, authenticated or public (a policy
+-- with no `to` lists `public`), as a sorted `text[]` literal.
+create function tests.p4_client_policies(p_rel regclass) returns text
+language sql stable as $$
+  select array(select p.polname::text from pg_policy p
+                where p.polrelid = p_rel
+                  and exists (select 1 from unnest(p.polroles) r(role_id)
+                               where r.role_id = 0
+                                  or r.role_id in (select g.oid from pg_roles g
+                                                    where g.rolname in ('anon', 'authenticated')))
+                order by 1)::text
+$$;
+
+-- P5: whether `p_rel` has row-level security on (null for a null relation).
+create function tests.p5_rls_on(p_rel regclass) returns boolean language sql stable as $$
+  select c.relrowsecurity from pg_class c where c.oid = p_rel
+$$;
+
+-- A valid insert for table `p_rel` and fixture account `p_who` ('A' or 'B'), as SQL text (D5).
+-- `_fixtures.psql` writes its rows with it, and every insert probe and owner validity run uses the
+-- same text, so a client's -1 or -2 can only be a grant or a policy, never a bad row. Run it into
+-- the slot `tests.clear_sql` empties: several tables hold one row per account. The id is spliced
+-- as a literal, since the client that runs the text cannot read `tests.accounts`. Placeholder
+-- values only. Every matrix table (T5b, T5c); it raises on any other. A global table's insert
+-- ignores `p_who` and writes the one row `tests.slot_where` names. A row that needs a parent
+-- (`rule_evidence`, the five tables keyed to a mailbox) reads the parent's id here, as the owner,
+-- and raises unless exactly one exists.
+create function tests.insert_sql(p_rel text, p_who text) returns text language plpgsql as $$
+declare
+  v_id uuid; v_body text := '{"actor": "student", "op": "set"}';
+  v_tag text := 'rls-fixture-' || lower(p_who); v_iv text := 'AAAAAAAAAAAAAAAA';
+  v_addr uuid; v_rule bigint; v_judgment uuid;
+begin
+  select a.id into v_id from tests.accounts a where a.who = p_who;
+  if v_id is null then
+    raise exception 'tests.insert_sql: no fixture account %', coalesce(p_who, '<null>');
+  end if;
+  if p_rel in ('public.mail_batches', 'public.mail_canaries', 'public.mail_seen',
+               'public.mail_work', 'public.mail_claims') then
+    select d.id into strict v_addr from public.mail_addresses d where d.account_id = v_id;
+  elsif p_rel = 'public.rule_evidence' then
+    select r.id, j.id into strict v_rule, v_judgment
+      from tests.accounts a
+      join public.rules r on r.account_id = a.id
+      join public.judgments j on j.account_id = a.id
+     where a.who = 'A';
+  end if;
+  case p_rel
+    when 'public.accounts' then
+      return format('insert into public.accounts (id, email) values (%L, %L)',
+        v_id, format('rls-%s@example.invalid', lower(p_who)));
+    when 'public.entitlements' then
+      return format('insert into public.entitlements (account_id, status) values (%L, %L)',
+        v_id, 'none');
+    when 'public.sources' then
+      return format('insert into public.sources (account_id, kind, url_ciphertext, url_iv)'
+        || ' values (%L, %L, %L, %L)', v_id, 'lms_ics', 'rls-fixture', 'rls-fixture');
+    when 'public.billing_reminders' then
+      return format('insert into public.billing_reminders (account_id, last_reminded_at)'
+        || ' values (%L, now())', v_id);
+    when 'public.telemetry_events' then
+      return format('insert into public.telemetry_events (account_id, ts, session, view, action)'
+        || ' values (%L, now(), %L, %L, %L)', v_id, 'rls-fixture', 'today', 'open');
+    when 'public.corrections' then
+      return format('insert into public.corrections (account_id, ts, item_id, field, kind)'
+        || ' values (%L, now(), %L, %L, %L)', v_id, 'rls-fixture', 'priority', 'task');
+    when 'public.issues' then
+      return format('insert into public.issues (account_id, body) values (%L, %L)', v_id, '{}');
+    when 'public.sync_records' then
+      return format('insert into public.sync_records (account_id, device, record_hash, body)'
+        || ' values (%L, %L, %L, %L)', v_id, '0123456789abcdef',
+        encode(sha256(convert_to(v_body, 'UTF8')), 'hex'), v_body);
+    when 'public.sync_notes' then
+      return format('insert into public.sync_notes (account_id, path, device, body)'
+        || ' values (%L, %L, %L, %L)', v_id, 'tasks/rls-fixture.md', '0123456789abcdef',
+        'rls fixture note');
+    when 'public.sync_usage' then
+      return format('insert into public.sync_usage (account_id, bytes) values (%L, 0)', v_id);
+    -- Service-only tables, default grants (T5c).
+    when 'public.consents' then
+      return format('insert into public.consents (account_id, subject_hash, kind, version)'
+        || ' values (%L, %L, %L, %L)', v_id, 'rls-fixture', 'tos', 'rls-fixture');
+    when 'public.webhook_events' then
+      return format('insert into public.webhook_events (event_id, event_type, created_at)'
+        || ' values (%L, %L, now())', 'evt_rls_fixture', 'rls.fixture');
+    when 'public.deleted_accounts' then
+      return format('insert into public.deleted_accounts (email_hash) values (%L)',
+        'rls-fixture');
+    when 'public.models' then
+      return format('insert into public.models (kind, model_id, prompt_version, grammar_version)'
+        || ' values (%L, %L, %L, %L)', 'task', 'rls-fixture', 'rls-fixture', 'rls-fixture');
+    when 'public.judgments' then
+      return format('insert into public.judgments (account_id, kind, item_id, tier, outcome)'
+        || ' values (%L, %L, %L, 0, %L)', v_id, 'task', 'rls-fixture', 'answered');
+    when 'public.rules' then
+      return format('insert into public.rules (account_id, scope, kind, feature, value, verdict)'
+        || ' values (%L, %L, %L, %L, %L, %L)', v_id, 'account', 'task', 'source', 'rls-fixture',
+        '{}');
+    when 'public.rule_evidence' then
+      return format('insert into public.rule_evidence (rule_id, judgment_id, agrees)'
+        || ' values (%L, %L, true)', v_rule, v_judgment);
+    when 'public.usage_daily' then
+      return format('insert into public.usage_daily (account_id, day, kind, calls)'
+        || ' values (%L, current_date, %L, 1)', v_id, 'task');
+    when 'public.budget_alerts' then
+      return format('insert into public.budget_alerts (account_id, month, usd)'
+        || ' values (%L, date_trunc(%L, current_date)::date, 0)', v_id, 'month');
+    when 'public.google_accounts' then
+      return format('insert into public.google_accounts (account_id, google_sub, secret_id)'
+        || ' values (%L, %L, %L)', v_id, v_tag, gen_random_uuid());
+    when 'public.gmail_seen' then
+      return format('insert into public.gmail_seen (account_id, uid) values (%L, %L)',
+        v_id, 'gmail:rls-fixture');
+    when 'public.gmail_queue' then
+      return format('insert into public.gmail_queue (account_id, uid, tier, payload)'
+        || ' values (%L, %L, %L, %L)', v_id, 'gmail:rls-fixture', 'task', '{}');
+    when 'public.google_state' then
+      return format('insert into public.google_state (nonce, account_id) values (%L, %L)',
+        v_tag, v_id);
+    when 'public.eval_cases' then
+      return format('insert into public.eval_cases (kind, request, theirs, source, seed_id)'
+        || ' values (%L, %L, %L, %L, %L)', 'task', '{}', '{}', 'seed', 'seed-rls-fixture');
+    when 'public.eval_runs' then
+      return format('insert into public.eval_runs (model, prompt_version, grammar_version,'
+        || ' prompt_hash, kind, metric, value, threshold, passed, cases)'
+        || ' values (%L, %L, %L, %L, %L, %L, 0, 0, true, 0)', 'rls-fixture', 'rls-fixture',
+        'rls-fixture', 'rls-fixture', 'task', 'rls-fixture');
+    -- Service-only tables, client grants revoked (T5c). An IV is 16 base64 characters (12 zero
+    -- bytes); each unique column carries the account's tag.
+    when 'public.mail_accounts' then
+      return format('insert into public.mail_accounts (account_id, fp_key_ciphertext, fp_key_iv)'
+        || ' values (%L, %L, %L)', v_id, 'rls-fixture', v_iv);
+    when 'public.mail_addresses' then
+      return format('insert into public.mail_addresses (account_id, provider, token_hmac,'
+        || ' token_ciphertext, token_iv) values (%L, %L, %L, %L, %L)',
+        v_id, 'other', v_tag, 'rls-fixture', v_iv);
+    when 'public.mail_batches' then
+      return format('insert into public.mail_batches (address_id, phase, nonce_hmac, since,'
+        || ' expected) values (%L, %L, %L, now(), 0)', v_addr, 'backfill', v_tag);
+    when 'public.mail_canaries' then
+      return format('insert into public.mail_canaries (address_id, nonce_hmac) values (%L, %L)',
+        v_addr, v_tag);
+    when 'public.mail_seen' then
+      return format('insert into public.mail_seen (account_id, msg_hash, fp_hash,'
+        || ' received_minute, address_id, phase) values (%L, %L, %L, date_trunc(%L, now()), %L,'
+        || ' %L)', v_id, 'rls-fixture', 'rls-fixture', 'minute', v_addr, 'live');
+    when 'public.mail_work' then
+      return format('insert into public.mail_work (account_id, address_id, s3_key, phase,'
+        || ' authenticity, msg_hash) values (%L, %L, %L, %L, %L, %L)',
+        v_id, v_addr, 'work/' || v_tag, 'live', 'aligned', 'rls-fixture');
+    when 'public.mail_claims' then
+      return format('insert into public.mail_claims (account_id, address_id, uid, ordering_date,'
+        || ' phase, authenticity, claims) values (%L, %L, %L, now(), %L, %L, %L)',
+        v_id, v_addr, 'rls-fixture', 'live', 'aligned', '[]');
+    when 'public.judge_allowances' then
+      return format('insert into public.judge_allowances (account_id, kind, opened_at, until,'
+        || ' calls_left) values (%L, %L, now(), now() + %L::interval, 0)',
+        v_id, 'event', '14 days');
+    when 'public.comp_grants' then
+      return format('insert into public.comp_grants (account_id, cohort, ends_at)'
+        || ' values (%L, %L, now() + %L::interval)', v_id, 'friends', '30 days');
+    when 'public.comp_audit' then
+      return format('insert into public.comp_audit (account_id, action, ends_at, cohort)'
+        || ' values (%L, %L, now() + %L::interval, %L)', v_id, 'grant', '30 days', 'friends');
+    when 'public.route_daily' then
+      return format('insert into public.route_daily (account_id, day, route)'
+        || ' values (%L, current_date, %L)', v_id, 'rls-fixture');
+    else
+      raise exception 'tests.insert_sql: no insert for %', coalesce(p_rel, '<null>');
+  end case;
+end $$;
+
+-- The slot (D5, r1 I4b): a `where` clause over table `p_rel` that, read as the owner, names account
+-- `p_who`'s rows there. `tests.clear_sql` deletes it, and C7 counts it, so the row an insert probe
+-- refills is the row C7 proves the fixture wrote.
+-- - A table with an account key: `<key_col> = <id>`.
+-- - `mail_batches` and `mail_canaries` (key `address_id`): the account's mailboxes.
+-- - A global table (no key): the one row its `tests.insert_sql` writes, whoever `p_who` is. For
+--   `models` that is the seeded `task` pin the insert reuses; for `rule_evidence`, A's rule and
+--   A's judgment.
+create function tests.slot_where(p_rel text, p_who text) returns text language plpgsql as $$
+declare v_id uuid; v_key text; v_a uuid;
+begin
+  select a.id into v_id from tests.accounts a where a.who = p_who;
+  if v_id is null then
+    raise exception 'tests.slot_where: no fixture account %', coalesce(p_who, '<null>');
+  end if;
+  if not exists (select 1 from tests.matrix m where m.rel = p_rel and m.kind = 'table') then
+    raise exception 'tests.slot_where: % is not a matrix table', coalesce(p_rel, '<null>');
+  end if;
+  select m.key_col into v_key from tests.matrix m where m.rel = p_rel;
+  select a.id into v_a from tests.accounts a where a.who = 'A';
+  case
+    when v_key = 'address_id' then
+      return format('address_id in (select id from public.mail_addresses where account_id = %L)',
+        v_id);
+    when v_key is not null then
+      return format('%I = %L', v_key, v_id);
+    when p_rel = 'public.webhook_events' then
+      return format('event_id = %L', 'evt_rls_fixture');
+    when p_rel = 'public.deleted_accounts' then
+      return format('email_hash = %L', 'rls-fixture');
+    when p_rel = 'public.models' then
+      return format('kind = %L', 'task');
+    when p_rel = 'public.rule_evidence' then
+      return format('rule_id in (select id from public.rules where account_id = %L)'
+        || ' and judgment_id in (select id from public.judgments where account_id = %L)', v_a, v_a);
+    when p_rel = 'public.eval_cases' then
+      return format('seed_id = %L', 'seed-rls-fixture');
+    when p_rel = 'public.eval_runs' then
+      return format('prompt_hash = %L', 'rls-fixture');
+    else
+      raise exception 'tests.slot_where: no slot for %', p_rel;
+  end case;
+end $$;
+
+-- The cleared slot (D5, r1 I4b): SQL text that, run as the owner, deletes the slot's rows, so an
+-- insert probe meets an empty slot, never a 23505. For `accounts` the delete cascades and
+-- `auth.users` keeps the row; for `mail_addresses` it cascades to the account's mailbox rows.
+create function tests.clear_sql(p_rel text, p_who text) returns text language plpgsql as $$
+begin
+  -- `p_rel` passed the matrix's name check in `slot_where`, so it is safe to splice as written.
+  return format('delete from %s where %s', p_rel, tests.slot_where(p_rel, p_who));
+end $$;
+
+-- A client's filter for the one row `p_where` names in table `p_rel`, by a primary-key literal
+-- (T8 review): `row(<key columns>)::text = '<key>'`. The owner reads the row's key here, with the
+-- key columns read from `pg_index` as `tests.probe_write` reads them, so the client's statement
+-- filters on the table's own columns and nothing it cannot see. A global table's slot (say
+-- `rule_evidence`'s, through `rules` and `judgments`) can read tables a student never sees; as the
+-- student's own filter it would match nothing under any policy, and a probe would pass vacuously.
+-- Raises unless `p_where` names exactly one row. Neither the key nor `p_where` is printed.
+create function tests.pk_where(p_rel text, p_where text) returns text language plpgsql as $$
+declare v_pk text; v_key text;
+begin
+  if not exists (select 1 from tests.matrix m where m.rel = p_rel and m.kind = 'table') then
+    raise exception 'tests.pk_where: % is not a matrix table', coalesce(p_rel, '<null>');
+  end if;
+  select string_agg(format('%I', a.attname), ', ' order by k.ord) into v_pk
+    from pg_index i
+    cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+   where i.indrelid = p_rel::regclass and i.indisprimary;
+  if v_pk is null then
+    raise exception 'tests.pk_where: % has no primary key', p_rel;
+  end if;
+  begin
+    -- `p_rel` is a matrix name (pattern-checked), so it is spliced as written.
+    execute format('select row(%s)::text from %s where %s', v_pk, p_rel, p_where)
+      into strict v_key;
+  exception when no_data_found or too_many_rows then
+    raise exception 'tests.pk_where: the target in % is not exactly one row', p_rel;
+  end;
+  return format('row(%s)::text = %L', v_pk, v_key);
+end $$;
