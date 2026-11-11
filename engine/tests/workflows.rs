@@ -557,3 +557,42 @@ fn the_rls_job_is_shaped_to_be_required_runs_hosted_linux_and_holds_no_secret() 
         assert!(pins.iter().any(|l| l.contains(repo)), "images.lock pins the {repo} image the suite needs");
     }
 }
+
+/// Security leftovers R1 (plan 2026-11-11): `cloud-rls` runs the Security Advisor on the same local
+/// database after the pgTAP suite, and a warning fails the job. The advisor line is pinned whole, so
+/// nothing after its flags (`|| true`, `; exit 0`, `&& …`) can let a warning through, `--fail-on`
+/// cannot drift to `error`, and no `continue-on-error` softens the job. It runs under pgTAP's own
+/// condition, after the suite and before `verify`, so an image it pulls is still judged against
+/// `images.lock`.
+#[test]
+fn the_rls_job_runs_the_security_advisor_after_the_suite_and_fails_on_warn() {
+    let c = workflow("ci.yml");
+    let job = job_block(&c, "cloud-rls");
+    let advisor = "run: supabase --workdir cloud db advisors --type security --level warn --fail-on warn --output-format text";
+    // Shell code only, as the shape test above reads it: no comment, no step name, no trailing comment.
+    let trailing = regex::Regex::new(r"\s+#.*$").unwrap();
+    let code: Vec<String> = job
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && !l.starts_with("- name:") && !l.starts_with("name:"))
+        .map(|l| trailing.replace(l, "").into_owned())
+        .collect();
+    let at = |needle: &str| -> usize {
+        let hits: Vec<usize> = code.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i).collect();
+        assert_eq!(hits.len(), 1, "cloud-rls has exactly one code line with `{needle}`: {hits:?}");
+        hits[0]
+    };
+    let line = at("db advisors");
+    assert_eq!(code[line], advisor, "the advisor line is exactly R1's, with nothing after its flags");
+    let (suite, verify) = (at("supabase --workdir cloud test db"), at("bash scripts/ci/supabase-images.sh verify"));
+    assert!(suite < line && line < verify, "the advisor runs after `test db` and before `verify`: {suite}, {line}, {verify}");
+    let steps: Vec<&str> = job.split("\n      - ").skip(1).collect();
+    let ifs = |s: &str| -> Vec<String> {
+        s.lines().map(str::trim).filter_map(|l| l.strip_prefix("if:")).map(|v| v.trim().to_string()).collect()
+    };
+    let step = steps.iter().find(|s| s.contains("db advisors")).expect("an advisor step");
+    let pgtap = steps.iter().find(|s| s.contains("supabase --workdir cloud test db")).expect("the pgTAP step");
+    assert_eq!(ifs(pgtap).len(), 1, "the pgTAP step carries one if: {pgtap}");
+    assert_eq!(ifs(step), ifs(pgtap), "the advisor step's one if is pgTAP's: {step}");
+    assert!(!job.contains("continue-on-error"), "cloud-rls must not soften a failure with continue-on-error:\n{job}");
+}
