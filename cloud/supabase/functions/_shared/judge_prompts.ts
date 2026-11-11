@@ -9,7 +9,7 @@
 // appended beyond the bound, not carved out of it, so a fully clipped 1200-character body prompt
 // emits 1213 characters, the marker being the frame telling the model it cut something, not part
 // of what it cut. `judge_prompts_test.ts` pins the exact count.
-import { ABSOLUTE_DUE_RE, type MailKind, oneLine } from "./judge_validate.ts";
+import { ABSOLUTE_DUE_RE, lineRuleChar, type MailKind, oneLine } from "./judge_validate.ts";
 import { scrubForPrompt } from "./scrub.ts";
 
 export const MAX_BODY_CHARS = 1200;
@@ -91,6 +91,66 @@ function str(value: unknown): string {
 
 function list(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+/**
+ * A single-line item field as it goes into a prompt: every line-rule character (a C0 control, DEL,
+ * U+0085, U+2028, U+2029) becomes a space, then `oneLine` collapses whitespace and cuts the value to
+ * `max` characters. `oneLine`'s `\s` does not match U+0085 or U+001C-U+001E, so the line rule runs
+ * first. Whitespace and quotes are normalised as `oneLine` does it (runs of whitespace become one
+ * space and the ends are trimmed, `"` becomes `'`, ` · ` becomes ` - `); an ordinary date, slug or
+ * name has none of these and comes out unchanged. A course slug's bound (64) sits above `slugify`'s
+ * 60-character cap, so a slug the device sends is never cut.
+ */
+function field(value: string, max: number): string {
+  let spaced = "";
+  for (const ch of value) spaced += lineRuleChar(ch.codePointAt(0) ?? 0) ? " " : ch;
+  return oneLine(spaced, max);
+}
+
+/** A list field as one line: each entry a `field` of `entryMax`, empty entries dropped, the joined
+ * line cut to `lineMax`. */
+function fieldList(value: unknown, entryMax: number, lineMax: number): string {
+  return field(list(value).map((v) => field(v, entryMax)).filter((v) => v !== "").join(", "), lineMax);
+}
+
+/** A task's due as the engine sends it (`approvals::plain` of the note's `due`): a bare date, a
+ * minute-precision timestamp (`format_due`; a timestamp with seconds is normalised to this), or the
+ * space-separated form a hand edit may leave, which `models::coerce_datetime` also reads. */
+const TASK_DUE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?$/;
+/** An event's start or end: `events::judge_roster` formats both `%Y-%m-%dT%H:%M`. */
+const EVENT_TIME_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+/** An event source's configured name (`config/events.yaml`; every preset's is a slug). */
+const EVENT_SOURCE_SHAPE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+/** An RFC 5322 date-time after `field()` folds its whitespace and its trailing comment is cut: an
+ * optional day name (short or full) and comma, day, month, 4-digit year, H:MM[:SS], and a zone that is
+ * numeric or one of RFC 5322's obs-zone names, UTC or Z. */
+const RFC_DATE_SHAPE =
+  /^(?:(?:mon|monday|tue|tuesday|wed|wednesday|thu|thursday|fri|friday|sat|saturday|sun|sunday), ?)?\d{1,2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) \d{4} \d{1,2}:\d{2}(?::\d{2})? (?:[+-]\d{4}|ut|utc|gmt|z|est|edt|cst|cdt|mst|mdt|pst|pdt)$/i;
+/** A Date header's trailing comment, `(PDT)` or `(GMT+05:30)`: cut before the shape is checked and never
+ * printed, since the zone before it carries the offset. */
+const DATE_COMMENT = /\s*\([^()]*\)$/;
+/** The ISO 8601 stamp `judge_due.ts`'s `parseDateLine` also reads as a Date line. */
+const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * A typed field: `field()` of the value, kept only when it is at most `max` characters and matches
+ * one of `shapes` whole, else "" and the caller prints nothing. A typed value carries no prose, so
+ * text appended to one is dropped with it rather than shown to the model.
+ */
+function typed(value: unknown, max: number, ...shapes: RegExp[]): string {
+  return shaped(field(str(value), Number.POSITIVE_INFINITY), max, shapes);
+}
+
+function shaped(v: string, max: number, shapes: RegExp[]): string {
+  return [...v].length <= max && shapes.some((s) => s.test(v)) ? v : "";
+}
+
+/** A Date header as the prompt prints it: `field()` of it with its trailing comment cut, kept only as an
+ * RFC 5322 date-time or an ISO 8601 stamp of at most 80 characters, else "". */
+function headerDate(value: unknown): string {
+  const v = field(str(value), Number.POSITIVE_INFINITY).replace(DATE_COMMENT, "");
+  return shaped(v, 80, [RFC_DATE_SHAPE, ISO_DATE_SHAPE]);
 }
 
 /**
@@ -181,28 +241,35 @@ export function buildPrompt(
     const parts: string[] = [];
     const prefs = clip(str(seed.preferences), MAX_PREFS_CHARS);
     if (prefs !== "") parts.push(`The student's stated preferences:\n${prefs}`);
-    parts.push(`Course slug: ${str(seed.course) || "null"}`);
+    parts.push(`Course slug: ${field(str(seed.course), 64) || "null"}`);
     const weights = clip(str(seed.weights), MAX_WEIGHTS_CHARS);
     if (weights !== "") parts.push(`Grade weights:\n${weights}`);
-    parts.push(`Title: ${oneLine(str(item.title), 200)}`);
+    parts.push(`Title: ${field(str(item.title), 200)}`);
     // An absent due date is absent, never the word "None": a model shown "Due: None" reliably
     // treats it as a date it failed to read rather than as an assignment without one.
-    if (str(item.due) !== "") parts.push(`Due: ${str(item.due)}`);
+    const due = typed(item.due, 40, TASK_DUE_SHAPE);
+    if (due !== "") parts.push(`Due: ${due}`);
     const body = clip(str(item.body).trim(), MAX_BODY_CHARS);
     if (body !== "") parts.push(`Body:\n${body}`);
     return { system, user: parts.join("\n"), schema };
   }
 
   if (kind === "event") {
-    const parts = [
-      `Title: ${oneLine(str(item.title), 200)}`,
-      `When: ${str(item.start)} to ${str(item.end)}`,
-      `Source: ${str(item.source)}`,
-    ];
-    if (str(item.organizer) !== "") parts.push(`Organizer: ${oneLine(str(item.organizer), 120)}`);
-    if (str(item.location) !== "") parts.push(`Location: ${oneLine(str(item.location), 120)}`);
-    if (list(item.categories).length > 0) parts.push(`Categories: ${list(item.categories).join(", ")}`);
-    if (list(item.audiences).length > 0) parts.push(`Audiences: ${list(item.audiences).join(", ")}`);
+    const parts = [`Title: ${field(str(item.title), 200)}`];
+    // A start out of shape leaves no When line; an end out of shape leaves the start alone.
+    const start = typed(item.start, 40, EVENT_TIME_SHAPE);
+    const end = typed(item.end, 40, EVENT_TIME_SHAPE);
+    if (start !== "") parts.push(end !== "" ? `When: ${start} to ${end}` : `When: ${start}`);
+    const source = typed(item.source, 40, EVENT_SOURCE_SHAPE);
+    if (source !== "") parts.push(`Source: ${source}`);
+    const organizer = field(str(item.organizer), 120);
+    if (organizer !== "") parts.push(`Organizer: ${organizer}`);
+    const location = field(str(item.location), 120);
+    if (location !== "") parts.push(`Location: ${location}`);
+    const categories = fieldList(item.categories, 60, 200);
+    if (categories !== "") parts.push(`Categories: ${categories}`);
+    const audiences = fieldList(item.audiences, 60, 200);
+    if (audiences !== "") parts.push(`Audiences: ${audiences}`);
     const description = clip(str(item.description).trim(), MAX_BODY_CHARS);
     if (description !== "") parts.push(`Description:\n${description}`);
     const interests = clip(str(seed.interests), MAX_PREFS_CHARS);
@@ -210,18 +277,16 @@ export function buildPrompt(
     return { system: systemTemplate("event"), user: parts.join("\n"), schema };
   }
 
-  const known = list(seed.known_courses);
+  const known = list(seed.known_courses).map((c) => field(c, 64)).filter((c) => c !== "");
   // The scrub site (provider swap Task 3): the one place both the Gmail-read path
   // (`gmail-read/handler.ts`) and the device's `judge-email` path build the email prompt, because
   // both hand their item straight to `judge()`, which calls `buildPrompt` here. `From` is NEVER
   // scrubbed — `judge_rules.ts`'s `featureMap` maps `item.from` into the `source` promotion
   // feature, and `scrub`/`scrubForPrompt` would replace an email address in it.
   const subject = scrubForPrompt(str(item.subject));
-  const parts = [
-    `Subject: ${oneLine(subject, 200)}`,
-    `From: ${oneLine(str(item.from), 200)}`,
-    `Date: ${str(item.date)}`,
-  ];
+  const parts = [`Subject: ${field(subject, 200)}`, `From: ${field(str(item.from), 200)}`];
+  const date = headerDate(item.date);
+  if (date !== "") parts.push(`Date: ${date}`);
   if (known.length > 0) parts.push(`Known course slugs: ${known.join(", ")}`);
   // Scrub before clip, not after: clipping a token in half would leave a partial secret on the
   // wire, where scrubbing first replaces it with a short, fixed-length placeholder that clip then
@@ -377,19 +442,21 @@ export function mailPromptText(text: string): string {
 }
 
 /**
- * `mail_claim`'s prompt: the subject (scrubbed), the sender, the Date header, the account's known course
- * codes, the time zone and `mailPromptText` of the text, and nothing else the caller's item holds. From is
- * not scrubbed, as on the email path: the sender is what a vendor's mail is judged by, and §7 names it.
+ * `mail_claim`'s prompt: the subject (scrubbed), the sender, the Date header when it is a date-time, the
+ * account's known course codes, the time zone and `mailPromptText` of the text, and nothing else the
+ * caller's item holds. From is not scrubbed, as on the email path: the sender is what a vendor's mail is
+ * judged by, and §7 names it.
  */
 export function buildMailClaimPrompt(item: Record<string, unknown>, seed: Record<string, unknown>): Prompt {
   const parts = [
-    `Subject: ${oneLine(scrubForPrompt(str(item.subject)), 200)}`,
-    `From: ${oneLine(str(item.from), 200)}`,
-    `Date: ${oneLine(str(item.date), 80)}`,
+    `Subject: ${field(scrubForPrompt(str(item.subject)), 200)}`,
+    `From: ${field(str(item.from), 200)}`,
   ];
-  const known = list(seed.known_courses).map((c) => oneLine(c, 40)).filter((c) => c !== "");
+  const date = headerDate(item.date);
+  if (date !== "") parts.push(`Date: ${date}`);
+  const known = list(seed.known_courses).map((c) => field(c, 64)).filter((c) => c !== "");
   if (known.length > 0) parts.push(`Known course codes: ${known.join(", ")}`);
-  const zone = oneLine(str(seed.time_zone), 64);
+  const zone = field(str(seed.time_zone), 64);
   if (zone !== "") parts.push(`Time zone: ${zone}`);
   const raw = scrubForPrompt(str(item.text).trim());
   const text = mailPromptText(str(item.text));
@@ -418,15 +485,15 @@ function wireDue(value: unknown): string {
 export function buildMailResolvePrompt(batch: Record<string, unknown>): Prompt {
   const lines = ["Claims:"];
   for (const c of records(batch.claims)) {
-    const key = oneLine(str(c.key), 80);
+    const key = field(str(c.key), 80);
     if (key !== "") {
-      lines.push(`- claim ${key} | names: ${oneLine(str(c.target), 200)} | due: ${wireDue(c.due)}`);
+      lines.push(`- claim ${key} | names: ${field(str(c.target), 200)} | due: ${wireDue(c.due)}`);
     }
   }
   lines.push("Candidates:");
   for (const c of records(batch.candidates)) {
-    const id = oneLine(str(c.id), 80);
-    if (id !== "") lines.push(`- id ${id} | title: ${oneLine(str(c.title), 200)} | due: ${wireDue(c.due)}`);
+    const id = field(str(c.id), 80);
+    if (id !== "") lines.push(`- id ${id} | title: ${field(str(c.title), 200)} | due: ${wireDue(c.due)}`);
   }
   return { system: mailSystemTemplate("mail_resolve"), user: lines.join("\n"), schema: MAIL_RESOLVE_SCHEMA };
 }
