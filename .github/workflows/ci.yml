@@ -333,6 +333,11 @@ jobs:
       - name: pgTAP
         if: needs.changes.outputs.code != 'false'
         run: supabase --workdir cloud test db
+      # The Security Advisor's lints on the same local database; any warning fails the job. Its set
+      # lacks lints 0028/0029 (a definer function a client role may execute): pgTAP's F1 and F2 read those.
+      - name: the security advisor, failing on a warning
+        if: needs.changes.outputs.code != 'false'
+        run: supabase --workdir cloud db advisors --type security --level warn --fail-on warn --output-format text
       # Fails when an image new since the baseline is not in images.lock, or a locked tag points at
       # another digest: a CLI bump that changes an image needs images.lock in the same diff.
       - name: nothing ran that is not locked
