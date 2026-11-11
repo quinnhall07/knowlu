@@ -53,8 +53,8 @@ settings".
 - Client roles (`anon`, `authenticated`) no longer hold TRUNCATE, REFERENCES, TRIGGER or MAINTAIN on
   any `public` relation, nor through `postgres`'s default privileges for new tables. They also no
   longer hold EXECUTE on the two trigger functions `sync_notes_stamp_rev` and `sync_usage_bump`.
-  Migration `20261111000100_client_table_rights.sql`; pgTAP checks C10 and C11 and the tightened F2
-  now hold this.
+  Migration `20261111000100_client_table_rights.sql`, applied to staging and production on
+  2026-11-11 (production 15:11Z); pgTAP checks C10 and C11 and the tightened F2 now hold this.
 - The static definer guard in `migrations_test.ts` now requires PUBLIC as well as the two client
   roles in the revoke. It matches argument signatures (overloads) and fails on a later re-grant.
 - Cargo-run test processes force `NO_PROXY=127.0.0.1,localhost` (`.cargo/config.toml`), so a
