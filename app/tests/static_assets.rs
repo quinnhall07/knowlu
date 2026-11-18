@@ -1188,30 +1188,8 @@ fn the_updater_endpoint_lives_in_the_app_config() {
             "pubkey is required by the plugin - an empty one panics at startup");
 }
 
-/// **Ruling R-P4a-30**: the page is granted NO updater permission, and this test is how it stays
-/// that way.
-///
-/// The app drives `tauri-plugin-updater` from Rust - `updater_builder()` / `updater()` are plain
-/// `Manager::state` (the plugin's `lib.rs`), which no capability gates - so the ONLY thing
-/// `updater:default` would add is the plugin's four IPC commands. Two of those are
-/// `allow-install` and `allow-download-and-install`, and `withGlobalTauri: true` means any script
-/// running in the page could then call `invoke("plugin:updater|download_and_install")` and walk
-/// straight past `update_offer`'s mid-run gate (R9) and `hold_for_install` (S11). The gate is only
-/// a gate if it is the only door: `check_for_updates` and `install_update`.
-///
-/// The whole set is asserted, not just the absence, so a quiet widening of any grant shows up here.
-#[test]
-fn the_page_is_granted_no_updater_permission() {
-    let cap: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string("capabilities/default.json").unwrap()).unwrap();
-    let perms: Vec<&str> = cap["permissions"].as_array().unwrap()
-        .iter().map(|p| p.as_str().unwrap()).collect();
-    assert!(!perms.iter().any(|p| p.starts_with("updater:")),
-            "R-P4a-30: no updater permission reaches the page: {perms:?}");
-    assert_eq!(perms, ["core:default", "window-state:default", "autostart:default",
-                       "clipboard-manager:allow-write-text"]);
-    assert_eq!(cap["windows"].as_array().unwrap().len(), 1, "the console window, and only it");
-}
+// `the_page_is_granted_no_updater_permission` (R-P4a-30) moved to `window_chrome.rs` with the
+// v0.4.0 capability list (note §3, N6), so the swap's delete of this file cannot take it.
 
 /// Knowlu plan 4a Task 9: both release scripts are syntactically valid PowerShell 5.1.
 /// `[scriptblock]::Create` PARSES without executing, so this never signs, builds or uploads

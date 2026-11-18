@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Listener, Manager};
+use tauri_plugin_window_state::{StateFlags, WindowExt};
 use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, registrar, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray, week};
 
 /// A missing/bad vault is fatal before any window exists, so it has to reach the user some way
@@ -16,6 +18,68 @@ fn fatal(msg: &str) -> ! {
         MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONERROR);
     }
     std::process::exit(2)
+}
+
+/// v0.4.0 window chrome (note §3, B1, N2): every window-state flag but the frame and the
+/// visibility. The plugin's defaults restore `decorated`, so a saved `"decorated": true` would put a
+/// native bar over the drawn one, and its VISIBLE restore would show `main` before WebView2 has
+/// painted. The frame is always the config's (`decorations: false`); Rust shows the window. Written
+/// with `difference` because bitflags' `&` and `!` are not `const`.
+const FLAGS: StateFlags = StateFlags::all().difference(StateFlags::DECORATIONS).difference(StateFlags::VISIBLE);
+
+/// `show_main` runs once per process. The two builders are two processes (each ends in
+/// `process::exit`), so one flag serves both.
+static MAIN_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// The one show path (note §3, N2, N9): restore `main`'s saved size, position and maximized state,
+/// maximize when the monitor's work area is smaller than the window (D6), set the Windows 11 border
+/// to none (N8), then show and focus. Called only on the main thread (`show_main_triggers`), where
+/// every window call below runs at once instead of waiting on the event loop. The window-state
+/// plugin skips `main` at creation (`skip_initial_state`), so nothing shows it earlier.
+fn show_main(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    if MAIN_SHOWN.swap(true, Ordering::SeqCst) { return; }
+    let _ = w.restore_state(FLAGS);
+    if !w.is_maximized().unwrap_or(false) {
+        if let (Ok(Some(m)), Ok(size)) = (w.current_monitor(), w.outer_size()) {
+            let area = m.work_area().size;
+            if area.width < size.width || area.height < size.height { let _ = w.maximize(); }
+        }
+    }
+    // tauri's `hwnd()` is windows 0.61's `HWND`; the app's `windows` is 0.62, so the handle crosses
+    // as its raw pointer (N8). On Windows 10 the attribute does not exist, the call fails quietly
+    // and the border stays.
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE};
+        if let Ok(h) = w.hwnd() {
+            let none: u32 = DWMWA_COLOR_NONE;
+            unsafe {
+                let _ = DwmSetWindowAttribute(HWND(h.0), DWMWA_BORDER_COLOR, (&none as *const u32).cast(), std::mem::size_of::<u32>() as u32);
+            }
+        }
+    }
+    let _ = w.show();
+    let _ = w.set_focus();
+}
+
+/// The two triggers of `show_main`, registered in both builders' setup: the page's `ui-ready`
+/// event (emitted by `boot.js` after first paint; listened for in Rust, so no command is added),
+/// and a 3 s timer, so a script error can never leave an invisible app. Each hands `show_main` to
+/// the main thread and returns: the timer sleeps on its own thread, never on the event loop.
+fn show_main_triggers(app: &tauri::AppHandle) {
+    let h = app.clone();
+    app.listen("ui-ready", move |_| {
+        let h2 = h.clone();
+        let _ = h.run_on_main_thread(move || show_main(&h2));
+    });
+    let h = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let h2 = h.clone();
+        let _ = h.run_on_main_thread(move || show_main(&h2));
+    });
 }
 
 fn main() {
@@ -87,12 +151,15 @@ fn main() {
 fn run_shell(root: std::path::PathBuf, mode: &'static str, ps: Vec<profiles::Profile>) -> ! {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state("main").build())
         .setup(move |app| {
             app.manage(onboarding::Onboarding { root, mode, profiles: std::sync::Mutex::new(ps) });
             // R-C1-40 (I1b): the app holds the sign-in window's session directory, so wiping it does
             // not depend on the page remembering to ask. Nothing else reads this state.
             app.manage(lms_link::LmsSession::default());
+            // v0.4.0 (note §3, N2): the wizard and picker run in `main` too, so this builder shows it
+            // the same way.
+            show_main_triggers(app.handle());
             Ok(())
         })
         // …and the window's own close button ends a capture just as `close_lms_window` does.
@@ -145,7 +212,7 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
     let vault_str: &'static str = Box::leak(vault.to_string_lossy().into_owned().into_boxed_str());
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state("main").build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--vault", vault_str])))
         // Plan 4a Task 8's key-gated step, and **on this builder only**: `run_shell` has no vault,
@@ -176,6 +243,8 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
             // The scheduler's tick and housekeeping threads (Task 12) — inert unless
             // `config/runners.yaml`'s `local` entry says `scheduler: app`.
             scheduler::spawn(app.handle().clone());
+            // v0.4.0 (note §3, N2, N9): `main` starts hidden; this shows it after first paint, or at 3 s.
+            show_main_triggers(app.handle());
             Ok(())
         })
         // Closing the console window hides it to the tray instead of ending the process — Knowlu
