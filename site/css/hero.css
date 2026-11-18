@@ -1,0 +1,90 @@
+/* Knowlu hero: white paper with the dot grid (js/dots.js), the big wordmark and tagline, one line that shows
+   what Knowlu would say right now (js/hero-line.js), then the waitlist form.
+   dots.js reads its colors from this section: the paper is its background, the dots mix toward --hero-dot,
+   the dots around the sign-up box tint toward --hero-hot, and a stirred dot takes one of the four class colors. */
+
+.hero {
+  --hero-paper: var(--field);
+  --hero-dot: var(--ink-3);
+  --hero-hot: var(--accent);
+  --hero-halo: 0 0 2px var(--hero-paper), 0 0 6px var(--hero-paper), 0 0 14px var(--hero-paper);
+  position: relative; isolation: isolate; overflow: hidden;
+  min-height: max(640px, 100svh); display: grid;
+  background: var(--hero-paper); color: var(--ink);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .hero { --hero-paper: var(--bg); --hero-dot: var(--ink-2); }
+}
+:root[data-theme="dark"] .hero { --hero-paper: var(--bg); --hero-dot: var(--ink-2); }
+
+.hero-fx { position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%; max-width: none; pointer-events: none; }
+
+.hero-in {
+  justify-self: center; align-self: start; width: 100%;
+  display: grid; justify-items: center;
+  padding: clamp(124px, 20svh, 220px) var(--gut) clamp(56px, 8svh, 88px);
+  /* pressing and holding gathers the dots; that should not select the words */
+  user-select: none; -webkit-user-select: none;
+}
+.hero-in :is(input, .wl-msg, .wl-done, .hero-now) { user-select: text; -webkit-user-select: text; }
+
+/* ---------- the lockup ---------- */
+/* never wider than the screen: the wordmark is 3.96em wide */
+.lockup { font-size: min(var(--t-wordmark), calc((100vw - 2 * var(--gut)) / 3.96)); font-weight: 400; line-height: 1; display: grid; justify-items: start; }
+.wm.wm-xl { font-size: 1em; color: var(--ink); white-space: nowrap; }
+.lockup .tag { font: 400 .2745em/1.2 var(--serif); margin: .04em 0 0 .093em; color: var(--ink); text-shadow: var(--hero-halo); }
+
+/* ---------- the line that changes: what Knowlu would say right now ----------
+   Every line sits in the same grid cell, so the cell is as tall as the tallest line at every width and nothing
+   below it moves when the line changes. */
+.hero-now {
+  margin-top: clamp(28px, 4.6svh, 52px); width: min(100%, 30em);
+  font: 400 clamp(21px, 2.1vw, 32px)/1.35 var(--serif); color: var(--ink); text-align: center;
+  border-radius: var(--r);
+}
+.hero-now:focus-visible { outline-offset: 10px; }
+.hero-now-list { list-style: none; display: grid; }
+.hero-now-i {
+  grid-area: 1 / 1; text-shadow: var(--hero-halo); text-wrap: balance;
+  opacity: 0; visibility: hidden; transform: translateY(.75em);
+  transition: opacity var(--med) var(--ease), transform var(--slow) var(--ease), visibility 0s linear var(--slow);
+}
+.hero-now-i.is-cur {
+  opacity: 1; visibility: visible; transform: none;
+  transition: opacity var(--slow) var(--ease) 120ms, transform var(--slow) var(--ease) 120ms, visibility 0s linear 0s;
+}
+.hero-now-i.is-out { opacity: 0; visibility: visible; transform: translateY(-.75em); }
+/* each sentence is one piece, so a narrow screen breaks the line between sentences and never inside one */
+.hero-now-i > span { display: inline-block; }
+/* the square says which class the line is about; a line about no class gets an empty one. It rides with the first sentence. */
+.hero-now-i > span:first-child::before {
+  content: ""; display: inline-block; width: .5em; height: .5em; margin-right: .6em; vertical-align: .08em;
+  background: var(--ink); border-radius: 1px;
+}
+.hero-now-i[data-class="cs"] > span:first-child::before { background: var(--c-cs); }
+.hero-now-i[data-class="chem"] > span:first-child::before { background: var(--c-chem); }
+.hero-now-i[data-class="span"] > span:first-child::before { background: var(--c-span); }
+.hero-now-i[data-class="psyc"] > span:first-child::before { background: var(--c-psyc); }
+.hero-now-i[data-class="none"] > span:first-child::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+
+/* ---------- the form on the dot grid ---------- */
+.hero .wl { margin-top: clamp(24px, 3.6svh, 40px); }
+.hero .wl-msg { color: var(--ink-2); text-align: center; text-shadow: var(--hero-halo); }
+.hero .wl.err .wl-msg { color: var(--error); }
+.hero .wl-done :is(p, b) { text-shadow: var(--hero-halo); }
+.hero .wl-done .nx-row input { text-shadow: none; }
+
+/* a phone: the hero stops 96px short of the screen's end, so the logo strip's logos and their "Coming" words show
+   on the first screen, and the words sit in the middle of the paper that is left. On a screen too short for that the
+   hero is as tall as its words need. */
+@media (max-width: 520px) {
+  .hero { min-height: calc(100svh - 96px); }
+  .hero-in { align-self: center; padding-top: 104px; padding-bottom: max(48px, 12svh - 32px); }
+  .hero-now { margin-top: 28px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-now-i, .hero-now-i.is-out, .hero-now-i.is-cur { transform: none; }
+  .hero-now-i { transition: opacity 200ms linear, visibility 0s linear 200ms; }
+  .hero-now-i.is-cur { transition: opacity 200ms linear, visibility 0s linear 0s; }
+}

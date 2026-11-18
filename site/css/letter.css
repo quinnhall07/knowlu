@@ -1,0 +1,55 @@
+/* Founder letter: Quinn's headshot, a short letter, a signature.
+   Phone: a small portrait beside the heading, so the whole letter fits about one screen.
+   Wide: the portrait holds the left column (and stays in view while the letter is read); the letter takes the right. */
+
+.letter {
+  max-width: var(--page); margin: 0 auto; padding: var(--sec) var(--gut);
+  display: grid; align-items: start;
+  grid-template-columns: clamp(84px, 26vw, 120px) minmax(0, 1fr);
+  grid-template-areas: "ph h" "body body";
+  gap: 22px 16px;
+}
+.lt-ph { grid-area: ph; }
+.lt-ph img { width: 100%; aspect-ratio: 4 / 5; object-fit: cover; object-position: 60% 40%; background: var(--bg-2); border-radius: var(--r); }
+.lt-h { grid-area: h; align-self: end; font-size: clamp(34px, 10.4vw, 44px); line-height: 1.02; letter-spacing: -.016em; }
+.lt-body { grid-area: body; }
+
+.lt-text { display: grid; gap: .8em; max-width: 33em; font: 400 var(--t-body)/1.55 var(--serif); }
+.lt-sign { margin-top: 24px; font: 400 40px/1 var(--display); }
+.lt-role { margin-top: 8px; font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink-3); }
+.lt-body .draft-note { margin-top: 16px; }
+
+/* friends' words: a quote under a rule, the name under it. Hidden until a real one exists. */
+.lt-words { grid-column: 1 / -1; margin: 32px 0 0; padding-top: 22px; border-top: 1px solid var(--ink); max-width: 36em; }
+.lt-words blockquote { margin: 0; }
+.lt-words blockquote p { font: 400 clamp(24px, 2.4vw, 34px)/1.25 var(--display); letter-spacing: -.01em; text-wrap: balance; }
+.lt-by { margin-top: 14px; font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink-3); }
+
+@media (min-width: 640px) {
+  .letter { grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 32px clamp(28px, 5vw, 64px); grid-template-areas: "ph h" "ph body" "ph words"; grid-template-rows: auto auto 1fr; }
+  .lt-h { align-self: start; font-size: var(--t-h2); }
+  .lt-text { font-size: var(--t-lead); line-height: 1.6; gap: 1em; }
+  .lt-sign { margin-top: 40px; font-size: 48px; }
+  .lt-words { grid-area: words; }
+}
+@media (min-width: 1000px) {
+  .letter { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(32px, 6vw, 104px); }
+  .lt-ph { position: sticky; top: calc(var(--nav-h) + 40px); }
+  .lt-h { max-width: 9em; }
+  .lt-body { margin-top: 8px; }
+}
+
+/* building on scroll: the portrait settles, then the letter reads in, paragraph by paragraph, and the signature last */
+@media (prefers-reduced-motion: no-preference) {
+  .lt-ph img, .lt-h, .lt-text > p, .lt-sign, .lt-role {
+    transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease);
+  }
+  .lt-h { transition-delay: 80ms; }
+  .lt-text > p:nth-child(1) { transition-delay: 160ms; }
+  .lt-text > p:nth-child(2) { transition-delay: 240ms; }
+  .lt-text > p:nth-child(3) { transition-delay: 320ms; }
+  .lt-sign, .lt-role { transition-delay: 460ms; }
+  .js .letter[data-build]:not(.is-in) .lt-ph img { opacity: 0; transform: scale(.97); }
+  .js .letter[data-build]:not(.is-in) :is(.lt-h, .lt-text > p) { opacity: 0; transform: translateY(16px); }
+  .js .letter[data-build]:not(.is-in) :is(.lt-sign, .lt-role) { opacity: 0; transform: translateY(8px); }
+}

@@ -1,0 +1,132 @@
+/* Knowlu site tokens. One place for every color, size and timing.
+   Colors are written once, in the palette. Under it come the roles the stylesheets use (their names carried over from
+   the prototype), then the dark theme, which only points the same roles at other palette colors. No other stylesheet
+   spells out a color. email-confirm.html is the one exception: an email cannot read this file, so it repeats them. */
+
+:root {
+  /* ---------- the palette ---------- */
+
+  /* the brand: cream paper, ink (it is --shade-23, below) and the red. Locked on 2026-11-11 (round 1, note 12). */
+  --cream: #fffefb;
+  --red: #c33137;
+  --red-deep: #a22129;   /* the red hovered or pressed */
+  --red-pale: #f87672;   /* the red as text or thin marks on a dark ground */
+
+  /* the paper side: white for fields and the hero's dot paper, cream as running text on a dark ground, then the
+     sand steps that sit under cream. The number is the lightness (OKLCH, out of 100). */
+  --white: #ffffff;
+  --cream-2: #f4efe6;
+  --sand-96: #f7f3ec;
+  --sand-94: #efeae2;
+  --sand-91: #e6e0d6;
+  --sand-83: #cfc7bc;
+
+  /* the ink side: shades of the ink, all on its hue (OKLCH hue 320, chroma about .012). The number is the lightness.
+     --shade-23 is the ink itself. Every dark ground, dark line and gray text on the site is one of these. */
+  --shade-16: #0f0c0f;
+  --shade-21: #19161a;
+  --shade-23: #201c21;
+  --shade-27: #29252a;
+  --shade-30: #312c32;
+  --shade-33: #373238;
+  --shade-40: #4d464e;
+  --shade-43: #544e56;
+  --shade-51: #6b646c;
+  --shade-70: #a29da4;
+  --shade-82: #c8c3c9;
+  --black: #000000;        /* only under shadows in the dark theme */
+
+  /* errors: the red a step darker, under its own name. -pale is for a dark ground. */
+  --alert: #ae1726;
+  --alert-pale: #ff9a94;
+
+  /* class colors: each made-up class owns one. -pale is for a dark ground. */
+  --blue: #2f55e6;    --blue-pale: #7f9bff;
+  --green: #12825a;   --green-pale: #4cc79a;
+  --amber: #f2ab1f;   --amber-pale: #f2b53c;
+  --violet: #7a4bd1;  --violet-pale: #b294f5;
+
+  /* ---------- roles: what the stylesheets use ---------- */
+
+  /* ground and ink */
+  --bg: var(--cream);
+  --bg-2: var(--sand-96);
+  --field: var(--white);
+  --ink: var(--shade-23);
+  --ink-2: var(--shade-40);
+  --ink-3: var(--shade-51);
+  --line: var(--sand-91);
+  --line-2: var(--sand-94);
+  --field-line: var(--sand-83);
+
+  /* the red: the one brand color. --accent is the red as text or thin marks and lightens in the dark theme.
+     Text on the red is cream, the logo's lu included (--wm-lu: in the dark theme it takes the cream the rest of the
+     word is set in, so the name stays one color). */
+  --accent: var(--red);
+  --wm-lu: var(--cream);
+  --btn-bg: var(--red);
+  --btn-fg: var(--cream);
+  --error: var(--alert);
+  --shadow: var(--shade-16);
+
+  /* class colors. Fills and marks only, never text color. --on-c-* is the text color to use on top of that fill. */
+  --c-cs: var(--blue);      --on-c-cs: var(--cream);      /* CS 150 */
+  --c-chem: var(--green);   --on-c-chem: var(--cream);    /* CHEM 110 */
+  --c-span: var(--amber);   --on-c-span: var(--shade-23); /* SPAN 102 */
+  --c-psyc: var(--violet);  --on-c-psyc: var(--cream);    /* PSYC 101 */
+
+  /* the price band's ground: the ink itself in the light theme, one shade up in the dark theme so it still reads
+     as a band. The band's other colors are the dark theme's (css/price.css). */
+  --band-bg: var(--shade-23);
+  --band-bg-2: var(--shade-27);
+
+  /* type */
+  --display: "PT Serif Caption", Georgia, serif;
+  --serif: "Zilla Slab", Rockwell, Georgia, serif;
+  --sans: "Albert Sans", "Segoe UI", system-ui, sans-serif;
+  --t-wordmark: clamp(80px, 12.5vw, 184px);
+  --t-h2: clamp(40px, 5vw, 80px);
+  --t-h3: clamp(26px, 2.4vw, 36px);
+  --t-lead: clamp(19px, 1.5vw, 23px);
+  --t-body: 18px;
+  --t-small: 15px;
+
+  /* layout */
+  --r: 2px;
+  --gut: clamp(16px, 4vw, 56px);
+  --page: 1600px;
+  --nav-h: 76px;
+  --sec: clamp(88px, 10vw, 168px);
+
+  /* motion */
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  --fast: 180ms;
+  --med: 320ms;
+  --slow: 620ms;
+
+  color-scheme: light;
+}
+
+/* ---------- the dark theme: the same roles, pointed at the ink side ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: var(--shade-21); --bg-2: var(--shade-23); --field: var(--shade-23);
+    --ink: var(--cream-2); --ink-2: var(--shade-82); --ink-3: var(--shade-70);
+    --line: var(--shade-33); --line-2: var(--shade-27); --field-line: var(--shade-40);
+    --accent: var(--red-pale); --error: var(--alert-pale); --shadow: var(--black); --wm-lu: var(--cream-2);
+    --c-cs: var(--blue-pale); --on-c-cs: var(--shade-21); --c-chem: var(--green-pale); --on-c-chem: var(--shade-21);
+    --c-span: var(--amber-pale); --on-c-span: var(--shade-21); --c-psyc: var(--violet-pale); --on-c-psyc: var(--shade-21);
+    --band-bg: var(--shade-27); --band-bg-2: var(--shade-30);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: var(--shade-21); --bg-2: var(--shade-23); --field: var(--shade-23);
+  --ink: var(--cream-2); --ink-2: var(--shade-82); --ink-3: var(--shade-70);
+  --line: var(--shade-33); --line-2: var(--shade-27); --field-line: var(--shade-40);
+  --accent: var(--red-pale); --error: var(--alert-pale); --shadow: var(--black); --wm-lu: var(--cream-2);
+  --c-cs: var(--blue-pale); --on-c-cs: var(--shade-21); --c-chem: var(--green-pale); --on-c-chem: var(--shade-21);
+  --c-span: var(--amber-pale); --on-c-span: var(--shade-21); --c-psyc: var(--violet-pale); --on-c-psyc: var(--shade-21);
+  --band-bg: var(--shade-27); --band-bg-2: var(--shade-30);
+  color-scheme: dark;
+}

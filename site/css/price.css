@@ -1,0 +1,53 @@
+/* Price band: the pricing note, on warm ink in both themes, with the second waitlist form.
+   The band carries the hero's dot grid (js/dots.js draws both), on the band's ink: gray at rest, the class colors
+   where the pointer stirs it. With scripts off a plain still grid stands in. */
+
+.price {
+  /* the band's own ink, whatever the page theme: the roles pointed at the ink side of the palette, as the dark theme
+     does. The ground is --band-bg (tokens.css), which steps up a shade in the dark theme. */
+  --bg: var(--band-bg); --bg-2: var(--band-bg-2); --field: var(--band-bg-2);
+  --ink: var(--cream-2); --ink-2: var(--shade-82); --ink-3: var(--shade-70);
+  --line: var(--shade-33); --line-2: var(--shade-30); --field-line: var(--shade-43);
+  --accent: var(--red-pale); --error: var(--alert-pale);
+  /* the dots (js/dots.js reads these): their gray on this ground, the red they take around the sign-up box, and
+     the class colors for a dark ground */
+  --dot: var(--shade-40); --dot-hot: var(--red-pale);
+  --c-cs: var(--blue-pale); --c-chem: var(--green-pale); --c-span: var(--amber-pale); --c-psyc: var(--violet-pale);
+  /* text set straight on the dots wears a soft edge of the ground so no dot touches a letter */
+  --halo: 0 0 2px var(--bg), 0 0 6px var(--bg), 0 0 12px var(--bg);
+  position: relative; isolation: isolate; overflow: hidden;
+  background: var(--bg); color: var(--ink);
+  color-scheme: dark;
+}
+
+/* ---------- the dots ---------- */
+.pr-fx { position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%; max-width: none; pointer-events: none; }
+/* scripts off: a plain still grid */
+html:not(.js) .price::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: radial-gradient(circle at center, var(--dot) 1.2px, transparent 1.75px) 50% 0 / 22px 22px;
+  opacity: .6;
+}
+
+.pr-in {
+  max-width: var(--page); margin: 0 auto; padding: var(--sec) var(--gut);
+  display: grid; gap: clamp(44px, 5vw, 72px);
+}
+.price h2 { font-size: var(--t-h2); line-height: 1.02; letter-spacing: -.016em; max-width: 10em; text-shadow: var(--halo); }
+.pr-when { margin-top: 16px; font: 400 var(--t-lead)/1.5 var(--serif); color: var(--ink-2); text-shadow: var(--halo); }
+
+/* ---------- the form ---------- */
+.pr-join .wl { width: min(100%, 560px); }
+.price .wl-msg, .price .wl-done { text-shadow: var(--halo); }
+.price .wl-done :is(.btn, input) { text-shadow: none; }
+
+/* ---------- motion ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  /* building on scroll: heading, then the form */
+  .pr-head > *, .pr-join {
+    transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease);
+  }
+  .pr-head > :nth-child(2) { transition-delay: 100ms; }
+  .pr-join { transition-delay: 260ms; }
+  .js .price[data-build]:not(.is-in) :is(.pr-head > *, .pr-join) { opacity: 0; transform: translateY(18px); }
+}

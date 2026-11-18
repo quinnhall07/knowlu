@@ -1,0 +1,217 @@
+/* Knowlu site: "What it does", three small Knowlu windows the visitor can use (js/pieces.js drives them).
+   Without the script every rule here still draws the finished state as plain content. Prefix: pc-. */
+
+.pieces { max-width: var(--page); margin: 0 auto; padding: var(--sec) var(--gut); }
+.pieces [hidden] { display: none !important; }
+.pieces:not(.pc-on) .pc-js { display: none; }
+
+.pc { display: grid; gap: clamp(28px, 4vw, 48px); }
+.pc + .pc { margin-top: clamp(96px, 10vw, 176px); }
+.pc-copy h2 {
+  margin: 0; font: 400 var(--t-h2)/1.02 var(--display); letter-spacing: -.022em; color: var(--ink);
+  max-width: 10em; text-wrap: balance;
+}
+.pc-copy p { margin: 20px 0 0; font: 400 var(--t-lead)/1.5 var(--serif); color: var(--ink-2); max-width: 26em; text-wrap: pretty; }
+.pc-side { min-width: 0; max-width: 46em; font-size: clamp(15px, 1.25vw, 19px); }
+/* one sourced number under each piece's words: the trouble that piece answers. The figure is a number or a short
+   phrase ("About half"); the sentence and its source sit under it. */
+.pc-copy p.pc-fact {
+  margin-top: clamp(26px, 2.6vw, 38px); padding-top: 18px; max-width: 30rem;
+  border-top: 1px solid var(--line);
+  font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-2);
+}
+.pc-fact b {
+  display: block; margin-bottom: 8px;
+  font: 400 clamp(36px, 3.2vw, 48px)/1 var(--display); letter-spacing: -.02em; font-variant-numeric: lining-nums; color: var(--ink);
+}
+.pc-fact small { display: block; margin-top: 6px; font-size: 14px; color: var(--ink-3); }
+/* the source's link is one line of small text: room above and below it makes it 44px to tap without moving a line */
+.pc-fact small a { padding-block: 14px; }
+.pc-hint { margin: 14px 0 0; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-3); max-width: 40em; }
+.pc-foot { margin: clamp(72px, 7vw, 120px) 0 0; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-3); }
+
+@media (min-width: 1000px) {
+  .pc { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(48px, 5.5vw, 104px); align-items: center; }
+  .pc:nth-of-type(even) { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+  .pc:nth-of-type(even) .pc-copy { order: 2; }
+  .pc-side { max-width: none; }
+}
+
+/* ---------- the window: an ink hairline, a small bar with the wordmark and a clock, square corners ---------- */
+.pc-win {
+  container: pcw / inline-size;
+  --wbg: var(--bg); --wedge: var(--ink); --wtint: var(--bg-2);
+  position: relative; background: var(--wbg); color: var(--ink); border: 1px solid var(--wedge); border-radius: var(--r);
+  box-shadow: 0 30px 60px -32px color-mix(in srgb, var(--shadow) 38%, transparent); font: 400 1em/1.4 var(--sans); overflow: clip;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .pc-win { --wbg: var(--bg-2); --wedge: var(--field-line); --wtint: var(--line-2); box-shadow: 0 30px 60px -30px color-mix(in srgb, var(--shadow) 60%, transparent); }
+}
+:root[data-theme="dark"] .pc-win { --wbg: var(--bg-2); --wedge: var(--field-line); --wtint: var(--line-2); box-shadow: 0 30px 60px -30px color-mix(in srgb, var(--shadow) 60%, transparent); }
+:where(.pc-win) p { margin: 0; }
+.pc-bar { display: flex; align-items: center; justify-content: space-between; gap: 1em; min-height: 3em; padding: .6em 1.3em; border-bottom: 1px solid var(--line); }
+.pc-bar .wm { font-size: 1.2em; }
+.pc-clock { font-size: .82em; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pc-body { padding: 1.2em 1.3em 1.4em; }
+.pc-k { font: 600 .82em/1.2 var(--sans); color: var(--accent); }
+.pc-k.plain { color: var(--ink-3); }
+
+/* class colors: which class a row or block belongs to, as a fill or a mark, never as text */
+.pc-cs { --cc: var(--c-cs); --on-cc: var(--on-c-cs); }
+.pc-chem { --cc: var(--c-chem); --on-cc: var(--on-c-chem); }
+.pc-span { --cc: var(--c-span); --on-cc: var(--on-c-span); }
+.pc-psyc { --cc: var(--c-psyc); --on-cc: var(--on-c-psyc); }
+.pc-job { --cc: var(--ink); --on-cc: var(--bg); }
+.pc-mk { display: block; width: .72em; height: .72em; background: var(--cc); transition: transform var(--fast) var(--ease); }
+
+/* the buttons inside a window: one filled action, one quiet one */
+.pc-acts { display: flex; flex-wrap: wrap; align-items: center; gap: .5em 1.1em; margin-top: 1em; }
+.pc-b, .pc-l { appearance: none; margin: 0; border: 0; border-radius: var(--r); font: 600 .92em/1 var(--sans); cursor: pointer; min-height: 44px; min-width: 44px; }
+.pc-b {
+  display: inline-flex; align-items: center; justify-content: center; padding: 0 1.3em; background: var(--btn-bg); color: var(--btn-fg);
+  transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.pc-b:hover { background: var(--red-deep); }
+.pc-l {
+  padding: 0 .55em; background: none; color: var(--ink-2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: .28em;
+  transition: color var(--fast) var(--ease), text-decoration-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.pc-acts .pc-l { margin-left: -.55em; }
+.pc-l:hover { color: var(--ink); text-decoration-thickness: 2px; }
+.pc-b:active, .pc-l:active { transform: translateY(1px); }
+.pc-b:focus-visible, .pc-l:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- 1. never miss: one list by day; the syllabus quiz goes in only after a yes ---------- */
+.pc-due { list-style: none; margin: .7em -.5em 0; padding: 0; }
+.pc-row {
+  display: grid; grid-template-columns: .72em minmax(0, 1fr) auto; grid-template-areas: "mk t d" ". src src";
+  column-gap: .85em; row-gap: .2em; align-items: baseline; padding: .7em .5em; border-top: 1px solid var(--line);
+  background: var(--wbg); transition: background-color var(--fast) var(--ease);
+}
+.pc-row .pc-mk { grid-area: mk; align-self: start; margin-top: .36em; }
+.pc-src { grid-area: src; display: flex; align-items: center; gap: .4em; font-size: .82em; color: var(--ink-3); white-space: nowrap; }
+.pc-t { grid-area: t; color: var(--ink-3); min-width: 0; }
+.pc-t b { font-weight: 600; color: var(--ink); }
+.pc-d { grid-area: d; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pc-found .pc-src { color: var(--accent); font-weight: 600; }
+.pc-ck { width: .8em; height: .66em; flex: none; overflow: visible; }
+.pc-ck path { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+@container pcw (min-width: 520px) {
+  .pc-row { grid-template-columns: .72em 7.2em minmax(0, 1fr) auto; grid-template-areas: "mk src t d"; }
+  .pc-row .pc-mk { align-self: center; margin-top: 0; }
+  .pc-src { font-size: .9em; }
+}
+@media (hover: hover) {
+  .pc-row:hover, .pc-then .pc-it:hover { background: var(--wtint); }
+  .pc-row:hover .pc-mk, .pc-then .pc-it:hover .pc-mk { transform: scale(1.3); }
+}
+
+/* the question and what is left after it is answered share one slot, so the window does not jump */
+.pc-slot { display: grid; margin-top: .2em; border-top: 1px solid var(--line); }
+.pc-slot > * { grid-area: 1 / 1; align-self: start; }
+.pc-ask { padding-top: 1.1em; }
+.pc-q { margin-top: .35em; font: 400 1.5em/1.2 var(--display); text-wrap: balance; }
+.pc-k + .pc-q { margin-top: .35em; }
+.pc-after { padding-top: .9em; }
+.pc-said { font: 400 1.05em/1.45 var(--serif); color: var(--ink-2); }
+.pc-after .pc-l { margin: .35em 0 0 -.55em; }
+.pc-ask, .pc-after { visibility: hidden; opacity: 0; transform: translateY(.6em); transition: opacity var(--med) var(--ease), transform var(--med) var(--ease), visibility 0s linear var(--med); }
+.pc-win[data-state="ask"] .pc-ask,
+.pc-win[data-state="yes"] .pc-after,
+.pc-win[data-state="no"] .pc-after { visibility: visible; opacity: 1; transform: none; transition-delay: 0s; }
+.pc-win[data-state="yes"] [data-said="no"], .pc-win[data-state="no"] [data-said="yes"] { display: none; }
+/* once answered, the question leaves, so no empty space is left under the answer */
+.pc-win:is([data-state="yes"], [data-state="no"]) .pc-ask { display: none; }
+
+/* ---------- 2. what to do now: the answer on top with its reason; the rest under it ---------- */
+.pc-top, .pc-then { list-style: none; margin: 0; padding: 0; }
+.pc-then { margin-inline: -.5em; }
+.pc-it { display: grid; grid-template-columns: .72em minmax(0, 1fr); column-gap: .85em; background: var(--wbg); transition: background-color var(--fast) var(--ease); }
+.pc-then .pc-it { padding: .65em .5em; border-top: 1px solid var(--line); }
+.pc-top .pc-it { padding-top: .45em; }
+.pc-it .pc-mk { margin-top: .32em; }
+.pc-top .pc-mk { margin-top: .85em; }
+.pc-t2 { font: 400 1.14em/1.15 var(--display); letter-spacing: -.008em; color: var(--ink); transform-origin: 0 0; }
+.pc-top .pc-t2 { font-size: 2.1em; letter-spacing: -.016em; }
+.pc-m { margin-top: .3em; font-size: .85em; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.pc-top .pc-m { color: var(--ink-2); }
+.pc-fit { margin-top: .75em; font: 400 1.12em/1.4 var(--serif); color: var(--ink); max-width: 30em; }
+.pc-then .pc-fit,
+.pc-top .pc-it:not(.is-late) .pc-fit[data-fit="eve"],
+.pc-top .pc-it.is-late .pc-fit[data-fit="now"] { display: none; }
+.pc-then-l { margin-top: 1.5em; padding-bottom: .45em; }
+.pc-win.is-one .pc-then-l, .pc-win.is-empty :is([data-next-l], [data-acts], [data-then-l]) { display: none; }
+.pc-empty { padding: .2em 0 0; }
+.pc-empty .pc-q { margin: 0 0 .4em; }
+.pc-empty .pc-l { margin-left: -.55em; }
+/* while the list sorts itself on arrival, the answer's label, reason and buttons wait */
+:is([data-next-l], [data-acts], [data-then-l], .pc-top .pc-fit) { transition: opacity var(--med) var(--ease), visibility 0s; }
+.pc-win.is-sorting :is([data-next-l], [data-acts], [data-then-l], .pc-top .pc-fit) { opacity: 0; visibility: hidden; transition: none; }
+
+/* ---------- 3. get ahead: one week, Mon 9 to Mon 16; blocks move, the shift and the deadlines stay ---------- */
+.pc-week { list-style: none; margin: 0; padding: 0; }
+.pc-day {
+  position: relative; display: grid; grid-template-columns: 3.3em minmax(0, 1fr); column-gap: .8em; align-items: center;
+  min-height: 3.7em; padding: .4em .5em; border-top: 1px solid var(--line);
+}
+.pc-day:first-child { border-top: 0; }
+.pc-dh span { display: block; font-size: .74em; color: var(--ink-3); }
+.pc-dh b { display: block; margin-top: .05em; font: 400 1.28em/1.05 var(--display); color: var(--ink); }
+.pc-evs { display: flex; flex-wrap: wrap; align-items: center; gap: .4em; min-width: 0; }
+.pc-ev {
+  position: relative; display: inline-grid; grid-template-columns: auto auto; justify-content: start; align-content: center; column-gap: .35em;
+  min-height: 44px; margin: 0; padding: .3em .65em; border: 0; border-radius: var(--r); background: var(--cc); color: var(--on-cc);
+  font: 400 .8em/1.2 var(--sans); text-align: left;
+}
+.pc-ev b { font-weight: 600; }
+.pc-ev .pc-tm { grid-column: 1 / -1; font-variant-numeric: tabular-nums; }
+.pc-mark { display: inline-flex; align-items: center; gap: .45em; min-height: 2em; font-size: .8em; color: var(--ink-2); }
+.pc-mark b { font-weight: 600; color: var(--ink); }
+.pc-mark .pc-mk { flex: none; width: .7em; height: .7em; }
+
+button.pc-ev { cursor: grab; transition: transform var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
+button.pc-ev:hover, button.pc-ev:focus-visible { transform: translateY(-2px); box-shadow: 0 8px 14px -8px color-mix(in srgb, var(--shadow) 50%, transparent); }
+button.pc-ev:active { transform: translateY(1px); box-shadow: none; }
+button.pc-ev:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.pc-ev[aria-pressed="true"] { z-index: 3; transform: translateY(-3px); box-shadow: 0 12px 20px -10px color-mix(in srgb, var(--shadow) 55%, transparent); outline: 2px solid var(--ink); outline-offset: 2px; }
+button.pc-ev.is-drag { z-index: 4; cursor: grabbing; transition: none; box-shadow: 0 16px 26px -12px color-mix(in srgb, var(--shadow) 60%, transparent); }
+
+/* while a block is picked up, every day is a place to put it; days it cannot go to fade and refuse */
+.pc-drop {
+  display: none; position: absolute; inset: 0; z-index: 2; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; cursor: pointer;
+}
+.pc-week.is-holding .pc-drop { display: block; }
+.pc-week.is-holding .pc-day:not(.is-no):not(.is-here) .pc-drop { outline: 1px dashed var(--ink-3); outline-offset: -4px; }
+.pc-week.is-holding .pc-day:not(.is-no) .pc-drop:hover,
+.pc-week.is-holding .pc-day.is-over .pc-drop,
+.pc-drop:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; }
+.pc-day.is-no .pc-drop { cursor: not-allowed; }
+.pc-day.is-no .pc-drop:focus-visible { outline-color: var(--ink-3); }
+.pc-day > :not(.pc-drop) { transition: opacity var(--fast) var(--ease); }
+.pc-week.is-holding .pc-day.is-no > :not(.pc-drop) { opacity: .28; }
+
+@container pcw (min-width: 600px) {
+  .pc-ahead .pc-body { padding: 1em .9em 1.2em; }
+  .pc-week { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); }
+  .pc-day { display: block; min-height: 11.5em; padding: .1em .3em .5em; border-top: 0; border-left: 1px solid var(--line); }
+  .pc-day:last-child { border-right: 1px solid var(--line); }
+  .pc-dh { padding-left: .15em; }
+  .pc-evs { display: grid; gap: .45em; margin-top: .85em; }
+  .pc-ev { display: block; width: 100%; padding: .45em .5em; font-size: .74em; }
+  .pc-ev > * { display: block; white-space: nowrap; }
+  .pc-mark { align-items: flex-start; font-size: .74em; padding-left: .15em; }
+  .pc-mark .pc-mk { margin-top: .3em; }
+}
+
+/* ---------- arriving: each window rises in once it is on screen (js/site.js or js/pieces.js adds .is-in) ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  .js .pc-win[data-build] { transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease); }
+  .js .pc-win[data-build]:not(.is-in) { opacity: 0; transform: translateY(36px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pieces *, .pieces *::before, .pieces *::after { transition-duration: 0s !important; transition-delay: 0s !important; }
+  .pc-ask, .pc-after { transform: none; }
+  button.pc-ev:hover, button.pc-ev:focus-visible, button.pc-ev:active, button.pc-ev[aria-pressed="true"],
+  .pc-b:active, .pc-l:active, .pc-row:hover .pc-mk, .pc-then .pc-it:hover .pc-mk { transform: none; }
+}

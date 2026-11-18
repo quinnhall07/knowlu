@@ -1,0 +1,59 @@
+/* Questions: seven rows that open in place. The heading on the left and the rows on the right when wide. */
+
+.faq {
+  max-width: var(--page); margin: 0 auto; padding: var(--sec) var(--gut) 0;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 32px; align-items: start;
+}
+.faq h2 { font-size: var(--t-h2); line-height: 1.02; letter-spacing: -.016em; }
+
+.faq-list { position: relative; }
+/* the top rule, drawn as its own line so it can draw in when the section builds */
+.faq-list::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 1px; background: var(--ink); transform-origin: 0 50%; }
+
+.faq details { border-bottom: 1px solid var(--line); }
+.faq summary {
+  position: relative; list-style: none; cursor: pointer;
+  padding: 20px 48px 20px 0;
+  font: 500 20px/1.3 var(--serif); color: var(--ink);
+  transition: color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.faq summary::-webkit-details-marker { display: none; }
+/* the open and close mark: a small drawn chevron */
+.faq summary::after {
+  content: ""; position: absolute; right: 10px; top: 50%; width: 10px; height: 10px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: translateY(-70%) rotate(45deg);
+  transition: transform var(--med) var(--ease);
+}
+.faq details[open] > summary::after { transform: translateY(-25%) rotate(-135deg); }
+.faq summary:hover, .faq summary:focus-visible { color: var(--accent); }
+.faq details:not([open]) > summary:hover::after { transform: translateY(-45%) rotate(45deg); }
+.faq summary:active { transform: translateY(1px); }
+.faq summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.faq-a { padding: 0 48px 24px 0; max-width: 38em; font: 400 var(--t-body)/1.55 var(--serif); color: var(--ink-2); }
+
+@media (min-width: 1000px) {
+  .faq { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(32px, 6vw, 104px); }
+  .faq summary { padding: 24px 56px 24px 0; font-size: 22px; }
+  .faq-a { font-size: 19px; padding-bottom: 28px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* opening: the answer comes down into place */
+  .faq details[open] > .faq-a { animation: faq-open var(--med) var(--ease); }
+  @keyframes faq-open { from { opacity: 0; transform: translateY(-8px); } }
+
+  /* building on scroll: the rule draws across, then the rows come up one after another */
+  .faq-list::before { transition: transform var(--slow) var(--ease); }
+  .faq h2, .faq details { transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease); }
+  .faq details:nth-child(1) { transition-delay: 120ms; }
+  .faq details:nth-child(2) { transition-delay: 170ms; }
+  .faq details:nth-child(3) { transition-delay: 220ms; }
+  .faq details:nth-child(4) { transition-delay: 270ms; }
+  .faq details:nth-child(5) { transition-delay: 320ms; }
+  .faq details:nth-child(6) { transition-delay: 370ms; }
+  .faq details:nth-child(7) { transition-delay: 420ms; }
+  .js .faq[data-build]:not(.is-in) .faq-list::before { transform: scaleX(0); }
+  .js .faq[data-build]:not(.is-in) :is(h2, details) { opacity: 0; transform: translateY(14px); }
+}

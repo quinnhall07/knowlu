@@ -3,27 +3,372 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Knowlu — what should I work on today?</title>
-<link rel="stylesheet" href="site.css">
+<title>Knowlu: know what’s next.</title>
+<meta name="description" content="Knowlu is a Windows app for college students that gathers your classes, assignments and deadlines and tells you what to do next.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#fffefb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#19161a" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="favicon.ico?v=c33137" sizes="32x32">
+<link rel="icon" href="favicon.svg?v=c33137" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png?v=c33137">
+<link rel="preload" href="fonts/PT_Serif-Caption-Web-Regular.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="fonts/ZillaSlab-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/AlbertSans-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/hero.css">
+<link rel="stylesheet" href="css/logos.css">
+<link rel="stylesheet" href="css/proof.css">
+<link rel="stylesheet" href="css/pieces.css">
+<link rel="stylesheet" href="css/letter.css">
+<link rel="stylesheet" href="css/price.css">
+<link rel="stylesheet" href="css/questions.css">
+<script>document.documentElement.classList.add('js');try{var t=localStorage.getItem('knowlu-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>
 <body>
-<main>
-  <h1><span class="mark"></span>Knowlu</h1>
-  <p>Knowlu answers one question every morning: <strong>what should I work on today, and in what order?</strong> It reads your course calendar, keeps every assignment as a plain file on your own machine, and puts the day in front of you when you open it.</p>
-  <a class="dl" href="releases/Knowlu-setup.exe">Download for Windows</a>
-  <p class="meta">Windows 10 or 11, 64-bit. $9.99 a month, or $69.99 for the academic year &mdash; seven days free first, and you can cancel any time from inside the app. Knowlu needs an account.</p>
-  <h2>Your data</h2>
-  <p>Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.</p>
-  <p class="meta"><a href="privacy.html">What is stored, and where</a></p>
-  <h2>What it does today</h2>
-  <ul>
-    <li>Reads your LMS calendar feed — the link Blackboard and Canvas already give you.</li>
-    <li>Keeps coursework logins in Windows Credential Manager, never in a file.</li>
-    <li>Runs twice a day on its own, from the tray, on the schedule you pick.</li>
-    <li>Mirrors your vault to a folder you own, with a dated snapshot a day.</li>
-  </ul>
-  <p class="meta">Right-click the tray icon and choose <em>Copy diagnostics</em> to send us a problem. It carries the version, the last three runs and the last error. Report an issue in the tray shows you the whole report before it is sent, with emails, links and keys already replaced, and lets you edit it.</p>
-  <footer>Knowlu &middot; <a href="privacy.html">Privacy</a> &middot; <a href="terms.html">Terms</a></footer>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav" data-nav>
+  <div class="nav-in">
+    <a class="wm nav-wm" href="#top" aria-label="Knowlu, back to top"><span class="wm-k">Know<b>lu</b></span></a>
+    <nav aria-label="Main">
+      <a href="#what">What it does</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#questions">Questions</a>
+    </nav>
+    <a class="btn small" href="#join" data-focus-join>Get early access</a>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top" data-hero>
+    <canvas class="hero-fx" data-hero-fx aria-hidden="true"></canvas>
+    <div class="hero-in">
+      <h1 class="lockup"><span class="vh">Knowlu: know what’s next.</span><span class="wm wm-xl" aria-hidden="true"><span class="wm-k">Know<b>lu</b></span></span><span class="tag" aria-hidden="true">know what’s next.</span></h1>
+
+      <!-- What Knowlu would say right now. One line shows at a time and the next comes in about every 4 seconds.
+           Edit, add or remove lines freely; each sentence goes in its own span, so a narrow screen breaks the line
+           between sentences and never inside one. data-class picks the square's class color (cs, chem, span, psyc, or none);
+           is-cur marks the line shown first, and the only one shown with scripts off. -->
+      <div class="hero-now" data-hero-now tabindex="0" role="group" aria-label="Examples of what Knowlu tells you">
+        <ul class="hero-now-list">
+          <li class="hero-now-i is-cur" data-class="cs"><span>zyBooks 6.4 is next.</span> <span>Due tonight, about 45 minutes.</span></li>
+          <li class="hero-now-i" data-class="chem"><span>Lab in an hour.</span> <span>Nothing due before it.</span></li>
+          <li class="hero-now-i" data-class="chem"><span>Chem midterm Monday.</span> <span>Start studying Thursday.</span></li>
+          <li class="hero-now-i" data-class="none"><span>Nothing due today.</span></li>
+        </ul>
+      </div>
+
+      <form class="wl" id="join" novalidate data-wl>
+        <label class="vh" for="wl-email">Email</label>
+        <div class="wl-row">
+          <input id="wl-email" type="email" name="email" autocomplete="email" placeholder="you@school.edu" required>
+          <button class="btn" type="submit">Get early access</button>
+        </div>
+        <p class="wl-msg" aria-live="polite">For college students, on Windows. Opens spring semester 2027.</p>
+        <p class="wl-count" data-wl-count hidden></p>
+      </form>
+    </div>
+  </section>
+
+  <section class="logos" aria-labelledby="logos-h" data-kick="shove">
+    <h2 class="vh" id="logos-h">Built for the sites your classes already use</h2>
+    <button class="mq-pause" type="button" data-mq-pause aria-pressed="false"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" data-i="pause"><path d="M5 3.5v9M11 3.5v9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" data-i="play" hidden><path d="M5 3.2v9.6l8-4.8z" fill="currentColor"/></svg><span>Pause</span></button>
+    <div class="mq" data-mq>
+      <ul class="mq-track" aria-label="Sites Knowlu works with">
+        <li class="mq-i" data-dark="white"><img src="logos/canvas.svg" alt="Canvas" height="34" style="--h:34px"></li>
+        <li class="mq-i" data-dark="white"><img src="logos/blackboard.svg" alt="Blackboard" height="26" style="--h:26px"></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/gmail.svg" alt="" height="24" style="--h:24px"><span>Gmail</span></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/outlook.svg" alt="" height="30" style="--h:30px"><span>Outlook</span></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/gcal.svg" alt="" height="30" style="--h:30px"><span>Google Calendar</span></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/zybooks.svg" alt="zyBooks" height="32" style="--h:32px"></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/vhl.svg" alt="" height="36" style="--h:36px"><span>VHL Central</span></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/brightspace.svg" alt="D2L Brightspace" height="20" style="--h:20px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/webassign.svg" alt="WebAssign" height="15" style="--h:15px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white" data-light="ink"><img src="logos/gradescope.svg" alt="Gradescope" height="24" style="--h:24px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/edstem.svg" alt="Edstem" height="20" style="--h:20px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/cengage.svg" alt="Cengage" height="24" style="--h:24px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/aktiv.svg" alt="Aktiv" height="38" style="--h:38px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="keep"><img src="logos/expertta.png" alt="Expert TA" height="40" style="--h:40px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white" data-light="ink"><img src="logos/edfinity.svg" alt="Edfinity" height="24" style="--h:24px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="keep"><span>Smartwork</span><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/pearson.svg" alt="Pearson" height="28" style="--h:28px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="keep"><img src="logos/connect.svg" alt="" height="32" style="--h:32px"><span>Connect</span><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/aleks.svg" alt="ALEKS" height="21" style="--h:21px"><small class="mq-c">Coming</small></li>
+      </ul>
+      <ul class="mq-track" aria-hidden="true">
+        <li class="mq-i" data-dark="white"><img src="logos/canvas.svg" alt="" height="34" style="--h:34px"></li>
+        <li class="mq-i" data-dark="white"><img src="logos/blackboard.svg" alt="" height="26" style="--h:26px"></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/gmail.svg" alt="" height="24" style="--h:24px"><span>Gmail</span></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/outlook.svg" alt="" height="30" style="--h:30px"><span>Outlook</span></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/gcal.svg" alt="" height="30" style="--h:30px"><span>Google Calendar</span></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/zybooks.svg" alt="" height="32" style="--h:32px"></li>
+        <li class="mq-i" data-dark="keep"><img src="logos/vhl.svg" alt="" height="36" style="--h:36px"><span>VHL Central</span></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/brightspace.svg" alt="" height="20" style="--h:20px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/webassign.svg" alt="" height="15" style="--h:15px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white" data-light="ink"><img src="logos/gradescope.svg" alt="" height="24" style="--h:24px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/edstem.svg" alt="" height="20" style="--h:20px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/cengage.svg" alt="" height="24" style="--h:24px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/aktiv.svg" alt="" height="38" style="--h:38px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="keep"><img src="logos/expertta.png" alt="" height="40" style="--h:40px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white" data-light="ink"><img src="logos/edfinity.svg" alt="" height="24" style="--h:24px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="keep"><span>Smartwork</span><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/pearson.svg" alt="" height="28" style="--h:28px"><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="keep"><img src="logos/connect.svg" alt="" height="32" style="--h:32px"><span>Connect</span><small class="mq-c">Coming</small></li>
+        <li class="mq-i mq-soon" data-dark="white"><img src="logos/aleks.svg" alt="" height="21" style="--h:21px"><small class="mq-c">Coming</small></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="proof" aria-label="A number about students" data-build="parts">
+    <div class="pf-in">
+      <p class="pf-n" data-count>75.6%</p>
+      <div class="pf-copy">
+        <p class="pf-t">of undergraduates surveyed said procrastination was a problem for them in the past year.</p>
+        <p class="pf-src"><a href="https://www.acha.org/wp-content/uploads/NCHA-IIIb_SPRING_2026_UNDERGRADUATE_REFERENCE_GROUP_EXECUTIVE_SUMMARY.pdf">American College Health Association survey</a>, spring 2026. 44,602 undergraduates at 86 US schools.</p>
+      </div>
+    </div>
+  </section>
+  <section class="pieces" id="what" aria-label="What Knowlu does">
+
+    <article class="pc pc-miss" data-piece="miss" aria-labelledby="pc-miss-h">
+      <div class="pc-copy">
+        <h2 id="pc-miss-h">Never miss an assignment.</h2>
+        <p>Knowlu reads Canvas, zyBooks, VHL and your email, and asks before adding a date it finds in a syllabus.</p>
+        <p class="pc-fact"><b>47%</b> <span>of students surveyed missed an important deadline because they didn’t know it was due.</span> <small><a href="https://pathify.com/blog/is-your-digital-campus-driving-students-away-new-data-reveals-the-cost-of-the-digital-maze/">Survey by Pathify</a>, a campus software company, 2025. 1,010 US students.</small></p>
+      </div>
+      <div class="pc-side">
+        <div class="pc-win" data-build role="group" aria-label="Example Knowlu window: due this week">
+          <div class="pc-bar"><span class="wm"><span class="wm-k">Know<b>lu</b></span></span><span class="pc-clock">Sun 9:40 PM</span></div>
+          <div class="pc-body">
+            <p class="pc-k plain">Due this week</p>
+            <ol class="pc-due" data-due>
+              <li class="pc-row pc-cs" data-date="10" data-arrive="1"><span class="pc-mk" aria-hidden="true"></span><span class="pc-src">zyBooks</span><span class="pc-t"><b>6.4 participation</b> <span>CS 150</span></span><span class="pc-d">Tue 10</span></li>
+              <li class="pc-row pc-psyc" data-date="11" data-arrive="3"><span class="pc-mk" aria-hidden="true"></span><span class="pc-src">Email</span><span class="pc-t"><b>Chapter 7 reading</b> <span>PSYC 101</span></span><span class="pc-d">Wed 11</span></li>
+              <li class="pc-row pc-chem pc-found" data-date="11" data-found><span class="pc-mk" aria-hidden="true"></span><span class="pc-src"><svg class="pc-ck" viewBox="0 0 12 10" aria-hidden="true"><path d="M1 5.2 4.4 8.6 11 1.4"/></svg>Syllabus, p. 3</span><span class="pc-t"><b>Quiz 4</b> <span>CHEM 110</span></span><span class="pc-d">Wed 11</span></li>
+              <li class="pc-row pc-span" data-date="12" data-arrive="2"><span class="pc-mk" aria-hidden="true"></span><span class="pc-src">VHL</span><span class="pc-t"><b>Lección 9</b> <span>SPAN 102</span></span><span class="pc-d">Thu 12</span></li>
+              <li class="pc-row pc-chem" data-date="13" data-arrive="0"><span class="pc-mk" aria-hidden="true"></span><span class="pc-src">Canvas</span><span class="pc-t"><b>Problem set 8</b> <span>CHEM 110</span></span><span class="pc-d">Fri 13</span></li>
+            </ol>
+            <div class="pc-slot pc-js" data-slot>
+              <div class="pc-ask" role="group" aria-labelledby="pc-ask-l pc-ask-q">
+                <p class="pc-k" id="pc-ask-l">Found in your CHEM 110 syllabus, page 3</p>
+                <p class="pc-q" id="pc-ask-q">Quiz 4, Wed Nov 11, in class?</p>
+                <div class="pc-acts">
+                  <button class="pc-b" type="button" data-yes>Yes, add it</button>
+                  <button class="pc-l" type="button" data-no>No</button>
+                </div>
+              </div>
+              <div class="pc-after">
+                <p class="pc-said" data-said="yes">Added to Wed 11, from page 3 of the syllabus.</p>
+                <p class="pc-said" data-said="no">Left off your list.</p>
+                <button class="pc-l" type="button" data-again>Ask again</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="pc-hint pc-js">Answer the question in the window.</p>
+        <p class="vh" role="status" data-say></p>
+      </div>
+    </article>
+
+    <article class="pc pc-now" data-piece="now" aria-labelledby="pc-now-h">
+      <div class="pc-copy">
+        <h2 id="pc-now-h">Know what to do now.</h2>
+        <p>Open it and get one answer: what to do next, how long it takes, and whether it fits before your next class.</p>
+        <p class="pc-fact"><b>48%</b> <span>of undergraduates surveyed said procrastination hurt them in a class or slowed their degree.</span> <small><a href="https://www.acha.org/wp-content/uploads/NCHA-IIIb_SPRING_2026_UNDERGRADUATE_REFERENCE_GROUP_EXECUTIVE_SUMMARY.pdf">American College Health Association survey</a>, spring 2026.</small></p>
+      </div>
+      <div class="pc-side">
+        <div class="pc-win" data-build role="group" aria-label="Example Knowlu window: what to do next">
+          <div class="pc-bar"><span class="wm"><span class="wm-k">Know<b>lu</b></span></span><span class="pc-clock" data-clock>Tue 2:40 PM</span></div>
+          <div class="pc-body">
+            <p class="pc-k" data-next-l>Next</p>
+            <ol class="pc-top" id="pc-now-top" data-top data-wait="After your 3:30 lab.">
+              <li class="pc-it pc-cs" data-min="45">
+                <span class="pc-mk" aria-hidden="true"></span>
+                <div class="pc-tx">
+                  <p class="pc-t2">zyBooks 6.4</p>
+                  <p class="pc-m">CS 150 · due tonight · about 45 min</p>
+                  <p class="pc-fit" data-fit="now">Fits now, before your 3:30 lab.</p>
+                  <p class="pc-fit" data-fit="eve">The only thing due tonight, at 11:59.</p>
+                </div>
+              </li>
+            </ol>
+            <div class="pc-acts pc-js" data-acts>
+              <button class="pc-b" type="button" data-start aria-describedby="pc-now-top">Start</button>
+              <button class="pc-l" type="button" data-later aria-describedby="pc-now-top">Later</button>
+            </div>
+            <p class="pc-k plain pc-then-l" data-then-l>Then</p>
+            <ol class="pc-then" data-then>
+              <li class="pc-it pc-psyc" data-min="20">
+                <span class="pc-mk" aria-hidden="true"></span>
+                <div class="pc-tx">
+                  <p class="pc-t2">Chapter 7 reading</p>
+                  <p class="pc-m">PSYC 101 · due Wed · about 20 min</p>
+                  <p class="pc-fit" data-fit="now">Fits before your lab, and it is due at 10 tomorrow.</p>
+                  <p class="pc-fit" data-fit="eve">Due at 10 tomorrow, before PSYC 101 starts.</p>
+                </div>
+              </li>
+              <li class="pc-it pc-chem" data-min="30">
+                <span class="pc-mk" aria-hidden="true"></span>
+                <div class="pc-tx">
+                  <p class="pc-t2">Review for quiz 4</p>
+                  <p class="pc-m">CHEM 110 · quiz Wed · about 30 min</p>
+                  <p class="pc-fit" data-fit="now">Fits before your lab. Quiz 4 is tomorrow at 1.</p>
+                  <p class="pc-fit" data-fit="eve">Quiz 4 is tomorrow at 1, so review tonight.</p>
+                </div>
+              </li>
+              <li class="pc-it pc-span" data-min="30">
+                <span class="pc-mk" aria-hidden="true"></span>
+                <div class="pc-tx">
+                  <p class="pc-t2">Lección 9</p>
+                  <p class="pc-m">SPAN 102 · due Thu · about 30 min</p>
+                  <p class="pc-fit" data-fit="now">Fits before your lab, and it is due Thursday at 9.</p>
+                  <p class="pc-fit" data-fit="eve">Due Thursday at 9. Tomorrow already has the quiz.</p>
+                </div>
+              </li>
+              <li class="pc-it pc-chem" data-min="60">
+                <span class="pc-mk" aria-hidden="true"></span>
+                <div class="pc-tx">
+                  <p class="pc-t2">Problem set 8</p>
+                  <p class="pc-m">CHEM 110 · due Fri · about 1 hour</p>
+                  <p class="pc-fit" data-fit="eve">First of three sittings before Friday. The others are Wednesday and Thursday.</p>
+                </div>
+              </li>
+            </ol>
+            <div class="pc-empty" data-empty hidden>
+              <p class="pc-q">Nothing else due today.</p>
+              <button class="pc-l" type="button" data-over>Start over</button>
+            </div>
+          </div>
+        </div>
+        <p class="pc-hint pc-js">Press Start or Later.</p>
+        <p class="vh" role="status" data-say></p>
+      </div>
+    </article>
+
+    <article class="pc pc-ahead" data-piece="ahead" aria-labelledby="pc-ahead-h">
+      <div class="pc-copy">
+        <h2 id="pc-ahead-h">Get ahead of work.</h2>
+        <p>Big assignments get split across the week, and studying starts days before an exam, around your shifts.</p>
+        <p class="pc-fact"><b>About half</b> <span>of students surveyed said balancing schoolwork with their other responsibilities got in the way of doing well.</span> <small><a href="https://www.insidehighered.com/news/2023/02/14/survey-top-five-barriers-student-success">Survey by Inside Higher Ed and College Pulse</a>, 2023. 3,004 students at 128 colleges.</small></p>
+      </div>
+      <div class="pc-side">
+        <div class="pc-win" data-build role="group" aria-label="Example Knowlu window: the week of Monday the 9th">
+          <div class="pc-bar"><span class="wm"><span class="wm-k">Know<b>lu</b></span></span><span class="pc-clock">Mon 8:10 AM</span></div>
+          <div class="pc-body">
+            <ol class="pc-week" data-week>
+              <li class="pc-day" data-date="9"><p class="pc-dh"><span>Mon</span> <b>9</b></p><div class="pc-evs"></div><button class="pc-drop pc-js" type="button" aria-label="Move to Mon 9"></button></li>
+              <li class="pc-day" data-date="10"><p class="pc-dh"><span>Tue</span> <b>10</b></p><div class="pc-evs">
+                <button class="pc-ev pc-chem" type="button" data-move data-at="20-21" data-due="13" data-before="the Fri 13 deadline" data-name="a Problem set 8 sitting" aria-describedby="pc-ahead-hint"><b>PS 8</b> <span data-n>1 of 3</span> <span class="pc-tm">8–9 PM</span></button>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Tue 10"></button></li>
+              <li class="pc-day" data-date="11"><p class="pc-dh"><span>Wed</span> <b>11</b></p><div class="pc-evs">
+                <button class="pc-ev pc-chem" type="button" data-move data-at="20-21" data-due="13" data-before="the Fri 13 deadline" data-name="a Problem set 8 sitting" aria-describedby="pc-ahead-hint"><b>PS 8</b> <span data-n>2 of 3</span> <span class="pc-tm">8–9 PM</span></button>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Wed 11"></button></li>
+              <li class="pc-day" data-date="12"><p class="pc-dh"><span>Thu</span> <b>12</b></p><div class="pc-evs">
+                <button class="pc-ev pc-chem" type="button" data-move data-at="17-18" data-due="13" data-before="the Fri 13 deadline" data-name="a Problem set 8 sitting" aria-describedby="pc-ahead-hint"><b>PS 8</b> <span data-n>3 of 3</span> <span class="pc-tm">5–6 PM</span></button>
+                <button class="pc-ev pc-chem" type="button" data-move data-at="19-21" data-due="16" data-before="the midterm on Mon 16" data-name="a study block" aria-describedby="pc-ahead-hint"><b>Study</b> <span class="pc-tm">7–9 PM</span></button>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Thu 12"></button></li>
+              <li class="pc-day" data-date="13"><p class="pc-dh"><span>Fri</span> <b>13</b></p><div class="pc-evs">
+                <p class="pc-mark pc-chem" data-due-mark><span class="pc-mk" aria-hidden="true"></span><span><b>PS 8</b> due</span></p>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Fri 13"></button></li>
+              <li class="pc-day" data-date="14"><p class="pc-dh"><span>Sat</span> <b>14</b></p><div class="pc-evs">
+                <p class="pc-ev pc-job" data-at="10-13" data-name="your shift"><b>Shift</b> <span class="pc-tm">10–1</span></p>
+                <button class="pc-ev pc-chem" type="button" data-move data-at="14-16" data-due="16" data-before="the midterm on Mon 16" data-name="a study block" aria-describedby="pc-ahead-hint"><b>Study</b> <span class="pc-tm">2–4 PM</span></button>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Sat 14"></button></li>
+              <li class="pc-day" data-date="15"><p class="pc-dh"><span>Sun</span> <b>15</b></p><div class="pc-evs">
+                <button class="pc-ev pc-chem" type="button" data-move data-at="11-13" data-due="16" data-before="the midterm on Mon 16" data-name="a study block" aria-describedby="pc-ahead-hint"><b>Study</b> <span class="pc-tm">11–1</span></button>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Sun 15"></button></li>
+              <li class="pc-day" data-date="16"><p class="pc-dh"><span>Mon</span> <b>16</b></p><div class="pc-evs">
+                <p class="pc-mark pc-chem"><span class="pc-mk" aria-hidden="true"></span><span><b>Midterm</b> 9 AM</span></p>
+              </div><button class="pc-drop pc-js" type="button" aria-label="Move to Mon 16"></button></li>
+            </ol>
+          </div>
+        </div>
+        <p class="pc-hint pc-js" id="pc-ahead-hint" data-hint data-hold="Now choose a day. Faded days are on or after the deadline, or would overlap something.">Choose a block, then choose a day to move it to. Arrow keys work too.</p>
+        <p class="vh" role="status" data-say></p>
+      </div>
+    </article>
+
+    <p class="pc-foot">The student, classes and dates here are made up.</p>
+  </section>
+  <section class="letter" id="letter" aria-labelledby="lt-h" data-build="parts">
+    <figure class="lt-ph"><img src="img/founder-quinn.jpg" width="640" height="800" alt="Quinn, the founder of Knowlu" loading="lazy" decoding="async"></figure>
+    <h2 class="lt-h" id="lt-h">Why I’m building Knowlu.</h2>
+    <div class="lt-body">
+      <div class="lt-text">
+        <p>I’m a student. My week lives in Canvas, zyBooks, VHL, my school email and a calendar, and none of them talk to each other. The date that matters most is usually on page three of a syllabus.</p>
+        <p>So I started building Knowlu for myself. It reads all of those places and gives me one answer: what to do next. Anything it works out on its own waits for your yes. Your school passwords stay on your computer. And it never does your homework.</p>
+        <p>If that sounds like your week too, <a href="#join" data-focus-join>join the waitlist</a>. I’ll write when it’s ready.</p>
+      </div>
+      <p class="lt-sign">Quinn</p>
+      <p class="lt-role">Founder, and a student too</p>
+    </div>
+    <!-- Friends' words: for real quotes only, in their own words, with their permission. Remove hidden once one exists. -->
+    <figure class="lt-words" hidden>
+      <blockquote><p>[A friend’s words, exactly as they said them.]</p></blockquote>
+      <figcaption class="lt-by">[First name], [what they study]</figcaption>
+    </figure>
+  </section>
+  <section class="price" id="pricing" aria-labelledby="pr-h" data-build="parts" data-dots>
+    <canvas class="pr-fx" data-dots-fx aria-hidden="true"></canvas>
+    <div class="pr-in">
+      <div class="pr-head">
+        <h2 id="pr-h">Pricing.</h2>
+        <p class="pr-when">Pricing will be announced before launch.<br>30-day money-back guarantee on the yearly plan. Cancel anytime.</p>
+      </div>
+      <div class="pr-join">
+        <form class="wl" id="join-end" novalidate data-wl>
+          <label class="vh" for="wl-email-end">Email</label>
+          <div class="wl-row">
+            <input id="wl-email-end" type="email" name="email" autocomplete="email" placeholder="you@school.edu" required>
+            <button class="btn" type="submit">Get early access</button>
+          </div>
+          <p class="wl-msg" aria-live="polite"></p>
+          <p class="wl-count" data-wl-count hidden></p>
+        </form>
+      </div>
+    </div>
+  </section>
+  <section class="faq" id="questions" aria-labelledby="faq-h" data-build="parts">
+    <h2 id="faq-h">Questions.</h2>
+    <div class="faq-list">
+      <details><summary>When does it launch?</summary><p class="faq-a">For spring semester 2027, on Windows. The waitlist hears first.</p></details>
+      <details><summary>What does Knowlu read?</summary><p class="faq-a">Canvas and other course calendars, zyBooks, VHL, your school email or Gmail, Google and Outlook calendars, syllabi you upload, campus events, and your registrar where your school offers it.</p></details>
+      <details><summary>Does it do my homework?</summary><p class="faq-a">No. Knowlu plans your time and explains why. It never does the work and never writes anything you send to someone else.</p></details>
+      <details><summary>Where do my school passwords go?</summary><p class="faq-a">Nowhere. They stay on your computer, in Windows Credential Manager, and Knowlu signs in to your portals from there. What it reads, like assignments and due dates, goes to Knowlu’s servers to plan your day.</p></details>
+      <details><summary>What will it cost?</summary><p class="faq-a">Pricing will be announced before launch. 30-day money-back guarantee on the yearly plan. Cancel anytime.</p></details>
+      <details><summary>Mac or phone?</summary><p class="faq-a">Windows desktop first. Nothing else is promised yet.</p></details>
+    </div>
+  </section>
 </main>
+
+<footer class="ft">
+  <div class="ft-in">
+    <div class="ft-brand">
+      <a class="wm" href="#top" aria-label="Knowlu, back to top"><span class="wm-k">Know<b>lu</b></span></a>
+      <p class="ft-tag">know what’s next.</p>
+      <p class="ft-when">A Windows desktop app. Opens for spring semester 2027.</p>
+    </div>
+    <nav class="ft-nav" aria-label="Footer">
+      <a href="#what">What it does</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#questions">Questions</a>
+      <a href="#letter">From the founder</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+    </nav>
+  </div>
+  <div class="ft-base">
+    <p>© 2026 Knowlu</p>
+    <button class="theme" type="button" data-theme-toggle>Dark</button>
+  </div>
+</footer>
+
+<script src="js/site.js" defer></script>
+<script src="js/dots.js" defer></script>
+<script src="js/strip.js" defer></script>
+<script src="js/hero-line.js" defer></script>
+<script src="js/pieces.js" defer></script>
+<script src="js/price.js" defer></script>
 </body>
 </html>
