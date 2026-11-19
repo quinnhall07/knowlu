@@ -1092,3 +1092,23 @@ fn a_quiet_check_shows_no_done_toast() {
     assert!(check.contains("toast(refusal(env), null, null, true)"), "a refusal is still said, quiet or not");
     assert!(read("js/kit.js").contains("KnowluKit.check(row, opts)"), "the header names the option");
 }
+
+/// Whole-branch review I2: the engine's `revision` leaves `now` out (`engine/src/surface.rs`), so a
+/// poll whose revision is unchanged still carries a later minute. `arrived()` copies the answer's
+/// `now` into the state on screen and into a held one before the unchanged-revision return, which
+/// tells no `on` listener; the shell redraws the band's clock on every poll. The DOM check is
+/// `scripts/ui-fixture/checks/t05.py`.
+#[test]
+fn now_moves_between_revisions() {
+    let data = code_of("js/data.js");
+    let arrived = fn_body(&data, "function arrived(");
+    let same = arrived.find(".revision === REV").expect("the unchanged-revision test");
+    let s_now = arrived.find("S.now = st.now").expect("an unchanged revision still updates the state's now");
+    let held_now = arrived.find("HELD.now = st.now").expect("and a held state's now");
+    assert!(s_now < same && held_now < same, "now is copied before the unchanged-revision return: {arrived}");
+    let ret = line_with(arrived, ".revision === REV");
+    assert!(ret.contains("return;") && !ret.contains("emit(") && !ret.contains("paint("), "an unchanged revision tells no on listener: {ret}");
+    let shell = code_of("js/shell.js");
+    let start = fn_body(&shell, "start: function (");
+    assert!(start.contains("KnowluData.onPoll(drawClock)"), "the band's clock redraws on every poll");
+}

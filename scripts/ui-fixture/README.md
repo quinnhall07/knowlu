@@ -40,7 +40,12 @@ Page tasks add their own DOM checks to `run.py` as their pages land.
   `event.emit` records in `window.__fixture.events`; the window does nothing. The stub freezes `Date`
   at `2026-08-28T09:00` local, the surface oracle's pinned now, so every date word is the same on
   any day. A command that takes `view` answers with the set's envelope for that view; anything not
-  staged answers `{ok: false}`.
+  staged answers `{ok: false}`. A check that sets `window.__fixture.now` gets every `state` answer
+  with that `now` and the envelope's revision unchanged, as a later poll of an unchanged vault
+  carries (`checks/t05.py`, whole-branch review I2). Every answer carries the app's own
+  Content-Security-Policy, read from `app/tauri.conf.json`, with only `connect-src` widened by
+  `'self'` for the stub's envelope fetches, so a page change the app's CSP denies fails here too
+  (a refusal is a console error).
 - `make_base_courses.py` builds every envelope from the engine, never by hand: a vault in a temporary
   folder with three files of `engine/tests/fixtures/vault-full/config/` (read only: `events.yaml`,
   `planning.yaml`, `runners.yaml`; never `ingest.yaml` or `week_template.yaml`), an invented week of

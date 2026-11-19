@@ -11,7 +11,8 @@
      Needs a date       S.nav_counts.undated, linking Tasks' No date filter (#tasks/none, one of Tasks' due arguments).
      Schedule           S.the_day: its all-day dates (an accepted date offers Remove from my day: hidden at once,
                         remove_lane_date when its ten-second Undo toast closes) and its class and busy blocks; what has
-                        ended folds under "N earlier".
+                        ended folds under "N earlier". The past, next and now marks follow S.now on every poll, not only
+                        on a new revision (I2).
      Free time          S.the_day.open_hours and the free blocks of the same list, so the two always agree, each with
                         what the engine puts in it (takes[]). */
 (function () {
@@ -36,6 +37,7 @@
     "</section>";
 
   var WAIT = null, DAY = null, ST = null, MAIL = null, MAIL_ASKED = false, EARLY_OPEN = false, DAY_DATE = "";
+  var NOW_MIN = "", PAST = -1, UNPOLL = null;  /* the minute and the past count the schedule was drawn at */
   var PENDING_LANE = Object.create(null);
 
   function $(id) { return document.getElementById(id); }
@@ -166,13 +168,18 @@
       '<i class="mk" aria-hidden="true"></i><span class="ha-sc-nm">' + h(name) + "</span>" +
       '<span class="ha-sc-t">' + h(KnowluFmt.span(stamp(b.start), stamp(b.end)) || b.start + " to " + b.end) + "</span></li>";
   }
+  /* the now mark shows from the day's first block until the last class or busy block has ended */
+  function showsNow(st) {
+    var d = st.the_day || {};
+    var first = (Array.isArray(d.blocks) && d.blocks.length) ? d.blocks[0].start : "";
+    var now = nowHM(st);
+    return !!(now && first && now >= first && pastCount(st) < timedOf(st).length);
+  }
   function schedHtml(st) {
     var d = st.the_day || {};
     var timed = (Array.isArray(d.blocks) ? d.blocks : []).filter(function (b) { return b.kind === "class" || b.kind === "busy"; });
     var past = pastCount(st);
-    var first = (Array.isArray(d.blocks) && d.blocks.length) ? d.blocks[0].start : "";
-    var now = nowHM(st);
-    var nowHtml = (now && first && now >= first && past < timed.length ? '<li class="ha-now" aria-hidden="true"><span class="ha-now-t">' + h(KnowluFmt.clock(KnowluFmt.now())) + "</span></li>" : "");
+    var nowHtml = (showsNow(st) ? '<li class="ha-now" aria-hidden="true"><span class="ha-now-t">' + h(KnowluFmt.clock(KnowluFmt.now())) + "</span></li>" : "");
     var rowsHtml = laneHtml(st);
     timed.forEach(function (b, i) {
       if (i === past) {
@@ -205,16 +212,44 @@
     return '<p class="ha-free-lead">' + h(lead) + "</p>" + '<ul class="ha-free-rows">' + frees.map(function (b) { return freeRowHtml(b); }).join("") + "</ul>";
   }
 
-  function drawDay(st) {
-    if (!DAY || !st) { return; }
-    DAY_DATE = String(st.now || "").slice(0, 10);
+  /* the schedule: the "N earlier" fold and the rows with their past, next and now marks (what the minute moves) */
+  function drawSched(st) {
     var past = pastCount(st);
+    PAST = past;
+    NOW_MIN = String(st.now || "").slice(0, 16);
     var early = DAY.querySelector("[data-early]");
     early.hidden = !past;
     early.textContent = past ? past + " earlier" : "";
     early.setAttribute("aria-expanded", EARLY_OPEN ? "true" : "false");
     $("ha-sched").innerHTML = schedHtml(st);
+  }
+  function drawDay(st) {
+    if (!DAY || !st) { return; }
+    DAY_DATE = String(st.now || "").slice(0, 10);
+    drawSched(st);
     $("ha-free").innerHTML = freeHtml(st);
+  }
+
+  /* every poll (whole-branch review I2): the revision leaves now out, so data.js copies a later minute into the state
+     on screen without a repaint. Only when that minute changed, and only the schedule's now-dependent parts (wave-b1
+     M1): while nothing new is past, the now mark's time is set in place; else the schedule alone is drawn again and
+     focus goes back to the Remove from my day it was on. Waiting and Free time do not read the minute. */
+  function nowMoved() {
+    if (!DAY || !ST || KnowluData.state() !== ST) { return; }
+    if (String(ST.now || "").slice(0, 16) === NOW_MIN) { return; }
+    var mark = $("ha-sched").querySelector(".ha-now-t");
+    if (pastCount(ST) === PAST && !!mark === showsNow(ST)) {
+      NOW_MIN = String(ST.now || "").slice(0, 16);
+      if (mark) { mark.textContent = KnowluFmt.clock(KnowluFmt.now()); }
+      return;
+    }
+    var f = document.activeElement;
+    var uid = f && f.getAttribute && DAY.contains(f) ? f.getAttribute("data-lane-remove") : null;
+    drawSched(ST);
+    if (!uid) { return; }
+    Array.prototype.forEach.call(DAY.querySelectorAll("[data-lane-remove]"), function (b) {
+      if (b.getAttribute("data-lane-remove") === uid) { b.focus(); }
+    });
   }
 
   /* Remove from my day: hidden at once; the call waits behind the ten-second toast, so Undo never reaches the engine.
@@ -289,6 +324,8 @@
       DAY.innerHTML = DAY_HTML;
       WAIT.addEventListener("click", onClick);
       DAY.addEventListener("click", onClick);
+      if (UNPOLL) { UNPOLL(); }
+      UNPOLL = KnowluData.onPoll(nowMoved);
     },
     update: function (st) {
       if (!WAIT || !DAY || !st) { return; }
@@ -298,9 +335,13 @@
       loadMailApplied();
     },
     unmount: function () {
+      if (UNPOLL) { UNPOLL(); }
+      UNPOLL = null;
       WAIT = null;
       DAY = null;
       ST = null;
+      NOW_MIN = "";
+      PAST = -1;
     }
   };
 })();

@@ -10,13 +10,16 @@ Binds 127.0.0.1 on a port the OS picks (port 0) and serves:
 
 The stub stands in for Tauri's window.__TAURI__: core.invoke answers from the named envelope set and records every
 call in window.__fixture.calls; event.emit records in window.__fixture.events; window.getCurrentWindow() is a window
-that does nothing. It freezes Date at 2026-08-28T09:00 local (the surface oracle's pinned now), so every date word is
-the same on any day. Nothing here is shipped, and nothing is written under app/static.
+that does nothing. Setting window.__fixture.now (a check's) makes every state answer carry that `now` with the
+envelope's revision unchanged, as a later poll of an unchanged vault does (checks/t05.py). It freezes Date at 2026-08-28T09:00 local (the surface oracle's pinned now), so every date word is
+the same on any day. Every answer carries the app's CSP from app/tauri.conf.json, with only connect-src widened by
+'self' for the stub's own fetches (csp(), below). Nothing here is shipped, and nothing is written under app/static.
 
     python scripts/ui-fixture/serve.py [--set base-courses]   # prints the URL; Ctrl+C stops it
 """
 import argparse
 import http.server
+import json
 import pathlib
 import threading
 import urllib.parse
@@ -26,6 +29,28 @@ REPO = HERE.parent.parent
 # The page's root (T23, the swap, moved it here from app/static/next).
 ROOT = REPO / "app" / "static"
 ENVELOPES = HERE / "envelopes"
+CONF = REPO / "app" / "tauri.conf.json"
+
+
+def csp():
+    """The app's own Content-Security-Policy, read from tauri.conf.json (app.security.csp), with one widening: 'self' in
+    connect-src, because the stub fetches its envelopes from this server (the app's IPC needs no fetch of ours). Every
+    other directive is the shipped one, so a page change the app's CSP denies fails here too (whole-branch review M2)."""
+    policy = json.loads(CONF.read_text(encoding="utf-8"))["app"]["security"]["csp"]
+    out, widened = [], False
+    for d in (x.strip() for x in policy.split(";")):
+        if not d:
+            continue
+        if d.split()[0] == "connect-src":
+            d += " 'self'"
+            widened = True
+        out.append(d)
+    if not widened:
+        raise SystemExit("tauri.conf.json's CSP names no connect-src to widen for the stub")
+    return "; ".join(out)
+
+
+CSP = csp()
 
 STUB = r"""
 (function () {
@@ -45,7 +70,7 @@ STUB = r"""
   window.Date = FixedDate;
 
   var SET = new URLSearchParams(location.search).get("set") || "base-courses";
-  var F = window.__fixture = { set: SET, calls: [], events: [], window: [] };
+  var F = window.__fixture = { set: SET, calls: [], events: [], window: [], now: null };
   var cache = {};
   function load(name) {
     if (!cache[name]) {
@@ -69,7 +94,10 @@ STUB = r"""
       if (cmd === "state" || (view && cmd !== "ui_event")) {
         return load(SET + "-" + (view === "all" ? "all" : "today")).then(function (env) {
           if (!env) { return { ok: false, error: "no envelope staged for " + SET, state: null }; }
-          return copy(env);
+          var out = copy(env);
+          /* a check moves the minute with the revision unchanged, as the engine's revision leaves now out (I2) */
+          if (F.now && out.state) { out.state.now = F.now; }
+          return out;
         });
       }
       if (Object.prototype.hasOwnProperty.call(DEFAULTS, cmd)) { return copy(DEFAULTS[cmd]); }
@@ -119,6 +147,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", CSP)
         self.end_headers()
         self.wfile.write(body)
 

@@ -307,7 +307,8 @@
     if (typeof w.onResized === "function") { w.onResized(function () { syncMax(w); }).catch(function () {}); }
   }
 
-  /* ---- the clock: the read model's now (D5), redrawn with each state ---- */
+  /* ---- the clock: the read model's now (D5), redrawn with each state and each poll (an unchanged revision still
+     moves now, I2) ---- */
   function drawClock() {
     var st = KnowluData.state();
     var p = st && st.now ? KnowluFmt.parse(st.now) : null;
@@ -371,6 +372,7 @@
       bindPanel();
       document.addEventListener("keydown", onEscape);
       KnowluData.onPoll(drawStatus);
+      KnowluData.onPoll(drawClock);
       KnowluData.on(function (st) {
         drawClasses(st);
         drawStatus();

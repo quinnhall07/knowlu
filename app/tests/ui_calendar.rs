@@ -275,3 +275,25 @@ fn calendar_keys_stay_out_of_the_panel_sheet_layer_and_fields() {
         assert!(guard.contains(s), "the key guard covers {s}");
     }
 }
+
+/// Whole-branch review I2, wave-b1 M1: the now line, the gutter's now label and today's past blocks
+/// follow `now` between revisions. The page listens on `KnowluData.onPoll` while mounted and, only
+/// when `now`'s minute changed, moves them in place; the grid is drawn again only when the day turned.
+#[test]
+fn the_now_line_follows_the_minute_between_revisions() {
+    not_placeholder("js/pages/calendar.js");
+    let js = grid_js();
+    let mount = fn_body(&js, "mount: function (");
+    assert!(mount.contains("KnowluData.onPoll(nowMoved)"), "the Calendar listens on every poll while mounted");
+    let unmount = fn_body(&js, "unmount: function (");
+    assert!(unmount.contains("UNPOLL()"), "and stops when it unmounts");
+    let tick = fn_body(&js, "function nowMoved(");
+    assert!(tick.contains("NOW_MIN"), "only when now's minute changed");
+    assert!(!tick.contains("innerHTML"), "the minute moves the marks in place: {tick}");
+    for l in tick.lines().filter(|l| l.contains("draw()")) {
+        assert!(l.contains("todayIso()"), "the grid is drawn again only when the day turned: {l}");
+    }
+    for part in [".now", ".hl.is-now", "\"--now\"", "\"is-past\""] {
+        assert!(tick.contains(part), "the minute moves {part}");
+    }
+}

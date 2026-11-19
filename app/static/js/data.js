@@ -9,7 +9,9 @@
                                state: null} when the host could not be reached. The answer is remembered for last(cmd).
    KnowluData.state()          the state on screen; null before the first answer and during the first run (I4)
    KnowluData.on(fn)           fn(state) on every newly painted revision, and fn(null) on every first-run answer;
-                               returns the function that stops it
+                               returns the function that stops it. An answer whose revision is unchanged tells no one,
+                               but its `now` is copied into the state on screen (and a held one): the revision leaves
+                               now out, so what reads the minute redraws from onPoll (I2)
    KnowluData.firstRun()       the envelope's first_run block while the first run is going, else null
    KnowluData.last(cmd)        the last answer of a command called through here (grades_status and mail_status ride the
                                poll; google_status is read only by Settings when it mounts, P4), else null
@@ -73,6 +75,10 @@
     emit(st);
   }
   function arrived(st) {
+    /* the engine's revision leaves now out, so the minute moves even when nothing else does: the clock and the now
+       marks read it from onPoll (whole-branch review I2); no on listener is told */
+    if (S && st.now) { S.now = st.now; }
+    if (HELD && st.now) { HELD.now = st.now; }
     if (REV !== null && st.revision === REV && !HELD) { return; }
     var list = document.querySelector("[data-rows]:hover");
     if (S && list && orderOf(st) !== orderOf(S)) {

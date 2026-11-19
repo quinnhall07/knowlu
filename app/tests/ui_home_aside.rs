@@ -223,3 +223,23 @@ fn the_schedule_view_the_window_editor_and_the_moved_line_are_there() {
     assert!(m.contains("if (!m || !m.text) { return \"\"; }") && m.contains("h(m.text)"), "printed through h(), nothing when absent");
     assert!(!js.contains("data-remove="), "D8: no remove control on a commitment");
 }
+
+/// Whole-branch review I2, wave-b1 M1: the past, next and now marks follow `now` between revisions.
+/// The aside listens on `KnowluData.onPoll` while mounted and, only when `now`'s minute changed,
+/// redraws the schedule's now-dependent parts: the now mark's text in place when nothing new is
+/// past, else the schedule alone with focus put back. Waiting and Free time are never redrawn there.
+#[test]
+fn the_now_marks_follow_the_minute_between_revisions() {
+    let js = aside();
+    let mount = fn_body(&js, "mount: function (");
+    assert!(mount.contains("KnowluData.onPoll(nowMoved)"), "the aside listens on every poll while mounted");
+    let unmount = fn_body(&js, "unmount: function (");
+    assert!(unmount.contains("UNPOLL()"), "and stops when Home unmounts");
+    let tick = fn_body(&js, "function nowMoved(");
+    assert!(tick.contains("NOW_MIN"), "only when now's minute changed");
+    for full in ["drawWaiting(", "drawDay(", "ha-free", "innerHTML"] {
+        assert!(!tick.contains(full), "the minute redraws only the now-dependent parts, never {full}: {tick}");
+    }
+    assert!(tick.contains(".ha-now-t") && tick.contains("textContent"), "the now mark's time is set in place");
+    assert!(tick.contains("drawSched(") && tick.contains(".focus()"), "a newly past block redraws the schedule and puts focus back");
+}

@@ -13,7 +13,9 @@
    of center the page opens at 3 days (D6), else the week from Monday. The hour height and the Due fold are kept in
    localStorage (knowlu.cal.zoom, knowlu.cal.due, note D4).
    "Not shown (N)" lists dropped_events, read once when the page mounts; read-only.
-   Pressing a block opens its Details in the panel (kind "cal-thing"); pressing a due name opens the task's Details. */
+   Pressing a block opens its Details in the panel (kind "cal-thing"); pressing a due name opens the task's Details.
+   The now line, the gutter's now label and today's past blocks follow S.now on every poll, not only on a new
+   revision (I2). */
 (function () {
   "use strict";
   var D = null;  /* KnowluCalData, read at mount (scripts load in any order) */
@@ -65,6 +67,9 @@
   var THINGS = Object.create(null);  /* what a block's Details read, by its key */
   var WHEEL = 0;
   var MOUNTED = false;
+  var NOW_MIN = "";      /* the day and minute the grid's now marks were drawn at */
+  var DRAWN_DAY = "";    /* the day the grid was drawn as today */
+  var UNPOLL = null;
 
   function $(id) { return document.getElementById(id); }
   function today() { return KnowluFmt.now(); }
@@ -248,6 +253,8 @@
     var occ = D.expand(WEEK, FROM, N);
     var events = KnowluCalData.accepted(S);
     var TODAY = todayIso();
+    DRAWN_DAY = TODAY;
+    NOW_MIN = TODAY + "T" + nowMins();
     var columns = [];
     var most = 0;
     for (var i = 0; i < N; i++) {
@@ -280,6 +287,30 @@
     document.querySelectorAll("#cal-viewset [data-n]").forEach(function (b) { b.setAttribute("aria-pressed", String(+b.getAttribute("data-n") === N)); });
     if (POP_MONTH && !$("cal-datepop").hidden) { drawPop(); }
     KnowluKit.watchSeen();
+  }
+  /* every poll (whole-branch review I2): the revision leaves now out, so data.js copies a later minute into the state
+     on screen without a repaint. Only when that minute changed, the now line, the gutter's now label and today's past
+     blocks move in place, so focus and scroll stay (wave-b1 M1); the grid is drawn again only when the day turned. */
+  function nowMoved() {
+    if (!MOUNTED || !FROM || !D) { return; }
+    var key = todayIso() + "T" + nowMins();
+    if (key === NOW_MIN) { return; }
+    if (todayIso() !== DRAWN_DAY) { if (todayIso() !== WEEK_DAY) { loadWeek(); } draw(); return; }
+    NOW_MIN = key;
+    var now = nowMins(), at = hrs(now);
+    var col = document.querySelector("#cal-wk .day.is-today");
+    var line = col ? col.querySelector(".hcell > .now") : null;
+    if (line) { line.style.setProperty("--now", at); }
+    var label = document.querySelector("#cal-wk .hl.is-now");
+    if (label) {
+      label.style.setProperty("--h", at);
+      label.textContent = clockOf(now);
+    }
+    if (!col) { return; }
+    Array.prototype.forEach.call(col.querySelectorAll(".blk[data-thing]"), function (b) {
+      var t = THINGS[b.getAttribute("data-thing")];
+      if (t) { b.classList.toggle("is-past", t.e <= now); }
+    });
   }
   function scrollToDay() {
     if (!CENTER || !FROM) { return; }
@@ -448,6 +479,8 @@
       document.addEventListener("keydown", onKey);
       document.addEventListener("pointerdown", onPointerDown);
       center.addEventListener("wheel", onWheel, { passive: false });
+      if (UNPOLL) { UNPOLL(); }
+      UNPOLL = KnowluData.onPoll(nowMoved);
       draw();
       scrollToDay();
       loadWeek();
@@ -461,6 +494,8 @@
     },
     unmount: function () {
       MOUNTED = false;
+      if (UNPOLL) { UNPOLL(); }
+      UNPOLL = null;
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("pointerdown", onPointerDown);
       if (CENTER) { CENTER.removeEventListener("wheel", onWheel); }
