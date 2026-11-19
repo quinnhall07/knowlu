@@ -31,6 +31,12 @@ fn the_bundle_config_is_the_one_the_installer_and_the_updater_need() {
     // camelCase - so `"currentUser"`, and `deny_unknown_fields` would reject any other spelling.)
     assert_eq!(conf["bundle"]["windows"]["nsis"]["installMode"], "currentUser",
                "R9's disk-hop reasoning depends on this - see updates::install_staged");
+    // The downloaded setup exe wears the brand mark, not NSIS's stock install icon (2026-11-19:
+    // the v0.4.0 dry run showed the stock icon). tauri-utils 2.9.3 NsisConfig.installer_icon,
+    // camelCase `installerIcon`, a path relative to tauri.conf.json. Same file as bundle.icon.
+    assert_eq!(conf["bundle"]["windows"]["nsis"]["installerIcon"], "icons/icon.ico",
+               "the installer's icon is the app's icon");
+    assert_eq!(conf["bundle"]["icon"][0], "icons/icon.ico");
     assert_eq!(conf["version"], env!("CARGO_PKG_VERSION"), "one version, in one place (Knowlu spec 6): tauri.conf.json matches the workspace");
     // R-P4a-16: the bundler signs each binary BEFORE it packs, through one wrapper script.
     // tauri-bundler 2.9.4 calls try_sign() on the main binary, on every externalBin, on the
