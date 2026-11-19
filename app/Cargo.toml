@@ -87,9 +87,10 @@ regex = "1.13.1"
 # `Wdk_System_SystemServices` + `Win32_System_SystemInformation` (Task 16 fix round 1, M2): what
 # `report.rs`'s `os_build` needs for `RtlGetVersion` — the real `major.minor.build`, not `%OS%`
 # (which is `Windows_NT` on every Windows machine ever). `windows` is already a direct dependency
-# for the credential store, the tray's message boxes and the child-process wait; this adds two more
-# of its own feature flags, not a new crate.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_Shell"] }
+# for the credential store, the tray's message boxes and the child-process wait; those two are
+# feature flags of it, not a new crate. So is `Win32_Graphics_Dwm` (v0.4.0 note §3, N8):
+# `show_main`'s `DwmSetWindowAttribute`, which sets the frameless window's Windows 11 border to none.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_Graphics_Dwm"] }
 # The mail window's external-scheme cancel (email plan T9.2, T0.S3): WebView2's
 # `LaunchingExternalUriScheme`, reached through `with_webview`. Both are ALREADY in Cargo.lock as
 # wry's own (webview2-com 0.38.2, windows-core 0.61.2, the versions `PlatformWebview::controller()`

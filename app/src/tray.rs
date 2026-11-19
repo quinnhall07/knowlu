@@ -1,5 +1,5 @@
-//! The tray icon: nine menu items, a colour that reflects sync health, and a diagnostics blob a
-//! friend can paste into a message (Knowlu plan 1, Task 7; *Settings* is plan 4a, Task 7).
+//! The tray icon: nine menu items, the brand mark (with an amber dot when a step failed), and a
+//! diagnostics blob a friend can paste into a message (Knowlu plan 1, Task 7; *Settings* is plan 4a, Task 7).
 //! `run-now` and `pause` are wired directly to the scheduler (Task 12) — no event round-trip.
 use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder, AppHandle, Manager};
 use crate::scheduler::{self, Scheduler};
@@ -7,15 +7,12 @@ use crate::state::{self, ConsoleState};
 
 pub enum TrayState { Ok, Warn }
 
-fn square(rgb: [u8; 3]) -> tauri::image::Image<'static> {
-    let mut px = Vec::with_capacity(32 * 32 * 4);
-    for y in 0..32 {
-        for x in 0..32 {
-            let edge = x < 2 || y < 2 || x > 29 || y > 29;
-            if edge { px.extend_from_slice(&[0, 0, 0, 0]) } else { px.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]) }
-        }
-    }
-    tauri::image::Image::new_owned(px, 32, 32)
+// Raw 32x32 RGBA, derived from `icons/icon.ico` by `scripts/brand-icons.py`.
+const TRAY_OK: &[u8] = include_bytes!("../icons/tray-ok.rgba");
+const TRAY_WARN: &[u8] = include_bytes!("../icons/tray-warn.rgba");
+
+fn tray_icon(rgba: &'static [u8]) -> tauri::image::Image<'static> {
+    tauri::image::Image::new(rgba, 32, 32)
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
@@ -38,7 +35,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         *scheduler::lock(&up.item) = Some(update.clone());
     }
     TrayIconBuilder::with_id("main")
-        .icon(square([0x3F, 0xB6, 0x8B]))
+        .icon(tray_icon(TRAY_OK))
         .tooltip("Knowlu")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -150,8 +147,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 pub fn set_state(app: &AppHandle, s: TrayState) {
     if let Some(t) = app.tray_by_id("main") {
         let _ = t.set_icon(Some(match s {
-            TrayState::Ok => square([0x3F, 0xB6, 0x8B]),
-            TrayState::Warn => square([0xD9, 0xA4, 0x41]),
+            TrayState::Ok => tray_icon(TRAY_OK),
+            TrayState::Warn => tray_icon(TRAY_WARN),
         }));
     }
 }

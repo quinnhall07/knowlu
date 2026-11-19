@@ -1,0 +1,80 @@
+{
+ "note": {
+  "ok": true,
+  "error": null,
+  "note": {
+   "id": "task_a1b2c3d409",
+   "path": "tasks/jkl-120-portfolio.md",
+   "slug": "jkl-120-portfolio",
+   "folder": "tasks",
+   "frontmatter": {
+    "title": "JKL 120 Portfolio",
+    "course": "jkl-120",
+    "domain": "school",
+    "due": "2026-08-29T23:59",
+    "effort_hours": 40.0,
+    "effort_confidence": "low",
+    "effort_source": "inferred",
+    "importance": 4,
+    "status": "active",
+    "progress": 10,
+    "created_by": "fixture",
+    "id": "task_a1b2c3d409"
+   },
+   "body": "\nInvented for the fixture harness.\n",
+   "judgment": null,
+   "history": [
+    {
+     "actor": "student",
+     "field": "progress",
+     "id": "task_a1b2c3d409",
+     "new": 10,
+     "old": 0,
+     "op": "set",
+     "path": "tasks/jkl-120-portfolio.md",
+     "run_id": null,
+     "text": "tasks/jkl-120-portfolio.md: progress 0 → 10 (student via dashboard)",
+     "ts": "2026-08-27T16:00:00.000Z",
+     "via": "dashboard"
+    }
+   ],
+   "row": {
+    "amend_badge": {
+     "age_days": 1,
+     "fields": [
+      "due"
+     ],
+     "proposal": "amend-jkl-120-portfolio-due",
+     "sentence": "a proposal would move due to 9/1",
+     "urgency": "neutral"
+    },
+    "conflict_text": null,
+    "course": "jkl-120",
+    "due": "2026-08-29T23:59",
+    "due_short": "8/29",
+    "effort_confidence": "low",
+    "effort_source": "inferred",
+    "fit_text": "Won't fit before Sat 11:59 pm",
+    "fit_why": "36.0h left; you have 30.1h before it's due.",
+    "flag_text": null,
+    "hours": 36.0,
+    "id": "task_a1b2c3d409",
+    "importance": 4,
+    "importance_reason": null,
+    "judged": false,
+    "merge_text": null,
+    "overdue_start": true,
+    "oversized": true,
+    "progress_pct": 10,
+    "slack_days": -17.0,
+    "slug": "jkl-120-portfolio",
+    "source_tag": "fixture",
+    "start_by": "8/11",
+    "status": "active",
+    "title": "JKL 120 Portfolio",
+    "urgency": "od",
+    "why": "start by 8/11 — 36.0h of work needs 18 working days at your 2.0h session cap, minus a 1-day buffer"
+   }
+  }
+ }
+}

@@ -1,0 +1,53 @@
+/* Proof strip: one true number about students on a full-width red field.
+   The figure slot takes a number ("74.8%"), a short phrase ("3 in 4") or a quantity ("3 hours"); the sentence runs one
+   or two lines beside it on a wide screen and under it on a phone. A plain number counts up (js/price.js); anything
+   else rises in with the lines. */
+
+.proof {
+  /* the field's own ink: cream on red in both themes, so shared pieces inside (the draft note) follow it */
+  --ink: var(--cream); --ink-2: var(--cream); --ink-3: var(--cream); --accent: var(--cream);
+  --field-line: color-mix(in srgb, var(--cream) 60%, transparent);
+  background: var(--red); color: var(--ink);
+}
+.proof ::selection { background: var(--cream); color: var(--red); }
+
+.pf-in {
+  max-width: var(--page); margin: 0 auto;
+  padding: clamp(64px, 9vw, 136px) var(--gut) clamp(60px, 8.4vw, 128px);
+  display: grid; gap: clamp(18px, 2.4vw, 28px);
+}
+
+.pf-n {
+  font: 400 clamp(96px, 30vw, 232px)/.86 var(--display);
+  letter-spacing: -.035em; font-variant-numeric: lining-nums;
+  text-wrap: balance;
+}
+.pf-copy { display: grid; justify-items: start; gap: 14px; }
+.pf-t {
+  max-width: 19em;
+  font: 400 clamp(23px, 2.3vw, 36px)/1.22 var(--serif); letter-spacing: -.005em;
+  text-wrap: balance;
+}
+.pf-src { max-width: 36em; font: 400 14px/1.5 var(--sans); }
+.pf-src a { padding-block: 14px; }
+.pf-copy .draft-note { margin-top: 4px; }
+
+/* wide: the figure on the left at its own width, the words beside it on its baseline */
+@media (min-width: 1000px) {
+  .pf-in { grid-template-columns: auto minmax(0, 1fr); column-gap: clamp(40px, 5vw, 88px); align-items: end; }
+  .pf-n { font-size: clamp(160px, 15vw, 248px); }
+  .pf-copy { padding-bottom: .4em; }
+  .pf-src { font-size: 15px; }
+}
+
+/* building on scroll: the figure comes up first, then the sentence, the source and the note */
+@media (prefers-reduced-motion: no-preference) {
+  .pf-n, .pf-copy > * {
+    transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease);
+  }
+  .pf-copy > :nth-child(1) { transition-delay: 140ms; }
+  .pf-copy > :nth-child(2) { transition-delay: 240ms; }
+  .pf-copy > :nth-child(3) { transition-delay: 320ms; }
+  .js .proof[data-build]:not(.is-in) .pf-n { opacity: 0; transform: translateY(.14em); }
+  .js .proof[data-build]:not(.is-in) .pf-copy > * { opacity: 0; transform: translateY(18px); }
+}

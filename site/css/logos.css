@@ -1,0 +1,77 @@
+/* Knowlu logo strip: the sites Knowlu reads, in an endless row right under the hero. The only word is "Coming",
+   under each site still to be added, so a screen that shows two or three logos at a time never passes one off as
+   working today. Gray until you point at one: then the row eases to a stop and that logo shows at full strength (js/strip.js drives
+   the movement; with scripts off a CSS animation runs and pauses on hover). Clicking the strip gives it a push and
+   shakes the hero's dots. The pause button shows only when it is tabbed to. Reduced motion: the logos sit still,
+   wrapped and centered, and a click does nothing. */
+
+.logos { position: relative; padding: clamp(28px, 3vw, 44px) 0 calc(clamp(28px, 3vw, 44px) + 8px); border-bottom: 1px solid var(--line); overflow: hidden; }
+
+.mq-pause {
+  position: absolute; z-index: 2; right: var(--gut); top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px;
+  font: 600 var(--t-small)/1 var(--sans); color: var(--ink); background: var(--bg);
+  border: 1px solid var(--field-line); border-radius: var(--r); cursor: pointer;
+}
+.mq-pause:hover { border-color: var(--ink); }
+.mq-pause:not(:focus-visible) { width: 1px; height: 1px; min-height: 0; padding: 0; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* a strip marked data-kick takes a click as a push (js/strip.js). While it runs fast the logos under the pointer
+   stay gray instead of flashing color as they pass. */
+.logos[data-kick] { cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+.logos.is-kicked .mq-i { pointer-events: none; }
+
+.mq { display: flex; width: max-content; }
+.mq-track {
+  flex: none; display: flex; align-items: center; gap: clamp(48px, 5.4vw, 88px);
+  margin: 0; padding: 0 clamp(48px, 5.4vw, 88px) 0 0; list-style: none;
+  animation: mq 118s linear infinite; /* about 33 px a second at 1440 */
+}
+.mq:hover .mq-track, .mq.paused .mq-track { animation-play-state: paused; }
+@keyframes mq { to { transform: translateX(-100%); } }
+/* js/strip.js moves the whole row itself so it can ease to a stop */
+.mq.is-driven .mq-track { animation: none; }
+.mq.is-driven { will-change: transform; }
+
+.mq-i {
+  position: relative; flex: none; display: flex; align-items: center; gap: 10px; height: 52px;
+  filter: grayscale(1);
+  transition: filter var(--med) var(--ease), transform var(--fast) var(--ease);
+}
+/* every logo rests at half strength, working or coming; the word under a coming one stays at full strength */
+.mq-i > :is(img, span) { opacity: .5; transition: opacity var(--med) var(--ease); }
+/* the logo you point at (or tap) comes up in full color and rises a little; the rest stay gray */
+.mq-i:hover, .mq-i.is-on { filter: none; transform: translateY(-2px); }
+.mq-i:is(:hover, .is-on) > :is(img, span) { opacity: 1; }
+.mq-i img { width: auto; height: var(--h, 28px); max-width: none; }
+.mq-i span { font: 600 20px/1 var(--sans); letter-spacing: -.01em; color: var(--ink); white-space: nowrap; }
+.mq-i.mq-soon span { font-weight: 500; }
+/* pale logos that gray to almost nothing on a light ground show as one solid color there, in color when pointed at */
+.mq-i[data-light="ink"] img { filter: brightness(0); }
+.mq-i[data-light="ink"]:is(:hover, .is-on) img { filter: none; }
+
+/* a site still to be added says so under its own logo, on one line the whole way along the strip */
+.mq-c {
+  position: absolute; left: 50%; top: calc(50% + 24px); transform: translateX(-50%);
+  font: 500 12px/1 var(--sans); color: var(--ink-3); white-space: nowrap;
+}
+
+/* dark: wordmarks drawn in dark ink turn light; colorful icons keep their color */
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .mq-i[data-dark="white"] img { filter: brightness(0) invert(1); } }
+:root[data-theme="dark"] .mq-i[data-dark="white"] img { filter: brightness(0) invert(1); }
+
+@media (max-width: 520px) {
+  .mq-track { gap: 40px; padding-right: 40px; }
+  .mq-i { height: 48px; }
+  .mq-i img { height: calc(var(--h, 28px) * .82); }
+  .mq-i span { font-size: 17px; }
+  .mq-c { top: calc(50% + 21px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mq { width: auto; }
+  .mq-track { animation: none; flex-wrap: wrap; justify-content: center; row-gap: 28px; flex: 1; padding: 0 var(--gut); }
+  .mq-track[aria-hidden="true"], .mq-pause { display: none; }
+  .mq-i { transition: none; }
+  .mq-i:hover, .mq-i.is-on { transform: none; }
+}

@@ -11,6 +11,30 @@ older under `docs/` is history or design authority from the previous repository 
 
 ## 1. State, in facts
 
+▶ **2026-11-17 session, built (branch `feat/v0.4.0-ui`, not merged to `main`).**
+- **v0.4.0** (the new UI on today's engine; the calendar read-only, Ask hidden, a frameless window) is
+  **built and merged on `feat/v0.4.0-ui`**, awaiting the whole-branch review, the live proof and Quinn's tag.
+  Design and plan: `docs/specs/2026-11-17-v0.4.0-new-ui-design.md` and
+  `docs/plans/2026-11-17-v0.4.0-new-ui-plan.md`. Every page, the swap (T23) and the version bump (T24, 0.4.0 in
+  `Cargo.toml` and `tauri.conf.json`) are in. The reference for what shipped is `docs/reference/app.md` (the
+  window, `ui-ready`, the static layout, the fixture harness) and `docs/surface/anatomy.md` §3.17 (the engine's
+  new `courses` region). From the squash bodies at T23: 19 `ui_*` test files (301 tests), the workspace
+  3377 passed / 0 failed / 3 ignored with `.rsrc` the only warning, and `scripts/ui-fixture/run.py --checks`
+  315/315; the whole-branch gate has not run yet.
+- **v0.5.0** is the full product with the new onboarding and billing. The billing lane:
+  - Stripe Managed Payments, with Link as seller of record. Sales tax is added at checkout.
+  - The 30-day money-back covers the yearly plan only.
+- **v0.6.0** is Ask.
+- **The legal pages rewrite** is drafted and reviewed twice: `docs/specs/2026-11-17-legal-pages-rewrite.md`,
+  with the audit in `docs/reports/2026-11-17-legal-pages-audit.md`. Nothing is published.
+- **Quinn's other rulings that day:**
+  - Grades are shown as text (VISION amended).
+  - The Pell deal is dropped for now.
+  - The company is KNOWLU LLC, under Kentucky law and Kentucky courts.
+  - Liability is capped at what the student paid in the prior 12 months.
+- **knowlu.com** shows pricing "to be announced". It was deployed by hand, so a `v*` tag would overwrite it
+  until plan task T4's port of the site (`site/`, commit `ddcc0ee0` on `feat/v0.4.0-ui`) reaches `main`.
+
 ▶ **C1b and C1c MERGED 2026-09-24, C3′ MERGED 2026-09-25, each on Quinn's word, each green on the self-hosted runner. Live billing is proven on prod (2026-09-24).**
 - **CI runs on GitHub's runners again (2026-09-29).** Quinn made the repository public that day, which makes Actions minutes free. The same day the controller deleted the `CI_SELF_HOSTED` variable, deregistered the `knowlu-laptop` runner and set fork-PR approval to *all external contributors*: a self-hosted runner on a public repository runs any fork's pull request on the laptop. **Do not re-register it while the repository is public.** Quinn plans to make it private again later; only then is the laptop runner safe to bring back (`C:\actions-runner\start-knowlu-runner.cmd`, labels `[self-hosted, windows, x64, knowlu-ci]`, PR #10 `312d833`).
   - `release.yml` never runs self-hosted.

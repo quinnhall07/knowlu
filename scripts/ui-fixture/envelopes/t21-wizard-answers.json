@@ -1,0 +1,113 @@
+{
+ "launch_state": {
+  "ok": true,
+  "error": null,
+  "mode": "wizard",
+  "profiles": [],
+  "machine": "EXAMPLE-PC",
+  "tz": "America/Chicago",
+  "default_parent": "C:\\Users\\student\\Knowlu",
+  "default_backup": "C:\\Users\\student\\Knowlu\\Backups"
+ },
+ "open_policy": {
+  "ok": true,
+  "error": null
+ },
+ "send_magic_link": {
+  "ok": true,
+  "error": null
+ },
+ "verify_email_code": {
+  "ok": true,
+  "error": null,
+  "account_id": "acct-example",
+  "email": "student@example.edu"
+ },
+ "entitlement_now": {
+  "ok": true,
+  "error": null,
+  "status": "active",
+  "plan": "monthly",
+  "current_period_end": "2026-09-25T00:00:00Z"
+ },
+ "open_checkout": {
+  "ok": true,
+  "error": null
+ },
+ "campus_search": {
+  "ok": true,
+  "error": null,
+  "hits": [
+   [
+    "100001",
+    "Example State University",
+    "Springfield",
+    "IL",
+    "canvas"
+   ],
+   [
+    "100002",
+    "Example Community College",
+    "Riverside",
+    "CA",
+    ""
+   ]
+  ]
+ },
+ "timezone_for_state": {
+  "ok": true,
+  "error": null,
+  "timezone": "America/Chicago"
+ },
+ "google_connected": {
+  "ok": true,
+  "connected": false,
+  "calendar": false,
+  "gmail": false
+ },
+ "store_credentials": {
+  "ok": true,
+  "error": null
+ },
+ "discover_coursework": {
+  "ok": true,
+  "error": null,
+  "note": null,
+  "rows": [
+   {
+    "source": "zybooks",
+    "key": "ExampleABC101Fall2026",
+    "detail": "Introduction to Examples",
+    "suggested": "ABC 101",
+    "ignored": false
+   },
+   {
+    "source": "zybooks",
+    "key": "ExampleDEF210Fall2026",
+    "detail": "Example Methods",
+    "suggested": "",
+    "ignored": false
+   }
+  ]
+ },
+ "create_vault": {
+  "ok": true,
+  "error": null,
+  "profile": {
+   "id": "profile-example",
+   "name": "Knowlu",
+   "vault": "C:\\Users\\student\\Knowlu\\Knowlu"
+  },
+  "restored": {
+   "ok": true,
+   "empty": true,
+   "notes": 0,
+   "records": 0,
+   "warnings": []
+  }
+ },
+ "finish_onboarding": {
+  "ok": true,
+  "error": null
+ }
+}

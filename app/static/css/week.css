@@ -1,0 +1,52 @@
+/* Knowlu app: Your week and Day (Settings) and the first-day sheet "When do your classes meet?" (note §4, §5; plan T18).
+   Settings' own rows (.st-row, .st-l, .st-c, .st-hint, .st-sub from settings.css) carry both sections; this sheet adds
+   the registrar's controls and its change list, the day editor's start-to-end pair, the preview, and the sheet's
+   answer rows. The level is the shell's segmented choice and the kind its select. Roles and sizes only. */
+
+/* a flex or grid class beats the UA's [hidden], so every hidden part here says so */
+.wk-reg[hidden], .wk-reg [hidden], .wk-changes[hidden], .ws [hidden] { display: none; }
+
+/* ---------- Your week ---------- */
+.wk-note:empty { display: none; }
+.wk-note { margin-bottom: 8px; }
+.wk-reg { padding: 6px 0 10px; border-top: var(--hair) solid var(--line); }
+.wk-regctl { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 22px; min-height: var(--h-tap); }
+.wk-say:empty { display: none; }
+.wk-reg + .st-rows, .wk-reg + .st-rows:empty + .wk-changes { border-top: 0; }
+.wk-changes { padding: 2px 0 12px; }
+.wk-changes .st-sub:first-child { margin-top: 8px; }
+.wk-changes ul { margin: 0; padding: 0 0 0 18px; }
+.wk-changes li { margin: 2px 0; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
+.wk-card { color: var(--ink-2); }
+.wk-ctl { gap: 6px 12px; }
+.wk-kind { width: 156px; }
+.wk-lvl > .obtn { padding: 0 12px; }
+
+/* ---------- Day ---------- */
+.wk-lede { margin-bottom: 10px; }
+.wk-span { flex-wrap: nowrap; gap: 8px; }
+.wk-t { width: 132px; padding: 0 10px; font-variant-numeric: tabular-nums; }
+.wk-to { flex: none; color: var(--ink-2); font: 400 var(--t-small)/1 var(--sans); }
+.wk-same { min-height: 0; padding: 2px 0 6px; }
+.wk-preview { padding-top: 12px; }
+.wk-moved { color: var(--ink); }
+.wk-items { margin: 6px 0 0; padding-left: 22px; font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-2); }
+.wk-items:empty { display: none; }
+.wk-items li { overflow-wrap: anywhere; }
+
+/* ---------- the first-day sheet ---------- */
+.ws-h { font: 400 var(--t-title)/1.2 var(--display); letter-spacing: -.01em; color: var(--ink); outline: none; }
+.ws-h + .st-hint { margin-top: 6px; }
+.ws-part { margin-top: 20px; }
+.ws-part > .st-sub { margin-top: 0; }
+.ws .wk-reg { border-top: 0; padding-top: 0; }
+.ws-rows { border-top: var(--hair) solid var(--line); }
+.ws-rows:empty { display: none; }
+.ws-row { display: flex; flex-wrap: wrap; align-items: center; column-gap: 18px; row-gap: 4px; min-height: var(--row-h); padding: 8px 0; border-bottom: var(--hair) solid var(--line); }
+.ws-l { flex: 1 1 220px; min-width: 0; }
+.ws-c { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 12px; margin-left: auto; min-width: 0; }
+.ws-row:not([data-answer="mine"]) .wk-lvl { display: none; }
+.ws-uncovered .st-hint { color: var(--ink-2); }
+.ws-added { color: var(--ink); font-weight: 500; }
+.ws-foot { margin-top: 16px; }
+.ws-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 24px; margin-top: 16px; }

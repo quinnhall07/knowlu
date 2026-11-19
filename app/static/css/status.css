@@ -1,0 +1,27 @@
+/* Knowlu app: Status and the update line (note §4 Settings "Status", §5 "Update offer"; plan T19). Settings' own rows
+   (.st-row, .st-l, .st-n, .st-hint, .st-sub, .st-c from settings.css) carry the section; this sheet adds the two tones of
+   a status word, the run summaries and the top band's line. Amber is a state that keeps changes on this computer: it
+   is said in ink with the shell's amber dot (the Status dot's colour), never a fill. Roles and sizes only. */
+
+.sx-part[hidden] { display: none; }
+
+/* a status line is the engine's words, joined with a middle dot (status.js capitalises its first word; the Updates
+   row's plain line takes its capital here) */
+.sx-line::first-letter { text-transform: uppercase; }
+.sx-calm { color: var(--ink-2); }
+.sx-amber { color: var(--ink); font-weight: 500; }
+.sx-amber::before { content: ""; display: inline-block; width: 8px; height: 8px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--amber); vertical-align: middle; }
+.st-c > .sx-amber, .st-c > .sx-calm { font: 400 var(--t-small)/1.2 var(--sans); white-space: nowrap; }
+.st-c > .sx-amber { font-weight: 500; }
+
+/* flagged issues: the resolution box takes the row's width beside its title */
+.sx-issue .st-c .field { min-width: 0; }
+.sx-warn { color: var(--ink); }
+
+/* a run's whole summary, as the engine wrote it, wrapping instead of scrolling */
+.sx-sum { margin: 4px 0 0; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---------- the top band's update line ---------- */
+.top-note .tn-say { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.top-note .tn-say::first-letter { text-transform: uppercase; }
+.top-note .tbtn { flex: none; }

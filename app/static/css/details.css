@@ -1,0 +1,51 @@
+/* Knowlu app, Details (v0.4.0 note §5, plan T14): the task drawer inside the right panel. The panel, its head and the
+   label-and-figure rows (.det, .det-r) are shell.css's; this sheet adds a value that edits in place, a row that holds
+   more than one line, More, the notes, the history and the flag. Roles and sizes only. */
+
+.dt { padding-bottom: 8px; }
+.dt .det { margin-top: 8px; }
+.dt .dt-top { margin-top: 0; }
+.dt-top .det-r:first-child { border-top: 0; }   /* the panel's head already draws the line above */
+
+/* a value that edits: a bare button across the figure's cell; under the pointer the quiet tint */
+.dt-v {
+  display: flex; align-items: center; gap: 10px; width: calc(100% + 16px); min-height: var(--h-tap); margin: 0 -8px; padding: 0 8px;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--ink); cursor: text; text-align: left;
+  font: 400 var(--t-small)/1.35 var(--sans); overflow-wrap: anywhere;
+  transition: background-color var(--fast) var(--ease);
+}
+.dt-v:hover, .dt-v:focus-visible { background: var(--line-2); }
+.dt-v .mk { --mk: 10px; }
+.dt-in { height: 40px; }
+select.dt-in { appearance: none; -webkit-appearance: none; cursor: pointer; }
+.dt-none { color: var(--ink-3); }
+.dt-ro { color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* a row that holds a sentence: the label at the top, the words under each other */
+.det-r.dt-wide { align-items: start; padding: 13px 0; }
+.dt-wide dd { flex-direction: column; align-items: flex-start; gap: 2px; overflow-wrap: anywhere; }
+.dt-fine { font: 400 var(--t-fine)/1.4 var(--sans); color: var(--ink-2); }
+
+/* More: a quiet control that opens the rest of the fields */
+.dt-more { margin: 10px 0 0 -14px; }
+.dt-more svg { transition: transform var(--fast) var(--ease); }
+.dt-more[aria-expanded="true"] svg { transform: rotate(180deg); }
+.dt-rest[hidden] { display: none; }
+
+/* notes and history */
+.dt-sec { margin-top: 22px; }
+.dt-sec .sec-h { margin-bottom: 4px; }
+.dt-body { margin: 10px 0 2px; white-space: pre-wrap; overflow-wrap: anywhere; font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink); }
+.dt-ta { height: auto; min-height: 168px; margin-top: 10px; padding: 12px 14px; resize: vertical; font: 400 var(--t-small)/1.5 var(--sans); }
+.dt-conf { margin-top: 12px; }
+.dt-conf-p { font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink); }
+.dt-hist li { display: grid; grid-template-columns: 88px minmax(0, 1fr); column-gap: 12px; padding: 10px 0; border-bottom: var(--hair) solid var(--line); font: 400 var(--t-fine)/1.4 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
+.dt-when { color: var(--ink-3); }
+
+/* the flag: eight toggles and free text */
+.dt-acts { margin-top: 18px; }
+.dt-flag { margin-top: 8px; padding-top: 12px; border-top: var(--hair) solid var(--line); }
+.dt-cats { gap: 2px 4px; margin-left: -14px; }
+.dt-cats .obtn { padding: 0 12px; }
+.dt-flag-t { height: auto; min-height: 84px; margin-top: 8px; padding: 10px 14px; resize: vertical; font: 400 var(--t-small)/1.45 var(--sans); }
+.dt-miss { margin-top: 16px; color: var(--ink-2); font: 400 var(--t-small)/1.4 var(--sans); }

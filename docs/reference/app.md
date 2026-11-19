@@ -63,7 +63,44 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   lane date the day draws, and the one write is a `declined` line in `state/events-seen.md`
   (`eventledger::record_declined`), with no note and no journal record. It is not one of the thirteen
   note-mutating commands. The console sends it only after the 10-second "Removed · Undo" toast
-  closes (`removeFromMyDay` in `app/static/console.js`); Undo or a closed window sends nothing.
+  closes (`removeFromMyDay` in `app/static/js/pages/home_aside.js`); Undo or a closed window sends nothing.
+- **The window is frameless** (v0.4.0). `app/tauri.conf.json` gives `main` `decorations: false` and `visible: false`;
+  the WebView draws the caption buttons (`.wc` in the top band, `data-tauri-drag-region` for the drag), and
+  `capabilities/default.json` grants the five `core:window` calls they need (minimize, toggle-maximize, close,
+  start-dragging, set-theme) and no `allow-show`. `show_main` sets the Windows 11 DWM border colour to none
+  (`DWMWA_BORDER_COLOR` = `DWMWA_COLOR_NONE`; on Windows 10 the call fails quietly and the border stays).
+- **Showing the window.** `ui-ready` is emitted by the page (`boot.js`) with a plain
+  `window.__TAURI__.event.emit` after first paint, and `main.rs` listens with `app.listen`, so no command is
+  added. `show_main` runs once per process, on the main thread: it restores `main`'s saved size, position and
+  maximized state, maximizes when the monitor's work area is smaller than the window, sets the border, then shows
+  and focuses. A 3 s timer calls the same function, so a script error never leaves an invisible app. Both builders
+  (console and picker/wizard) register the two triggers.
+- **Window-state plugin flags.** `FLAGS` is every `StateFlags` bit except `DECORATIONS` and `VISIBLE`, and both
+  builders pass it to `tauri_plugin_window_state` with four `skip_initial_state` labels, so it applies to every
+  other window the plugin tracks. `main` is restored only by `show_main`. `grades::WINDOW` (`lms-grades`) and
+  `mail::WINDOW` (`mail`) are built hidden for the grades refresh and the mail step, and a saved maximized state
+  would show them through `ShowWindow(SW_MAXIMIZE)`. `mail::POPUP` (`mail-popup`) keeps the size the site asks
+  for, since a popup saved maximized would cover the screen. `app/tests/window_chrome.rs` fails on any window built
+  with `.visible(` not `true` whose label is not skipped. Saving on close is unchanged for all of them. Restoring `DECORATIONS` would bring back a saved
+  native frame over the drawn one; restoring `VISIBLE` would show `main` before WebView2 has painted. The page is
+  granted no window-state permission.
+- **The page: `app/static/`** (v0.4.0, replacing the single `console.js`/`console.css` page). One document,
+  `index.html`, lists every file once: `css/` (tokens, shell, slots and one stylesheet per page or surface),
+  `js/` with the shell files (`prefs`, `fmt`, `kit`, `data`, `router`, `shell`, `boot`, plus `wizard` and `picker`),
+  `js/pages/` (Home and its aside, Lock in, Tasks, Calendar, Classes, the class page, Settings), `js/carried/` (the
+  surfaces carried over from the old page: Details, the Waiting deck, Sources, mail, Week and its setup, Status,
+  update, Account, re-consent, report), `fonts/` and `logos/`. Routes are hashes: `#home`, `#tasks`, `#calendar`,
+  `#classes`, `#class/<slug>`, `#lockin`, `#settings[/<section>]`; anything else is Home. A page registers itself
+  with `KnowluRouter.add(name, mod)` (a Settings section with `addSection`) and a page task never adds a `<script>`
+  or `<link>` to `index.html`. Only `#center` swaps. The tray's `KNOWLU_OPEN_SETTINGS` and `KNOWLU_OPEN_REPORT` globals
+  live in `router.js`. The calendar is read-only, Ask is not shown, and grades are text. The design is
+  `docs/specs/2026-11-17-v0.4.0-new-ui-design.md`.
+- **The fixture harness: `scripts/ui-fixture/`** (see its `README.md`). `serve.py` serves `app/static/` on
+  `127.0.0.1:0` with a stub `window.__TAURI__` injected (answers from a named envelope set, records calls and
+  events, freezes `Date` at the surface oracle's pinned now). `run.py base` loads every `base*` set in headless Edge
+  at two sizes, both themes and two text sizes and checks the shell; `run.py --checks` runs every
+  `checks/tNN.py` (one per page task) in turn and fails if any fails. `envelopes/` holds the staged read-model
+  answers, built from the engine on an invented vault by `make_base_courses.py`. No review aid ships in the app.
 - **`set_body`'s record holds no text.** `write::set_body` journals first, then replaces the body
   after the head and its separator. The record is `op: set_body`, `field: null`, with `old` and `new`
   each `{sha256, bytes}` (`write::body_sha256`, lowercase hex over the body's UTF-8 bytes); the body is

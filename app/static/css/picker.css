@@ -1,0 +1,27 @@
+/* Knowlu app: the picker (v0.4.0 note §6; plan §5 T21, T22 folded in). Drawn in #boot like the wizard: the wordmark,
+   the question, the profiles on hairlines (name, folder, Open at the right), then the three doors with the new vault
+   as the one red action, and the sentence that says the backup door is local. .wbtn and .wiz-box are wizard.css's. */
+
+.pick { min-height: 100%; }
+.pick-in { max-width: 820px; margin: 0 auto; padding: 36px 48px 40px; }
+.pick-wm { margin: 0 0 36px; font: 400 var(--t-logo)/1 var(--display); color: var(--ink); white-space: nowrap; }
+.pick-wm b { font-size: var(--t-logo); }
+.pick-lede { margin: 0 0 20px; font: 400 var(--t-page)/1.1 var(--display); letter-spacing: -.012em; color: var(--ink); text-wrap: balance; overflow-wrap: anywhere; }
+
+.pick-list:empty { display: none; }
+.pick-row { display: flex; align-items: center; gap: 16px; min-height: 64px; padding: 8px 0; border-bottom: var(--hair) solid var(--line); }
+.pick-row:first-child { border-top: var(--hair) solid var(--line); }
+.pick-t { display: grid; gap: 2px; min-width: 0; }
+.pick-name { font: 400 19px/1.25 var(--display); letter-spacing: -.006em; color: var(--ink); overflow-wrap: anywhere; }
+.pick-path { font: 400 var(--t-fine)/1.35 var(--sans); color: var(--ink-3); overflow-wrap: anywhere; }
+.pick-row .pick-open { margin-left: auto; }
+
+.pick-doors { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-top: 28px; }
+.pick-why { max-width: 40em; margin: 12px 0 0; font: 400 var(--t-fine)/1.45 var(--sans); color: var(--ink-3); text-wrap: pretty; }
+.pick-restore { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-top: 20px; }
+.pick-restore > .field { flex: 1 1 240px; width: auto; min-width: 0; }
+
+@media (max-width: 1000px) {
+  .pick-in { padding: 24px 20px 28px; }
+  .pick-wm { margin-bottom: 24px; }
+}

@@ -1,0 +1,37 @@
+/* Joined page: where the confirm link lands. One big line, then the one thing to do next: share your link. */
+
+.jn-body .nav { position: sticky; top: 0; }
+.jn-nav .nav-in { grid-template-columns: 1fr; }
+
+.jn { max-width: var(--page); margin: 0 auto; padding: clamp(72px, 10vw, 152px) var(--gut) 0; }
+.jn h1 { font: 400 clamp(48px, 7vw, 108px)/1 var(--display); letter-spacing: -.02em; max-width: 12em; text-wrap: balance; }
+.jn-lede { margin-top: 24px; max-width: 34em; font: 400 var(--t-lead)/1.5 var(--serif); color: var(--ink-2); }
+.jn-lede b { font-weight: 400; color: var(--ink); overflow-wrap: anywhere; }
+.jn-lede a, .jn-out a { color: var(--ink); text-decoration-color: var(--accent); }
+.jn-lede a:hover, .jn-lede a:focus-visible, .jn-out a:hover, .jn-out a:focus-visible { color: var(--accent); }
+.jn-lede a:active, .jn-out a:active { display: inline-block; transform: translateY(1px); }
+
+.jn-inv {
+  margin-top: clamp(56px, 8vw, 120px); padding: 24px 0 12px; border-top: 1px solid var(--ink);
+  display: grid; gap: 14px;
+}
+.jn-inv-h { font-size: var(--t-h3); }
+.jn-p { font: 400 19px/1.45 var(--serif); color: var(--ink-2); max-width: 26em; }
+.jn-inv .nx-row { margin-top: 18px; max-width: 560px; }
+.jn-copied { margin-top: 10px; min-height: 1.45em; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-3); }
+
+.jn-out { margin-top: 8px; font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-3); }
+.jn-out a { display: inline-block; padding: 12px 0; }
+
+@media (min-width: 1000px) {
+  .jn-inv { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(32px, 6vw, 104px); padding: 28px 0 16px; }
+  .jn-p { font-size: var(--t-lead); }
+}
+
+/* arriving: the line comes up, then the link under it */
+@media (prefers-reduced-motion: no-preference) {
+  .jn-top:not([hidden]) > *, .jn-inv { animation: jn-in var(--slow) var(--ease) both; }
+  .jn-top > :nth-child(2) { animation-delay: 90ms; }
+  .jn-inv { animation-delay: 200ms; }
+  @keyframes jn-in { from { opacity: 0; transform: translateY(16px); } }
+}

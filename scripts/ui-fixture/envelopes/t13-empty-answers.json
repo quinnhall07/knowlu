@@ -1,0 +1,12 @@
+{
+ "grades_status": {
+  "ok": true,
+  "available": true,
+  "reason": null,
+  "connected": true,
+  "signed_out": false,
+  "host": "lms.example.edu",
+  "fetched_at": "2026-08-28T08:00",
+  "hidden": false
+ }
+}

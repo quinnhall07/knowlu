@@ -1,0 +1,190 @@
+/* Knowlu app, Classes and a class's page (v0.4.0 note §4, D6, plan T13; DESIGN.md "A class's page").
+   The list: two disclosures (Current, open; Not current, closed), each class one row on shared columns (the class's
+   mark and code, its name, Next due, the Grade as text, a chevron) that opens its page. Next due gives way below
+   900px of center. A class's page: the mark, the code and the name, then Due, Grade and Meets as three columns from
+   1000px of center, one column below. Roles and sizes from tokens.css and shell.css; the check is the shell's .ck,
+   never repainted here (A8: done fills with the class colour). */
+
+/* ==================== the list ==================== */
+/* the container is the center's own width (the page's padding sits inside it), so 900px is 900px of center */
+.cl { container: cl / inline-size; }
+.cl-in { max-width: 1440px; padding: 28px var(--center-pad) 32px; }
+.cl-groups { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+.cl-none { margin-top: 12px; color: var(--ink-2); font: 400 var(--t-small)/1.4 var(--sans); }
+
+/* ---------- a group: the chevron, its name, how many ---------- */
+.cl-gh { border-top: var(--hair) solid var(--line); }
+.cl-gbtn {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 64px; padding: 0 12px 0 6px;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--ink); cursor: pointer; text-align: left;
+}
+.cl-gname {
+  font: 400 var(--t-title)/1.1 var(--display); letter-spacing: -.01em;
+  text-decoration: underline; text-decoration-color: transparent; text-decoration-thickness: var(--hair); text-underline-offset: 6px;
+  transition: text-decoration-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.cl-gbtn:hover .cl-gname, .cl-gbtn:focus-visible .cl-gname { text-decoration-color: var(--ink-2); }
+.cl-gbtn:active .cl-gname { transform: translateY(var(--press)); }
+.cl-chev {
+  flex: none; width: 18px; height: 18px; fill: none; stroke: var(--ink-2); stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round; transition: transform var(--med) var(--ease);
+}
+.cl-gbtn[aria-expanded="true"] .cl-chev { transform: rotate(90deg); stroke: var(--ink); }
+.cl-gfig { margin-left: auto; font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); white-space: nowrap; }
+
+/* ---------- the rows: code, name, next due, grade, a chevron ---------- */
+.cl-rows { padding: 0 0 20px; }
+.cl-row {
+  display: grid; align-items: center; column-gap: 24px;
+  grid-template-columns: 112px minmax(0, 1.6fr) minmax(0, 1.3fr) minmax(104px, max-content) 18px;
+  padding: 0 12px 0 36px;
+}
+.cl-head { min-height: 36px; font: 600 var(--t-fine)/1.2 var(--sans); color: var(--ink-2); }
+.cl-head > .cl-grade { justify-self: end; }
+.cl-row:not(.cl-head) {
+  position: relative; min-height: 60px; border-radius: var(--r-control); color: var(--ink);
+  transition: background-color var(--fast) var(--ease);
+}
+/* the hairline above a row is drawn inside it, so the row's rounded hover fill never curves the line */
+.cl-row:not(.cl-head)::before { content: ""; position: absolute; top: 0; left: 0; right: 0; border-top: var(--hair) solid var(--line-2); pointer-events: none; }
+.cl-head + .cl-row::before { border-top-color: var(--line); }
+@media (hover: hover) { .cl-row:not(.cl-head):hover { background: var(--bg-2); } }
+.cl-row:not(.cl-head):active { background: var(--line-2); }
+/* the name's link covers the row, so the whole row opens the class; its focus ring is drawn around the row */
+.cl-name a { color: inherit; }
+.cl-name a::after { content: ""; position: absolute; inset: 0; border-radius: var(--r-control); }
+.cl-name a:focus-visible { outline: none; }
+.cl-row:has(.cl-name a:focus-visible) { outline: var(--focus) solid var(--accent); outline-offset: -2px; background: var(--bg-2); }
+.cl-code { display: flex; align-items: center; gap: 10px; min-width: 0; font: 600 var(--t-small)/1.2 var(--sans); }
+.cl-code > span { min-width: 0; overflow-wrap: anywhere; }
+.cl-name {
+  min-width: 0; overflow-wrap: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  font: var(--name-weight) var(--name-size)/1.25 var(--name-face); letter-spacing: var(--name-track);
+}
+.cl-head > .cl-name { display: block; font: inherit; letter-spacing: 0; }
+.cl-next { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; font: 400 var(--t-small)/1.35 var(--sans); }
+.cl-nn { min-width: 0; overflow-wrap: anywhere; color: var(--ink); }
+.cl-nw { color: var(--ink-2); white-space: nowrap; }
+.cl-grade { justify-self: end; font: 500 var(--t-label)/1 var(--sans); color: var(--ink); white-space: nowrap; }
+.cl-rchev {
+  width: 18px; height: 18px; fill: none; stroke: var(--ink-2); stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
+  opacity: 0; transition: opacity var(--fast) var(--ease);
+}
+.cl-row:hover .cl-rchev, .cl-row:has(.cl-name a:focus-visible) .cl-rchev { opacity: 1; }
+
+/* D6: below 900px of center, Next due gives way */
+@container cl (max-width: 900px) {
+  .cl-row { grid-template-columns: 112px minmax(0, 1fr) minmax(88px, max-content) 18px; column-gap: 20px; padding-left: 30px; }
+  .cl-next { display: none; }
+}
+@container cl (max-width: 560px) {
+  .cl-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) max-content; padding: 0 8px 0 6px; }
+  .cl-rchev, .cl-head > span:last-child { display: none; }
+}
+
+/* ==================== a class's page ==================== */
+.cp { container: cp / inline-size; }
+.cp-in { padding: 20px var(--center-pad) 32px; }
+
+/* ---------- the head: mark and code, then the name in the display face ---------- */
+.cp-head { padding: 0 0 18px; }
+.cp-meta { display: flex; align-items: center; gap: 10px; min-height: 22px; font: 600 var(--t-small)/22px var(--sans); color: var(--ink); }
+.cp-meta .mk { --mk: 14px; }
+.cp-code { min-width: 0; overflow-wrap: anywhere; }
+.cp-title {
+  margin-top: 6px; min-height: 1.1em; color: var(--ink);
+  font: 400 var(--t-page)/1.1 var(--display); letter-spacing: -.012em;
+  text-wrap: balance; overflow-wrap: break-word;
+}
+
+/* ---------- the columns: one below 1000px of center, three from it ---------- */
+.cp-cols { display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 28px; border-top: var(--hair) solid var(--line); }
+@container cp (min-width: 1000px) {
+  .cp-cols { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(260px, .8fr); column-gap: 48px; }
+}
+.cp-sec { min-width: 0; }
+
+/* ---------- a section: its line (name, figure at the right), then its body ---------- */
+.cp-line { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 16px; align-items: center; min-height: 48px; }
+.cp-nm { font: 600 var(--t-label)/1.2 var(--sans); color: var(--ink); }
+.cp-fig { justify-self: end; min-width: 0; max-width: 100%; text-align: right; font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* ---------- Due: check, name, minutes, due ---------- */
+.cp-dl { display: grid; grid-template-columns: var(--ck) minmax(0, 1fr) max-content max-content; column-gap: 16px; }
+.cp-dr {
+  position: relative; grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; align-items: center;
+  min-height: 52px; padding-block: 2px; isolation: isolate;
+  font: 400 var(--t-small)/1.35 var(--sans); border-top: var(--hair) solid var(--line-2);
+}
+.cp-dr:first-child { border-top-color: var(--line); }
+.cp-dr::after {
+  content: ""; position: absolute; z-index: -1; top: 0; bottom: 0; left: -10px; right: -10px;
+  border-radius: var(--r-control); background: transparent; transition: background-color var(--fast) var(--ease);
+}
+@media (hover: hover) { .cp-dr:hover::after { background: var(--line-2); } }
+.cp-dr > .ck { justify-self: center; }
+.cp-dnm {
+  min-width: 0; min-height: var(--h-tap); padding: 0; border: 0; border-radius: var(--r-control);
+  background: none; cursor: pointer; text-align: left; color: var(--ink);
+  font: var(--name-weight) var(--name-size)/1.25 var(--name-face); letter-spacing: var(--name-track);
+  overflow-wrap: break-word; transition: transform var(--fast) var(--ease);
+}
+.cp-dnm:active { transform: translateY(var(--press)); }
+.cp-dmin, .cp-ddue { justify-self: end; color: var(--ink-2); white-space: nowrap; }
+.cp-foot { display: flex; align-items: center; min-height: var(--h-tap); border-top: var(--hair) solid var(--line-2); }
+
+/* ---------- Grade: the figure as text, when it was read, Hide at the right ---------- */
+.cp-gfig { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; padding-block: 10px 8px; border-top: var(--hair) solid var(--line); }
+.cp-gcol { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.cp-gbig {
+  padding: 0; border: 0; border-radius: var(--r-control); background: none; color: var(--ink); cursor: pointer; text-align: left;
+  font: 400 var(--t-figure)/1 var(--display); letter-spacing: -.012em; font-variant-numeric: lining-nums tabular-nums;
+  text-decoration: underline; text-decoration-color: transparent; text-decoration-thickness: var(--hair); text-underline-offset: 6px;
+  transition: text-decoration-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+button.cp-gbig:hover, button.cp-gbig:focus-visible { text-decoration-color: var(--ink-2); }
+button.cp-gbig:active { transform: translateY(var(--press)); }
+.cp-gbig.is-none { cursor: default; font-size: var(--t-title); color: var(--ink-2); }
+.cp-gread { font: 400 var(--t-small)/1.2 var(--sans); color: var(--ink-2); }
+.cp-ghide { flex: none; margin-right: -14px; }
+.cp-gl { display: flex; justify-content: flex-end; align-items: center; gap: 12px; min-height: var(--h-tap); border-top: var(--hair) solid var(--line); }
+.cp-gl .obtn { margin-right: -14px; }
+.cp-gmore { border-top-color: var(--line-2); }
+/* no grade to show: why, and where to fix it (Settings > Sources) */
+.cp-gsrc { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-height: 64px; padding-block: 10px 8px; border-top: var(--hair) solid var(--line); font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); }
+.cp-gnote { margin-top: 6px; font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); }
+
+/* ---------- Meets: what, where, when, in the engine's words ---------- */
+.cp-mt {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; align-items: center;
+  min-height: 52px; padding-block: 6px; border-top: var(--hair) solid var(--line-2);
+  font: 400 var(--t-small)/1.35 var(--sans);
+}
+.cp-mt:first-child { border-top-color: var(--line); }
+.cp-mlb { color: var(--ink-2); }
+.cp-mwh { justify-self: end; min-width: 0; text-align: right; color: var(--ink); overflow-wrap: anywhere; }
+.cp-mwn { grid-column: 1 / -1; color: var(--ink); overflow-wrap: anywhere; }
+
+/* ==================== the breakdown, in the right panel (read-only) ==================== */
+.gb-fig { font: 400 var(--t-figure)/1.1 var(--display); letter-spacing: -.012em; color: var(--ink); font-variant-numeric: lining-nums tabular-nums; }
+.gb-counts { margin-top: 6px; font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); }
+.gb-none { font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); }
+.gb-list { margin-top: 16px; }
+.gb-r {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; row-gap: 2px; align-items: baseline;
+  padding-block: 10px; border-top: var(--hair) solid var(--line-2); font: 400 var(--t-small)/1.35 var(--sans);
+}
+.gb-r:first-child { border-top-color: var(--line); }
+.gb-nm { min-width: 0; color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+.gb-nc { margin-left: 8px; font-weight: 400; color: var(--ink-2); }
+.gb-sc { justify-self: end; color: var(--ink); white-space: nowrap; }
+.gb-st { color: var(--ink-2); }
+.gb-sub { justify-self: end; color: var(--ink-2); text-align: right; }
+.gb-foot { margin-top: 16px; padding-top: 12px; border-top: var(--hair) solid var(--line); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.gb-src, .gb-read { font: 400 var(--t-fine)/1.35 var(--sans); color: var(--ink-2); }
+.gb-refresh { margin-left: -14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cl-chev, .cl-gname, .cl-row, .cl-rchev, .cp-dr::after, .cp-dnm, .cp-gbig { transition: none; }
+}

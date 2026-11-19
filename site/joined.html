@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>You’re on the list · Knowlu</title>
+<meta name="description" content="Knowlu: your place on the waitlist is confirmed.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#fffefb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#19161a" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="favicon.ico?v=c33137" sizes="32x32">
+<link rel="icon" href="favicon.svg?v=c33137" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png?v=c33137">
+<link rel="preload" href="fonts/PT_Serif-Caption-Web-Regular.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="fonts/ZillaSlab-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/joined.css">
+<script>document.documentElement.classList.add('js');try{var t=localStorage.getItem('knowlu-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body class="jn-body">
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav jn-nav">
+  <div class="nav-in">
+    <a class="wm nav-wm" href="index.html" aria-label="Knowlu, home"><span class="wm-k">Know<b>lu</b></span></a>
+  </div>
+</header>
+
+<main id="main" class="jn">
+  <section class="jn-top" aria-labelledby="jn-h" data-jn-state="ok">
+    <h1 id="jn-h">You’re on the list.</h1>
+    <p class="jn-lede">Your place is confirmed. I’ll email you when Knowlu opens for spring semester 2027.</p>
+  </section>
+  <section class="jn-top" aria-labelledby="jn-h-old" data-jn-state="expired" hidden>
+    <h1 id="jn-h-old">That link has expired.</h1>
+    <p class="jn-lede"><a href="index.html#join">Join again</a> with the same email and we’ll send a new link.</p>
+  </section>
+
+  <p class="jn-out" data-jn-state="ok">Not you, or changed your mind? <a href="mailto:hello@knowlu.com?subject=Take%20me%20off%20the%20list">Email us to leave the list</a>.</p>
+</main>
+
+<footer class="ft">
+  <div class="ft-in">
+    <div class="ft-brand">
+      <a class="wm" href="index.html" aria-label="Knowlu, home"><span class="wm-k">Know<b>lu</b></span></a>
+      <p class="ft-tag">know what’s next.</p>
+      <p class="ft-when">A Windows desktop app. Opens for spring semester 2027.</p>
+    </div>
+    <nav class="ft-nav" aria-label="Footer">
+      <a href="index.html#what">What it does</a>
+      <a href="index.html#pricing">Pricing</a>
+      <a href="index.html#questions">Questions</a>
+      <a href="index.html#letter">From the founder</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="terms.html">Terms</a>
+    </nav>
+  </div>
+  <div class="ft-base">
+    <p>© 2026 Knowlu</p>
+    <button class="theme" type="button" data-theme-toggle>Dark</button>
+  </div>
+</footer>
+
+<script src="js/joined.js" defer></script>
+</body>
+</html>

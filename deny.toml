@@ -12,15 +12,22 @@ version = 2
 yanked = "deny"
 unmaintained = "workspace"
 ignore = [
-    # zip: all four advisories are in ZipArchive/ZipStreamReader::extract. Reviewed 2026-11-09.
+    # zip: the first four advisories are in ZipArchive/ZipStreamReader::extract. Reviewed 2026-11-09.
     # knowlu-engine is on zip 9.x (fixed) and only WRITES backups (engine/src/backup.rs). Only the
     # updater's copy remains (tauri-plugin-updater's zip 4.x, not ours to bump): it installs the NSIS
     # .exe on Windows, verifies the minisign signature before it opens anything, and the four are
     # Unix-permission and symlink issues. Remove these when the updater moves to zip >= 9 too.
+    # 2026-11-19, two more against the same zip 4.x: 0545 needs zip's aes-crypto feature, which the
+    # updater's copy is built without (Cargo.lock: its deps are arbitrary, crc32fast, indexmap,
+    # memchr), and 0548 is ZipStreamReader, which tauri-plugin-updater never calls (it only uses
+    # ZipArchive::extract, and never on Windows: the update is the bare NSIS -setup.exe because
+    # createUpdaterArtifacts is true, not "v1Compatible"). 2.11.0 is the latest 2.x.
     { id = "RUSTSEC-2026-0367", reason = "zip extract only; we never extract untrusted archives" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract only; we never extract untrusted archives" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract only; we never extract untrusted archives" },
     { id = "RUSTSEC-2026-0429", reason = "zip extract only; we never extract untrusted archives" },
+    { id = "RUSTSEC-2026-0545", reason = "updater's zip 4.x is built without aes-crypto" },
+    { id = "RUSTSEC-2026-0548", reason = "updater's zip 4.x; ZipStreamReader is never called" },
 ]
 
 [licenses]

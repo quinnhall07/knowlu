@@ -1,0 +1,207 @@
+/* Knowlu app, Home's main pane (T7: note §4 Home, D6; DESIGN.md "The desktop app"). Every rule is scoped under .home;
+   colours are roles and class slots (slots.css). The aside's rules are home_aside.css's.
+
+   Two panes, Do today (with Waiting under it) and Recommended (with today's schedule and free time under it), side by
+   side while the center is 1000px or wider and stacked below that (D6). Rows go two-line below 800px of center. The
+   lead sits on a rounded field in its class colour as the first row of its section; every other row shares the
+   field's columns, so the figures line up from the field down. */
+.home {
+  container-type: inline-size;
+  --pg-ink: var(--ink);
+  padding: 20px var(--center-pad) 32px;
+}
+.home .hm-h { margin: 6px 0 6px; }
+
+/* ---------- the first run ---------- */
+.home .hm-first { max-width: 560px; padding-top: 24px; }
+.home .hm-first .page-h { margin-bottom: 18px; }
+.home .hm-steps { margin: 0; padding: 0; list-style: none; }
+.home .hm-step {
+  display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 14px; row-gap: 2px; align-items: center;
+  min-height: 48px; padding: 6px 0; border-top: var(--hair) solid var(--line);
+  font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink);
+}
+.home .hm-step:last-child { border-bottom: var(--hair) solid var(--line); }
+.home .hm-step-say { grid-column: 2; min-width: 0; }
+.home .hm-step-note { grid-column: 2; font: 400 var(--t-fine)/1.35 var(--sans); color: var(--ink-2); }
+.home .hm-step-mk { grid-row: 1; justify-self: center; width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--ink-3); }
+.home .hm-step[data-state="done"] .hm-step-mk { background: var(--ink); border-color: var(--ink); }
+.home .hm-step[data-state="failed"] .hm-step-mk { border-color: var(--error); background: var(--error); }
+.home .hm-step[data-state="failed"] .hm-step-say { color: var(--ink); }
+.home .hm-step[data-state="skipped"] .hm-step-say { color: var(--ink-3); }
+.home .hm-step[data-state="now"] .hm-step-mk { border-color: var(--ink); border-right-color: transparent; animation: hm-turn 1.1s linear infinite; }
+.home .hm-step[data-state="now"] .hm-step-say { font-weight: 600; }
+@keyframes hm-turn { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .home .hm-step[data-state="now"] .hm-step-mk { animation: none; border-right-color: var(--ink); } }
+.home .hm-first-end { margin: 16px 0 0; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink); }
+
+/* ---------- the domain row: each class, its standing in words ----------
+   Quiet text with a mark, no box at rest: the class's mark, its code, then Ahead, On track or Behind. Behind says it in
+   words, in the error colour. The pressed one shows the sidebar's language: the accent rule under its code. */
+.home .hm-doms { display: flex; flex-wrap: wrap; column-gap: 8px; margin: 0 0 6px -10px; }
+.home .hm-dom {
+  display: inline-flex; align-items: center; gap: 9px; min-height: var(--h-tap); padding: 0 10px;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--ink-2); cursor: pointer;
+  font: 400 var(--t-small)/1 var(--sans); white-space: nowrap;
+  transition: color var(--fast) var(--ease), background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.home .hm-dom:hover, .home .hm-dom:focus-visible { background: var(--line-2); }
+.home .hm-dom:active { transform: translateY(var(--press)); }
+.home .hm-dom .mk { --mk: 10px; }
+.home .hm-dom b { position: relative; font-weight: 500; color: var(--ink); }
+.home .hm-dom[aria-pressed="true"] b::after { content: ""; position: absolute; left: 0; right: 0; bottom: -7px; height: var(--rule); background: var(--accent); }
+.home .hm-dom.is-behind span { color: var(--error); font-weight: 600; }
+
+/* ---------- the two panes ---------- */
+.home .hm-col { display: grid; grid-template-columns: minmax(0, 1.42fr) minmax(0, 1fr); column-gap: clamp(32px, 3.6vw, 64px); align-items: start; }
+.home .hm-pane { min-width: 0; }
+.home .hm-slot:not(:empty) { margin-top: 22px; }
+
+/* the measures. --cols: a row's and the field's columns (check, name, class, minutes, due). --px: a row's inset. */
+.home .hm-pane-today {
+  --cols: 30px minmax(0, 1fr) 104px 84px 160px;
+  --px: 18px; --gx: 16px;
+  --nm: 36px; --fig: 18px; --fck: 28px; --frg: 14px; --fpad: 20px;
+}
+.home .hm-pane-rec {
+  --cols: 30px minmax(0, 1fr) auto auto;
+  --px: 16px; --gx: 14px;
+  --nm: 30px; --fig: 16px; --fck: 26px; --frg: 12px; --fpad: 18px;
+}
+
+.home .hm-sec { position: relative; }
+.home .hm-lbl {
+  display: flex; align-items: flex-end; min-height: 36px; margin: 0; padding: 0 var(--px, 16px) 10px;
+  font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2);
+}
+
+/* ---------- the lead field ---------- */
+.home .hm-field {
+  position: relative; isolation: isolate;
+  padding: var(--fpad) var(--px);
+  border-radius: var(--r-surface);
+  background-color: var(--lead-bg, var(--cc, var(--bg-2)));
+  /* the field's own two colours: --f the fill, --on-f the words on it; everything on it takes its own ink */
+  --f: var(--lead-bg, var(--cc, var(--bg-2))); --on-f: var(--lead-fg, var(--on-cc, var(--pg-ink)));
+  --ink: var(--on-f); --ink-2: var(--on-f); --ink-3: var(--on-f); --accent: var(--on-f);
+  color: var(--ink);
+  transition: background-color var(--slow) var(--ease), color var(--med) var(--ease);
+}
+/* a patterned slot draws its second tone, masked, under the words */
+.home .hm-field::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  background: var(--lead-tone, var(--cc-tone, transparent));
+  -webkit-mask: var(--cc-pattern, none); mask: var(--cc-pattern, none);
+}
+.home .hm-field ::selection { background: var(--on-f); color: var(--f); }
+.home .hm-fin {
+  display: grid; grid-template-columns: var(--cols); column-gap: var(--gx); row-gap: var(--frg); align-items: center;
+  grid-template-areas: "ck nm nm nm nm" ". lock code min due" ". am am am am";
+}
+.home .hm-pane-rec .hm-fin { grid-template-columns: 30px minmax(0, 1fr) auto auto; grid-template-areas: "ck nm nm nm" ". code min due" ". lock lock lock" ". am am am"; }
+.home .hm-fck { grid-area: ck; align-self: start; display: grid; place-items: center; height: calc(var(--nm) * 1.12); }
+/* the lead's check is drawn in the field's words, ring and fill alike; checked, the mark takes the field's colour */
+.home .hm-field .ck { --ck: var(--fck); --cc: var(--on-f); --cc-edge: var(--on-f); --on-cc: var(--f); }
+.home .hm-name {
+  grid-area: nm; min-width: 0; margin: 0;
+  font: 400 var(--nm)/1.1 var(--display); letter-spacing: -.016em; color: var(--ink);
+  text-wrap: balance; overflow-wrap: break-word;
+}
+.home .hm-fin > .hm-code, .home .hm-fin > .hm-min, .home .hm-fin > .hm-due {
+  font: 500 var(--fig)/1.2 var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap;
+}
+.home .hm-fin > .hm-code { grid-area: code; }
+.home .hm-fin > .hm-min { grid-area: min; justify-self: end; }
+.home .hm-fin > .hm-due { grid-area: due; justify-self: end; white-space: normal; text-align: right; text-wrap: balance; }
+.home .hm-fin > .hm-amend { grid-area: am; color: var(--ink); }
+/* the class's mark on the field takes the field's words: in its own colour it would vanish into the fill */
+.home .hm-field .hm-code .mk { --cc: var(--on-f); --cc-edge: var(--on-f); }
+.home .hm-lockc { grid-area: lock; justify-self: start; }
+/* Lock in: the field inverted. Its fill is the field's words, its label the field's colour. */
+.home .hm-lock {
+  display: inline-flex; align-items: center; justify-content: center; min-height: var(--h-tap); padding: 0 24px;
+  border-radius: var(--r-control); background: var(--on-f); color: var(--f); text-decoration: none;
+  font: 600 var(--t-label)/1 var(--sans); white-space: nowrap;
+  transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.home .hm-lock:hover, .home .hm-lock:focus-visible { background: color-mix(in oklab, var(--on-f) 88%, var(--f)); }
+.home .hm-lock:active { transform: translateY(var(--press)); }
+.home .hm-lock:focus-visible { outline-offset: var(--focus-off); }
+
+/* a name opens its Details: a bare button in its own face, its 44px target taken back by a negative margin */
+.home .hm-nm, .home .hm-name-btn {
+  min-width: 0; padding: max(0px, (var(--h-tap) - 1lh) / 2) 0; margin-block: min(0px, (1lh - var(--h-tap)) / 2);
+  border: 0; border-radius: var(--r-control); background: none; cursor: pointer; text-align: left;
+  transition: color var(--med) var(--ease), transform var(--fast) var(--ease);
+}
+.home .hm-name-btn { display: block; max-width: 100%; font: inherit; letter-spacing: inherit; color: inherit; text-wrap: inherit; overflow-wrap: inherit; }
+.home .hm-nm:active, .home .hm-name-btn:active { transform: translateY(var(--press)); }
+
+/* ---------- rows ---------- */
+.home .hm-rows { margin: 0; padding: 0; list-style: none; }
+.home .hm-rows > li { position: relative; }
+.home .hm-rows > li + li::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: var(--hair); background: var(--line); }
+.home .hm-row {
+  display: grid; grid-template-columns: var(--cols); column-gap: var(--gx); row-gap: 2px; align-items: center;
+  grid-template-areas: "ck nm code min due" ". am am am am";
+  min-height: 54px; padding: 6px var(--px); border-radius: var(--r-control);
+  font: 400 var(--t-small)/1.35 var(--sans);
+}
+.home .hm-pane-rec .hm-row { grid-template-areas: "ck nm nm min" ". code due due" ". am am am"; row-gap: 0; padding-block: 8px 6px; }
+.home .hm-row > .ck { grid-area: ck; justify-self: center; }
+.home .hm-nm {
+  grid-area: nm; min-width: 0; overflow-wrap: break-word;
+  font: var(--name-weight) var(--name-size)/1.25 var(--name-face); letter-spacing: var(--name-track); color: var(--ink);
+}
+.home .hm-code { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.home .hm-code .mk { --mk: 10px; }
+.home .hm-row > .hm-code { grid-area: code; color: var(--ink-2); white-space: nowrap; }
+.home .hm-row > .hm-min { grid-area: min; justify-self: end; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.home .hm-row > .hm-due { grid-area: due; justify-self: end; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.home .hm-row.is-done .hm-nm { color: var(--ink-3); }
+.home .hm-amend { grid-area: am; min-width: 0; font: 400 var(--t-fine)/1.35 var(--sans); color: var(--ink-2); }
+
+.home .hm-empty { margin: 0; padding: 12px var(--px); font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); }
+
+/* ---------- the totals: figures only ---------- */
+.home .hm-sum {
+  display: grid; grid-template-columns: var(--cols); column-gap: var(--gx); align-items: center;
+  min-height: 52px; padding: 0 var(--px); border-top: var(--hair) solid var(--line);
+  font: 400 var(--t-small)/1.3 var(--sans); color: var(--ink-2); white-space: nowrap;
+}
+.home .hm-rows:empty + .hm-sum { border-top-color: transparent; }
+.home .hm-sum-l { grid-column: 2 / 4; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center; column-gap: 18px; min-width: 0; }
+.home .hm-sum-b { grid-column: 4; grid-row: 1; justify-self: end; font-variant-numeric: tabular-nums; }
+.home .hm-over { min-height: 36px; padding: 0; color: var(--error); text-decoration-color: color-mix(in srgb, var(--error) 45%, transparent); font-weight: 600; }
+.home .hm-over:hover, .home .hm-over:focus-visible { color: var(--error); text-decoration-color: var(--error); }
+
+/* ---------- task notes that can't be read: in Do today, never hidden ---------- */
+.home .hm-unread { margin-top: 10px; padding: 12px var(--px); border-top: var(--hair) solid var(--line); }
+.home .hm-unread-n { margin: 0; font: 600 var(--t-small)/1.35 var(--sans); color: var(--error); }
+.home .hm-unread-paths { margin: 4px 0 0; padding: 0; list-style: none; font: 400 var(--t-fine)/1.5 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* ---------- the over-by panel (#panel's body) ---------- */
+.hm-ov-s { margin: 0 0 12px; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink); }
+.hm-ov-g { margin: 0 0 12px; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-2); }
+.hm-ov-list { margin: 0; padding: 0; list-style: none; }
+.hm-ov-r {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-items: center;
+  min-height: 44px; border-top: var(--hair) solid var(--line); font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink);
+}
+.hm-ov-r:last-child { border-bottom: var(--hair) solid var(--line); }
+.hm-ov-r > span:last-child { color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- narrower centers (D6) ---------- */
+@container (max-width: 1000px) {
+  .home .hm-col { grid-template-columns: minmax(0, 1fr); }
+  .home .hm-pane-rec { margin-top: 26px; }
+}
+/* below 800px of center a row is two lines: the name, then its class, minutes and due */
+@container (max-width: 800px) {
+  .home .hm-pane-today, .home .hm-pane-rec { --cols: 30px minmax(0, 1fr) auto auto; --nm: 28px; --fig: 16px; --px: 14px; --gx: 12px; }
+  .home .hm-row, .home .hm-pane-rec .hm-row { grid-template-areas: "ck nm nm nm" ". code min due" ". am am am"; row-gap: 2px; }
+  .home .hm-fin, .home .hm-pane-rec .hm-fin { grid-template-areas: "ck nm nm nm" ". code min due" ". lock lock lock" ". am am am"; }
+  .home .hm-fin > .hm-due { white-space: nowrap; }
+  .home .hm-sum-l { grid-column: 2; }
+  .home .hm-sum-b { grid-column: 3 / 5; }
+}

@@ -1,0 +1,80 @@
+{
+ "account_status": {
+  "account_id": "acct_f1x7ure01",
+  "checked_at": "2026-08-28T08:00:00Z",
+  "current_period_end": "2026-09-24T00:00:00Z",
+  "email": "student@example.edu",
+  "error": null,
+  "needs_account": false,
+  "ok": true,
+  "plan": "monthly",
+  "status": "active"
+ },
+ "check_for_updates": {
+  "action_error": null,
+  "error": null,
+  "held": null,
+  "last_check": "2026-08-28T13:55:00Z",
+  "last_error": null,
+  "ok": true,
+  "staged": null,
+  "version": "0.4.0"
+ },
+ "get_settings": {
+  "error": null,
+  "ok": true,
+  "settings": {
+   "autostart": true,
+   "backup_dir": "D:\\Knowlu backups",
+   "profile_id": "profile_1111111111",
+   "quit_at": null
+  }
+ },
+ "grades_status": {
+  "available": true,
+  "connected": true,
+  "fetched_at": "2026-08-28T07:30",
+  "hidden": false,
+  "host": "lms.example.edu",
+  "ok": true,
+  "reason": null,
+  "signed_out": false
+ },
+ "mail_status": {
+  "error": null,
+  "keep_session": true,
+  "mailboxes": [],
+  "ok": true,
+  "profile_delete_pending": false
+ },
+ "profile": {
+  "error": null,
+  "ok": true,
+  "profile": {
+   "clubs": [
+    "Chess club"
+   ],
+   "interests_editable": true,
+   "mild": [
+    "Concerts"
+   ],
+   "never": [
+    "Sports"
+   ],
+   "preferences": "Short sessions in the morning; long reading after dinner.",
+   "strong": [
+    "Career fairs",
+    "Volunteer days"
+   ],
+   "warnings": []
+  }
+ },
+ "settings_context": {
+  "error": null,
+  "ok": true,
+  "profile_name": "School",
+  "registry_error": null,
+  "vault": "D:\\Knowlu vault",
+  "version": "0.4.0"
+ }
+}

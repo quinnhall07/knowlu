@@ -101,9 +101,21 @@ fn no_git_library_is_in_any_manifest() {
 
 #[test]
 fn the_page_says_nothing_about_a_repository() {
-    let js = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("static").join("console.js")).expect("console.js");
-    for word in ["is_repo", "has_remote", "auto-sync", "auto_sync", "pending push", "engine_newer", "vault_head"] {
-        assert!(!js.contains(word), "the page still renders {word}, which no longer exists");
+    // Every shipped script (v0.4.0 T23: the page is many files under app/static, not one console.js).
+    fn scripts(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).expect("app/static").flatten() {
+            let p = e.path();
+            if p.is_dir() { scripts(&p, out); } else if p.extension().is_some_and(|x| x == "js") { out.push(p); }
+        }
+    }
+    let mut files = Vec::new();
+    scripts(&Path::new(env!("CARGO_MANIFEST_DIR")).join("static"), &mut files);
+    assert!(files.len() > 10, "the shipped scripts: {}", files.len());
+    for f in files {
+        let js = std::fs::read_to_string(&f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        for word in ["is_repo", "has_remote", "auto-sync", "auto_sync", "pending push", "engine_newer", "vault_head"] {
+            assert!(!js.contains(word), "{}: the page still renders {word}, which no longer exists", f.display());
+        }
     }
 }
 

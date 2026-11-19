@@ -1,0 +1,79 @@
+/* Knowlu app, Home's aside (T8: note §4 Home; DESIGN.md "The desktop app"): Waiting under Do today, today's schedule
+   and free time under Recommended. Scoped under .home; the section label (.hm-lbl) and the panes' measures (--px, --gx)
+   are home.css's. No fill and no corners of its own: hairlines between rows, as in the other sections. */
+.home .ha-sec + .ha-sec { margin-top: 22px; }
+.home .ha-lblrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.home .ha-lblrow .hm-lbl { flex: 1 1 auto; min-width: 0; }
+
+/* ---------- Waiting ---------- */
+.home .ha-counts { flex: none; padding: 0 var(--px) 10px; font: 500 var(--t-small)/1.2 var(--sans); color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.home .ha-counts:empty { display: none; }
+.home .ha-clear { margin: 0; padding: 12px var(--px); border-top: var(--hair) solid var(--line); font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); }
+.home .ha-deck:empty { display: none; }
+.home .ha-sub { margin: 14px 0 0; padding: 0 var(--px) 8px; font: 600 var(--t-fine)/1.2 var(--sans); color: var(--ink-2); }
+.home .ha-changed { border-top: var(--hair) solid var(--line); }
+.home .ha-delta, .home .ha-moved { margin: 0; padding: 6px var(--px); font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink); }
+.home .ha-recs, .home .ha-gtk { margin: 0; padding: 0; list-style: none; }
+.home .ha-rec { padding: 4px var(--px); font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); }
+.home .ha-gtk-r {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 14px; align-items: center;
+  min-height: 48px; padding: 0 var(--px); border-top: var(--hair) solid var(--line);
+  font: 400 var(--t-small)/1.35 var(--sans);
+}
+.home .ha-gtk-r:first-child { border-top: 0; }
+.home .ha-gtk-nm { min-width: 0; color: var(--ink); overflow-wrap: break-word; }
+.home .ha-gtk-t { color: var(--ink-2); white-space: nowrap; }
+.home .ha-mail { display: flex; align-items: center; gap: 14px; margin: 0; padding: 4px var(--px); font: 400 var(--t-small)/1.35 var(--sans); }
+.home .ha-mail-n { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.home .ha-undated {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0;
+  min-height: 48px; padding: 0 var(--px); border-top: var(--hair) solid var(--line);
+  font: 400 var(--t-small)/1.35 var(--sans);
+}
+.home .ha-undated-a { color: var(--ink); text-decoration: underline; text-decoration-thickness: var(--underline); text-decoration-color: var(--field-line); text-underline-offset: .2em; }
+.home .ha-undated-a:hover, .home .ha-undated-a:focus-visible { color: var(--accent); text-decoration-color: var(--accent); }
+.home .ha-undated-h { color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ---------- today's schedule ----------
+   One row each: the class's mark in the check column, the name, the time at the figures' right edge. What has ended is
+   the third ink and folds under "N earlier"; the now line stands before what is next. */
+.home .ha-early {
+  flex: none; display: inline-flex; align-items: center; min-height: 36px; margin: 0 calc(var(--px) - 8px) 4px 0; padding: 0 8px;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--ink-2); cursor: pointer;
+  font: 500 var(--t-small)/1 var(--sans); white-space: nowrap;
+}
+.home .ha-early[hidden] { display: none; }
+.home .ha-early:hover, .home .ha-early:focus-visible { color: var(--ink); background: var(--line-2); }
+.home .ha-sched { margin: 0; padding: 0; list-style: none; border-top: var(--hair) solid var(--line); }
+.home .ha-sc {
+  position: relative; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; column-gap: var(--gx); align-items: center;
+  grid-template-areas: "mk nm t" ". rm rm";
+  min-height: 40px; padding: 2px var(--px);
+}
+.home .ha-sc[hidden] { display: none; }
+.home .ha-sc > .mk { grid-area: mk; --mk: 10px; justify-self: center; }
+.home .ha-sc-nm { grid-area: nm; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--name-weight) var(--name-size)/1.25 var(--name-face); letter-spacing: var(--name-track); color: var(--ink-2); }
+.home .ha-sc-t { grid-area: t; font: 400 var(--t-small)/1.35 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ink-2); }
+.home .ha-sc.is-next .ha-sc-nm, .home .ha-sc.is-next .ha-sc-t, .home .ha-allday .ha-sc-nm { color: var(--ink); }
+.home .ha-sc.is-past .ha-sc-nm, .home .ha-sc.is-past .ha-sc-t { color: var(--ink-3); }
+.home .ha-sc.is-past > .mk { opacity: .6; }
+.home .ha-lane-rm { grid-area: rm; justify-self: start; min-height: 36px; padding: 0; }
+/* the now line: a rule across the pane in the accent, with its time */
+.home .ha-now { position: relative; display: flex; align-items: center; min-height: 24px; padding: 0 var(--px); }
+.home .ha-now::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: var(--rule); transform: translateY(-50%); background: var(--accent); }
+.home .ha-now-t { position: relative; margin-left: auto; padding: 0 0 0 8px; background: var(--bg); font: 600 var(--t-fine)/1 var(--sans); font-variant-numeric: tabular-nums; color: var(--accent); }
+.home .ha-empty { padding: 10px var(--px); font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); }
+
+/* ---------- free time: the total, then its windows and what goes in each ---------- */
+.home .ha-free-lead { margin: 0; padding: 2px var(--px) 8px; font: var(--name-weight) var(--name-size)/1.25 var(--name-face); letter-spacing: var(--name-track); color: var(--ink); }
+.home .ha-free-rows { margin: 0; padding: 0; list-style: none; }
+.home .ha-free-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; align-items: center;
+  min-height: 44px; padding: 4px var(--px); border-top: var(--hair) solid var(--line);
+}
+.home .ha-free-when { font: 400 var(--t-small)/1.35 var(--sans); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+.home .ha-free-h { font: 400 var(--t-small)/1.35 var(--sans); font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
+.home .ha-takes { grid-column: 1 / -1; margin: 2px 0 2px; padding: 0; list-style: none; }
+.home .ha-take { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; padding: 2px 0 2px 14px; font: 400 var(--t-fine)/1.4 var(--sans); color: var(--ink-2); }
+.home .ha-take-nm { min-width: 0; overflow-wrap: break-word; }
+.home .ha-take-h { white-space: nowrap; font-variant-numeric: tabular-nums; }

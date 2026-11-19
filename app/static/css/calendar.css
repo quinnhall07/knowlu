@@ -1,0 +1,239 @@
+/* Knowlu app: the Calendar (v0.4.0 note §4 "Calendar", plan T11), from the approved calendar mockup's measures
+   (DESIGN.md "The desktop app", Calendar). One sticky top row in the center, then the days: a sticky row of day names
+   (the name over its number in the display face, the day's load after it), a sticky Due lane, and the full 24 hours
+   under them on hairlines. #center is the one scroller. Levels show by fill strength: hard the slot's soft field,
+   soft a lighter field, optional an outline; a commitment with no class and today's calendar time take the neutral
+   fields (.cfix). Read-only: no drag, resize or new-block affordance. Token roles only; class colours only through
+   the slots (--cc, --soft from slots.css). */
+
+.cal { --cal-gut: 56px; --bar-h: 60px; --dn-h: 54px; container: cal / inline-size; padding-right: 8px; }
+
+/* ---------- the top row ---------- */
+.cal .cal-bar {
+  position: sticky; top: 0; z-index: 8; display: flex; align-items: center; gap: 4px; height: var(--bar-h);
+  padding: 0 4px 0 calc(var(--cal-gut) - 10px); background: var(--bg); border-bottom: var(--hair) solid var(--line-2);
+}
+.cal .cal-h { margin: 0 6px 0 0; font: inherit; min-width: 0; }
+.cal .cal-title {
+  display: block; max-width: 100%; height: var(--h-tap); padding: 0 10px; border: 0; border-radius: var(--r-control);
+  background: none; color: var(--ink); text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font: 400 var(--t-panel)/1 var(--display); letter-spacing: -.01em;
+  transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+@media (hover: hover) { .cal .cal-title:hover { background: var(--line-2); } }
+.cal .cal-title[aria-expanded="true"] { background: var(--line-2); }
+.cal .cal-title:active { transform: translateY(var(--press)); }
+.cal .cal-bar .obtn { flex: none; }
+.cal .obtn.ico { padding: 0; width: var(--h-tap); }
+.cal .obtn.ico svg, .cal #cal-view svg { width: 18px; height: 18px; }
+.cal .cal-gap { flex: 1 1 auto; min-width: 0; }
+.cal .menu-wrap { position: relative; display: flex; flex: none; }
+.cal #cal-view { gap: 6px; }
+.cal #cal-view svg { color: var(--ink-3); }
+.cal #cal-view[aria-expanded="true"], .cal #cal-ns[aria-expanded="true"] { color: var(--ink); background: var(--line-2); }
+@container cal (max-width: 760px) {
+  .cal .cal-bar { padding-left: 8px; gap: 2px; }
+  .cal .cal-title { font-size: 19px; padding: 0 8px; }
+}
+
+/* the menus: a floating surface under their control */
+.cal .menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; margin: 0; padding: 6px;
+  background: var(--pop); border: var(--hair) solid var(--pop-edge); border-radius: var(--r-surface); box-shadow: var(--shadow-pop);
+}
+.cal .viewset { width: 196px; }
+.cal .viewset button {
+  display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: var(--h-tap); padding: 0 12px;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--ink-2); cursor: pointer;
+  font: 400 var(--t-small)/1 var(--sans);
+  transition: background-color var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.cal .viewset button[aria-pressed="true"] { color: var(--ink); font-weight: 600; }
+@media (hover: hover) { .cal .viewset button:hover { background: var(--line-2); color: var(--ink); } }
+.cal .viewset button:focus-visible { background: var(--line-2); color: var(--ink); outline-offset: -2px; }
+.cal .viewset kbd { font: 500 var(--t-fine)/1 var(--sans); color: var(--ink-3); }
+/* Not shown: what the engine dropped, each with its reason; read-only */
+.cal .nsmenu { width: min(340px, calc(100cqw - 24px)); max-height: 60vh; overflow-y: auto; }
+.cal .ns-r { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 10px 10px; border-top: var(--hair) solid var(--line); }
+.cal .ns-r:first-child { border-top: 0; }
+.cal .ns-when { font: 500 var(--t-fine)/1.2 var(--sans); color: var(--ink-3); }
+.cal .ns-t { font: 400 var(--t-small)/1.3 var(--display); color: var(--ink); overflow-wrap: anywhere; }
+.cal .ns-why { font: 400 var(--t-fine)/1.3 var(--sans); color: var(--ink-2); }
+.cal .ns-none { padding: 10px; font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); }
+
+/* Go to date: a month of day numbers under the title */
+.cal .datepop {
+  position: absolute; left: calc(var(--cal-gut) - 10px); top: calc(100% + 4px); z-index: 30; width: min(312px, calc(100cqw - 24px)); padding: 10px 12px 12px;
+  background: var(--pop); border: var(--hair) solid var(--pop-edge); border-radius: var(--r-surface); box-shadow: var(--shadow-pop);
+}
+.cal .dp-head { display: flex; align-items: center; gap: 2px; }
+.cal .dp-m { flex: 1 1 auto; margin: 0 0 0 8px; font: 400 19px/1 var(--display); color: var(--ink); }
+.cal .dp-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; margin-top: 6px; }
+.cal .dp-w { font: 500 13px/28px var(--sans); color: var(--ink-3); text-align: center; }
+.cal .dp-d {
+  position: relative; height: 38px; border: 0; border-radius: var(--r-control); background: none; color: var(--ink); cursor: pointer;
+  font: 400 var(--t-fine)/1 var(--sans);
+  transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.cal .dp-d.is-out { color: var(--ink-3); }
+.cal .dp-d.is-in { background: var(--line-2); }
+.cal .dp-d.is-today { font-weight: 600; }
+.cal .dp-d.is-today::after { content: ""; position: absolute; left: 32%; right: 32%; bottom: 6px; height: var(--rule); background: var(--accent); }
+@media (hover: hover) { .cal .dp-d:hover { background: var(--line); } }
+.cal .dp-d:focus-visible { outline-offset: -2px; }
+.cal .dp-d:active { transform: translateY(var(--press)); }
+
+/* ---------- the week: a gutter of hours, then one column per day ---------- */
+.cal .wk {
+  --hh: 60px; --lane-h: 0px; --n: 7;
+  position: relative; display: grid; grid-template-columns: var(--cal-gut) repeat(var(--n), minmax(0, 1fr));
+  -webkit-user-select: none; user-select: none;
+}
+/* above the hours (the now line's round end must not show through its sticky parts) */
+.cal .gut { position: relative; z-index: 3; min-width: 0; }
+.cal .gut-n { position: sticky; top: var(--bar-h); z-index: 6; height: var(--dn-h); background: var(--bg); }
+.cal .gut-l {
+  position: sticky; top: calc(var(--bar-h) + var(--dn-h)); z-index: 6; height: var(--lane-h); overflow: hidden;
+  display: flex; justify-content: flex-end; align-items: flex-start; padding: 3px 2px 0 0;
+  background: var(--bg); border-bottom: var(--hair) solid var(--line);
+}
+.cal .wk.no-lane .gut-l, .cal .wk.no-lane .lane { display: none; }
+.cal .wk.no-lane .gut-n, .cal .wk.no-lane .dn { border-bottom: var(--hair) solid var(--line); }
+.cal .due-fold {
+  display: inline-flex; align-items: center; gap: 1px; height: 26px; padding: 0 1px 0 6px; border: 0;
+  border-radius: var(--r-control); background: none; cursor: pointer; color: var(--ink-3);
+  font: 600 13px/1 var(--sans);
+  transition: color var(--fast) var(--ease), background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.cal .due-fold svg {
+  width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+  transition: transform var(--fast) var(--ease);
+}
+.cal .due-fold[aria-expanded="false"] svg { transform: rotate(-90deg); }
+@media (hover: hover) { .cal .due-fold:hover { color: var(--ink); background: var(--line-2); } }
+.cal .due-fold:focus-visible { color: var(--ink); outline-offset: -2px; }
+.cal .due-fold:active { transform: translateY(var(--press)); }
+.cal .gut-h { position: relative; height: calc(24 * var(--hh) + 1px); }
+/* hour labels: right-aligned, centred on their lines; 12 AM is left out at both ends */
+.cal .hl { position: absolute; right: 8px; top: calc(var(--h) * var(--hh) - 6.5px); font: 400 13px/13px var(--sans); color: var(--ink-3); white-space: nowrap; }
+.cal .hl.is-now {
+  z-index: 1; left: 0; right: 0; padding: 4px 8px 4px 0; text-align: right; top: calc(var(--h) * var(--hh) - 10.5px);
+  background: var(--bg); color: var(--accent); font-weight: 600; font-size: 12px;
+}
+
+/* ---------- a day ---------- */
+.cal .day { position: relative; min-width: 0; border-left: var(--hair) solid var(--line-2); }
+/* the name over its number in the display face; the day's load after the number */
+.cal .dn {
+  position: sticky; top: var(--bar-h); z-index: 4; height: var(--dn-h); margin: 0; background: var(--bg);
+  display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; align-content: end;
+  column-gap: 8px; padding: 0 8px 8px 12px; box-shadow: -1px 0 0 var(--line-2);
+}
+.cal .dn-name { grid-column: 1 / -1; font: 500 var(--t-fine)/18px var(--sans); color: var(--ink-2); }
+.cal .dn-num { position: relative; align-self: baseline; font: 400 24px/1 var(--display); color: var(--ink); }
+.cal .dn-load {
+  align-self: baseline; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 400 var(--t-fine)/1 var(--sans); color: var(--ink-3); font-variant-numeric: tabular-nums;
+}
+.cal .dn[aria-current="date"] .dn-name { color: var(--ink); font-weight: 600; }
+.cal .dn[aria-current="date"] .dn-num::after { content: ""; position: absolute; left: 0; right: 0; bottom: -5px; height: var(--rule); background: var(--accent); }
+
+/* the Due lane: today's all-day lines, accepted events and the open rows due, at most three a day, then "N more" */
+.cal .lane {
+  position: sticky; top: calc(var(--bar-h) + var(--dn-h)); z-index: 4; height: var(--lane-h); padding: 3px 4px 0 0; overflow: hidden;
+  background: var(--bg); border-bottom: var(--hair) solid var(--line); box-shadow: -1px 0 0 var(--line-2);
+}
+.cal .lane-l li { display: flex; align-items: center; height: 26px; min-width: 0; border-radius: var(--r-control); transition: background-color var(--fast) var(--ease); }
+@media (hover: hover) { .cal .lane-l li.due:hover { background: var(--line-2); } }
+.cal .lane .ck { width: 28px; height: 26px; margin: 0; padding: 0 0 0 9px; place-items: center start; --ck: 14px; border-radius: var(--r-control); }
+.cal .lane .ck:focus-visible { outline-offset: -2px; }
+.cal .due-nm {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 6px; height: 26px; padding: 0 4px; margin: 0;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--ink); text-align: left; cursor: pointer;
+  font: 400 14px/26px var(--display); letter-spacing: -.006em; white-space: nowrap; overflow: hidden;
+  transition: transform var(--fast) var(--ease);
+}
+.cal .due-nm:active { transform: translateY(var(--press)); }
+.cal .due-nm:focus-visible { outline-offset: -2px; }
+.cal .due-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal .due-at { flex: none; font: 400 12px/26px var(--sans); letter-spacing: 0; color: var(--ink-3); }
+.cal .due-at:empty { display: none; }
+.cal .lev, .cal .lad { gap: 0; padding-right: 4px; font: 400 14px/26px var(--display); color: var(--ink); white-space: nowrap; }
+.cal .lev .due-at { margin-left: 6px; }
+.cal .lev:focus-visible { outline-offset: -2px; }
+.cal .lane .mk.ev, .cal .lane .mk.ad { --mk: 8px; margin: 0 10px 0 12px; }
+.cal .lane .mk.ev { background: none; box-shadow: inset 0 0 0 1.5px var(--ink-2); }
+.cal .lane .mk.ad { background: var(--ink-3); box-shadow: none; border-radius: 2px; }
+.cal .due-more { padding-left: 30px; font: 500 13px/26px var(--sans); color: var(--ink-2); }
+.cal .due-sum { height: 26px; padding-left: 12px; font: 500 13px/26px var(--sans); color: var(--ink-3); }
+
+/* ---------- the hours ---------- */
+.cal .hcell { position: relative; height: calc(24 * var(--hh) + 1px); }
+.cal .hr { position: absolute; left: 0; right: 0; height: var(--hair); top: calc(var(--h) * var(--hh)); background: var(--line-2); }
+/* the hours outside the student's day: a flat tint, no pattern */
+.cal .off { position: absolute; left: 0; right: 0; top: calc(var(--a) * var(--hh)); height: calc((var(--b) - var(--a)) * var(--hh)); background: var(--bg-2); }
+.cal ul.hours { position: absolute; inset: 0; margin: 0; padding: 0; }
+/* now: across today in the accent with a round end on its left edge */
+.cal .now { position: absolute; left: 0; right: 0; z-index: 2; height: 1.5px; top: calc(var(--now) * var(--hh) - .75px); background: var(--accent); pointer-events: none; }
+.cal .now::before { content: ""; position: absolute; left: -4px; top: -3px; width: 7px; height: 7px; border-radius: var(--r-mark); background: var(--accent); }
+
+/* ---------- blocks ----------
+   Placed by start and end against the hour height, 2px clear of the column's lines and of each other; things at the
+   same time share the column (--li of --ln); never under 20px tall. */
+.cal .blk {
+  position: absolute; z-index: 1; container: blk / size; border-radius: var(--r-control);
+  top: calc(var(--s) * var(--hh) + 1px);
+  height: max(20px, calc((var(--e) - var(--s)) * var(--hh) - 2px));
+  left: calc(2px + var(--li, 0) * (100% - 2px) / var(--ln, 1));
+  width: calc((100% - 2px) / var(--ln, 1) - 2px);
+  transition: background-color var(--fast) var(--ease);
+}
+.cal .blk-b {
+  position: absolute; inset: 0; display: flex; align-items: flex-start; padding: 6px 8px; margin: 0; overflow: hidden;
+  border: 0; border-radius: inherit; background: transparent; text-align: left; cursor: pointer;
+  color: var(--ink-2); font: 400 13px/17px var(--sans);
+  transition: transform var(--fast) var(--ease);
+}
+.cal .blk-b:active { transform: translateY(var(--press)); }
+.cal .blk-b:focus-visible { outline-offset: -2px; }
+.cal .blk-in { display: flex; flex-direction: column; width: 100%; min-width: 0; }
+.cal .blk-nm { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 14px/18px var(--sans); color: var(--ink); }
+.cal .blk-t { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 13px/17px var(--sans); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+/* short: one line, the name first; the time takes what is left and wraps out of sight rather than being cut */
+@container blk (max-height: 39px) {
+  .cal .blk-b { align-items: center; padding-block: 0; }
+  .cal .blk-in { flex-direction: row; flex-wrap: wrap; align-items: baseline; column-gap: 6px; max-height: 18px; overflow: hidden; }
+  .cal .blk-nm { flex: 0 1 auto; }
+  .cal .blk-t { flex: none; overflow: visible; }
+}
+@container blk (min-height: 58px) {
+  .cal .blk-nm { white-space: normal; overflow-wrap: break-word; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+}
+@container blk (max-width: 64px) {
+  .cal .blk-b { padding-inline: 5px; }
+  .cal .blk-t { display: none; }
+}
+/* levels, by fill strength */
+.cal .blk.lv-hard { background: var(--soft); }
+.cal .blk.lv-soft { background: color-mix(in oklab, var(--cc) 10%, var(--bg)); }
+.cal .blk.lv-optional { background: transparent; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cc) 45%, var(--bg)); }
+.cal .blk.lv-optional .blk-nm { font-weight: 500; color: var(--ink-2); }
+/* a commitment with no class, and today's calendar time: the neutral fields */
+.cal .blk.cfix.lv-hard { background: var(--line); }
+.cal .blk.cfix.lv-soft { background: var(--line-2); }
+/* past: quieter words, the same fill */
+.cal .blk.is-past .blk-nm, .cal .blk.is-past .blk-t { color: var(--ink-3); }
+@media (hover: hover) {
+  .cal .blk.lv-hard:hover { background: var(--soft-2); }
+  .cal .blk.lv-soft:hover { background: color-mix(in oklab, var(--cc) 18%, var(--bg)); }
+  .cal .blk.lv-optional:hover { background: color-mix(in oklab, var(--cc) 8%, var(--bg)); }
+  .cal .blk.cfix.lv-hard:hover { background: var(--field-line); }
+  .cal .blk.cfix.lv-soft:hover { background: var(--line); }
+}
+.cal .blk:has(:focus-visible) { z-index: 3; }
+
+/* ---------- D6: the 820 x 600 window ---------- */
+@container cal (max-width: 900px) {
+  .cal .dn { padding-left: 8px; column-gap: 6px; }
+  .cal .dn-num { font-size: 21px; }
+}

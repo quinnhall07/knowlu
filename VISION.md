@@ -64,10 +64,10 @@ One screen answers "what's next?":
   they get ahead.
 - **All clear** — when nothing is due, Knowlu says so plainly. A free day is an answer, not an empty
   page.
-- **Grades** — a small ring per course, filled to the current percentage and coloured by letter;
+- **Grades** — per course, the current percentage and letter as text ("95.2% A"), never a ring;
   clicking it shows the breakdown. A term GPA with an uncertainty band that narrows as more of the
   term is graded, and a projected cumulative GPA when the student has entered their prior credits.
-  A student can hide grades.
+  A student can hide grades. *(amended 2026-11-17: text, not rings, signed by Quinn)*
 - **Lock in** — for a focused session, Knowlu serves one task after another until the day's work is
   done.
 - **Ahead of time** — a test a week out becomes study sessions placed before it; a large assignment
@@ -218,7 +218,7 @@ signed by Quinn's delegated go)*:
   each hard, soft or optional, confirmed by the student;
 - sources: the LMS feed, zyBooks, VHL, Google Calendar, email (school Microsoft 365 and personal Gmail through email forwarding to Knowlu, and Gmail directly) and campus events, with judgment in the cloud; *(amended 2026-09-30, email spec A11, signed by Quinn)*
 - runs and failures visible in the app;
-- **grades per course from Blackboard**, as the rings and their breakdowns.
+- **grades per course from Blackboard**, as percent and letter with their breakdowns. *(amended 2026-11-17, signed by Quinn)*
 
 **The pilot** is about 30 undergraduates other than the founder, on the released app, one computer
 each, needing nothing from anyone. The registrar is built in the MVP for the first school Knowlu

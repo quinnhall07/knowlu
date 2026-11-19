@@ -1,0 +1,273 @@
+/* Knowlu app: tokens. The design system's one place for every color, size and timing (system/tokens.css in
+   the design source), carried into the app unchanged except for three things the app must not ship:
+     - the pattern masks' SVG namespace is percent-encoded, so no shipped file names a URL (note D5);
+     - the website's four made-up example classes and their names are gone (no mock data ships);
+     - --serif points at the display face: Zilla Slab's only app use was Ask, which does not ship (D7).
+   Four layers, in this order: the palette; the roles the stylesheets use; values written out by hand, named;
+   the dark theme, which only re-points the same roles. No other stylesheet spells out a color. */
+
+:root {
+  /* ---------- 1. the palette ---------- */
+
+  /* the brand: cream paper, ink (it is --shade-23, below) and the red. Locked on 2026-11-11. */
+  --cream: #fffefb;
+  --red: #c33137;
+  --red-deep: #a22129;   /* the red hovered or pressed */
+  --red-pale: #f87672;   /* the red as text or thin marks on a dark ground */
+
+  /* the paper side: white for fields and the hero's dot paper, cream as running text on a dark ground, then the
+     sand steps that sit under cream. The number is the lightness (OKLCH, out of 100). */
+  --white: #ffffff;
+  --cream-2: #f4efe6;
+  --sand-96: #f7f3ec;
+  --sand-94: #efeae2;
+  --sand-91: #e6e0d6;
+  --sand-83: #cfc7bc;
+
+  /* the ink side: shades of the ink, all on its hue (OKLCH hue 320, chroma about .012). The number is the lightness.
+     --shade-23 is the ink itself. Every dark ground, dark line and gray text is one of these. */
+  --shade-16: #0f0c0f;
+  --shade-21: #19161a;
+  --shade-23: #201c21;
+  --shade-27: #29252a;
+  --shade-30: #312c32;
+  --shade-33: #373238;
+  --shade-40: #4d464e;
+  --shade-43: #544e56;
+  --shade-51: #6b646c;
+  --shade-70: #a29da4;
+  --shade-82: #c8c3c9;
+  --black: #000000;        /* only under shadows in the dark theme */
+
+  /* errors: the red a step darker, under its own name. -pale is for a dark ground.
+     Red means the action and the logo, never "late": anything overdue is said in words, and takes this red where it
+     needs a mark. */
+  --alert: #ae1726;
+  --alert-pale: #ff9a94;
+
+  /* class colors: sixteen, each with a -pale twin, which is the color to use on a dark ground whatever its tone. They
+     are used through the slots below. The first four are the website's. The other twelve were ruled on 2026-11-13
+     and are on no website page: each was computed inside its color family, at the point farthest from every other
+     class color and from the red. --coral is the class red: lighter than the red, under dark text, never plain. */
+  --blue: #2f55e6;    --blue-pale: #7f9bff;
+  --green: #12825a;   --green-pale: #4cc79a;
+  --amber: #f2ab1f;   --amber-pale: #f2b53c;
+  --violet: #7a4bd1;  --violet-pale: #b294f5;
+  --coral: #fe6a71;     --coral-pale: #fb5f69;
+  --orange: #e78022;    --orange-pale: #e58212;
+  --brown: #653401;     --brown-pale: #8b5c46;
+  --yellow: #ffeb4e;    --yellow-pale: #f8e445;
+  --lime: #9bd575;      --lime-pale: #9de17b;
+  --mint: #92f4db;      --mint-pale: #a4f0dc;
+  --teal: #34a7af;      --teal-pale: #339798;
+  --sky: #7bc6ff;       --sky-pale: #76ccfe;   /* baby blue */
+  --navy: #262d6d;      --navy-pale: #3b5bd4;
+  --lavender: #b68cf2;  --lavender-pale: #d7b1e3;
+  --magenta: #aa008d;   --magenta-pale: #a928a4;
+  --pink: #f8a9c8;      --pink-pale: #fa8ac2;
+
+  /* ---------- 2. roles: what the stylesheets use ---------- */
+
+  /* ground and ink */
+  --bg: var(--cream);
+  --bg-2: var(--sand-96);
+  --field: var(--white);
+  --ink: var(--shade-23);
+  --ink-2: var(--shade-40);
+  --ink-3: var(--shade-51);
+  --line: var(--sand-91);
+  --line-2: var(--sand-94);
+  --field-line: var(--sand-83);
+
+  /* the red: the one brand color. --accent is the red as text or thin marks and lightens in the dark theme.
+     Text on the red is cream, the logo's lu included (--wm-lu: in the dark theme it takes the cream the rest of the
+     word is set in, so the name stays one color). */
+  --accent: var(--red);
+  --wm-lu: var(--cream);
+  --btn-bg: var(--red);
+  --btn-fg: var(--cream);
+  --error: var(--alert);
+  --shadow: var(--shade-16);
+
+  /* class colors are slots, not subjects: a student's classes take slots 1 to 16 in order, and a color means
+     "which class" and nothing else. Fills and marks only, never text color. --on-class-N is the text color to use on
+     top of that fill. On a dark ground (the dark theme, the ink band) a slot takes its -pale twin. */
+  --class-1: var(--blue);     --on-class-1: var(--cream);
+  --class-2: var(--green);    --on-class-2: var(--cream);
+  --class-3: var(--amber);    --on-class-3: var(--shade-23);
+  --class-4: var(--violet);   --on-class-4: var(--cream);
+  --class-5: var(--coral);     --on-class-5: var(--shade-23);
+  --class-6: var(--orange);    --on-class-6: var(--shade-23);
+  --class-7: var(--brown);     --on-class-7: var(--cream);
+  --class-8: var(--yellow);    --on-class-8: var(--shade-23);
+  --class-9: var(--lime);      --on-class-9: var(--shade-23);
+  --class-10: var(--mint);     --on-class-10: var(--shade-23);
+  --class-11: var(--teal);     --on-class-11: var(--shade-23);
+  --class-12: var(--sky);      --on-class-12: var(--shade-23);
+  --class-13: var(--navy);     --on-class-13: var(--cream);
+  --class-14: var(--lavender); --on-class-14: var(--shade-23);
+  --class-15: var(--magenta);  --on-class-15: var(--cream);
+  --class-16: var(--pink);     --on-class-16: var(--shade-23);
+
+  /* the six class patterns, each a mask: black where the second tone shows. Hard edges, two flat tones, no blend.
+     Stripes: a 2px line every 10px, leaning 45 degrees. Dots: 3px dots, every other row shifted by half. Grid: 1px
+     lines, 11px squares. Zigzag: a 1.5px line, one peak every 16px. Houndstooth: a twill of four threads by four,
+     2px a thread. Flowers: five round petals around an open middle, every other row shifted by half. */
+  --pattern-stripes: repeating-linear-gradient(135deg, #000 0 2px, transparent 2px 10px);
+  --pattern-dots: radial-gradient(circle, #000 1.5px, transparent 2px) 0 0 / 14px 14px, radial-gradient(circle, #000 1.5px, transparent 2px) 7px 7px / 14px 14px;
+  --pattern-grid: linear-gradient(#000 1px, transparent 1px) 0 0 / 11px 11px, linear-gradient(90deg, #000 1px, transparent 1px) 0 0 / 11px 11px;
+  --pattern-zigzag: url("data:image/svg+xml,%3Csvg%20xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20width='16'%20height='11'%20viewBox='0%200%2016%2011'%3E%3Cpath%20d='M-1%208.67L8%203l9%205.67'%20fill='none'%20stroke='%23000'%20stroke-width='1.5'/%3E%3C/svg%3E") 0 0 / 16px 11px;
+  --pattern-houndstooth: url("data:image/svg+xml,%3Csvg%20xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20width='16'%20height='16'%20viewBox='0%200%2016%2016'%3E%3Cpath%20d='M0%200h2v2h-2zM2%200h2v2h-2zM4%200h2v2h-2zM6%200h2v2h-2zM12%200h2v2h-2zM14%200h2v2h-2zM0%202h2v2h-2zM2%202h2v2h-2zM4%202h2v2h-2zM6%202h2v2h-2zM8%202h2v2h-2zM14%202h2v2h-2zM0%204h2v2h-2zM2%204h2v2h-2zM4%204h2v2h-2zM6%204h2v2h-2zM8%204h2v2h-2zM10%204h2v2h-2zM0%206h2v2h-2zM2%206h2v2h-2zM4%206h2v2h-2zM6%206h2v2h-2zM10%206h2v2h-2zM12%206h2v2h-2zM0%208h2v2h-2zM2%208h2v2h-2zM2%2010h2v2h-2zM4%2010h2v2h-2zM4%2012h2v2h-2zM6%2012h2v2h-2zM0%2014h2v2h-2zM6%2014h2v2h-2z'/%3E%3C/svg%3E") 0 0 / 16px 16px;
+  --pattern-flowers: url("data:image/svg+xml,%3Csvg%20xmlns='http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20width='26'%20height='26'%20viewBox='0%200%2026%2026'%3E%3Ccircle%20cx='6.50'%20cy='3.40'%20r='1.9'/%3E%3Ccircle%20cx='9.45'%20cy='5.54'%20r='1.9'/%3E%3Ccircle%20cx='8.32'%20cy='9.01'%20r='1.9'/%3E%3Ccircle%20cx='4.68'%20cy='9.01'%20r='1.9'/%3E%3Ccircle%20cx='3.55'%20cy='5.54'%20r='1.9'/%3E%3Ccircle%20cx='19.50'%20cy='16.40'%20r='1.9'/%3E%3Ccircle%20cx='22.45'%20cy='18.54'%20r='1.9'/%3E%3Ccircle%20cx='21.32'%20cy='22.01'%20r='1.9'/%3E%3Ccircle%20cx='17.68'%20cy='22.01'%20r='1.9'/%3E%3Ccircle%20cx='16.55'%20cy='18.54'%20r='1.9'/%3E%3C/svg%3E") 0 0 / 26px 26px;
+
+  /* slots 5 to 16 carry a pattern on a fill big enough to show one (a block, never the small square mark).
+     --class-N-pattern is the mask and --class-N-tone the second tone: the fill moved away from its text, toward cream
+     under dark text and toward the darkest shade under cream text, so words gain contrast where the pattern runs.
+     Each percentage puts the tone between 5 and 9 from the fill (OKLab x 100) in both themes. The two colors that share a
+     pattern sit far apart. Slots 1 to 4 are plain, as the website draws them: no mask, and the tone is the fill. */
+  --class-1-tone: var(--class-1);  --class-1-pattern: none;
+  --class-2-tone: var(--class-2);  --class-2-pattern: none;
+  --class-3-tone: var(--class-3);  --class-3-pattern: none;
+  --class-4-tone: var(--class-4);  --class-4-pattern: none;
+  --class-5-tone: color-mix(in srgb-linear, var(--class-5), var(--cream) 13%);  --class-5-pattern: var(--pattern-stripes);
+  --class-6-tone: color-mix(in srgb-linear, var(--class-6), var(--cream) 13%);  --class-6-pattern: var(--pattern-dots);
+  --class-7-tone: color-mix(in srgb-linear, var(--class-7), var(--shade-16) 41%);  --class-7-pattern: var(--pattern-houndstooth);
+  --class-8-tone: color-mix(in srgb-linear, var(--class-8), var(--cream) 29%);  --class-8-pattern: var(--pattern-zigzag);
+  --class-9-tone: color-mix(in srgb-linear, var(--class-9), var(--cream) 24%);  --class-9-pattern: var(--pattern-grid);
+  --class-10-tone: color-mix(in srgb-linear, var(--class-10), var(--cream) 49%);  --class-10-pattern: var(--pattern-stripes);
+  --class-11-tone: color-mix(in srgb-linear, var(--class-11), var(--cream) 12%);  --class-11-pattern: var(--pattern-zigzag);
+  --class-12-tone: color-mix(in srgb-linear, var(--class-12), var(--cream) 26%);  --class-12-pattern: var(--pattern-dots);
+  --class-13-tone: color-mix(in srgb-linear, var(--class-13), var(--shade-16) 42%);  --class-13-pattern: var(--pattern-flowers);
+  --class-14-tone: color-mix(in srgb-linear, var(--class-14), var(--cream) 21%);  --class-14-pattern: var(--pattern-houndstooth);
+  --class-15-tone: color-mix(in srgb-linear, var(--class-15), var(--shade-16) 34%);  --class-15-pattern: var(--pattern-grid);
+  --class-16-tone: color-mix(in srgb-linear, var(--class-16), var(--cream) 24%);  --class-16-pattern: var(--pattern-flowers);
+
+  /* a 1px inner edge for the square mark. The five colors paler than amber would not hold on cream without it; on
+     every other slot, and on a dark ground, the edge is the fill itself. */
+  --class-1-edge: var(--class-1); --class-2-edge: var(--class-2); --class-3-edge: var(--class-3); --class-4-edge: var(--class-4);
+  --class-5-edge: var(--class-5); --class-6-edge: var(--class-6); --class-7-edge: var(--class-7); --class-11-edge: var(--class-11);
+  --class-13-edge: var(--class-13); --class-14-edge: var(--class-14); --class-15-edge: var(--class-15);
+  --class-8-edge: color-mix(in srgb-linear, var(--class-8), var(--shade-23) 54%);
+  --class-9-edge: color-mix(in srgb-linear, var(--class-9), var(--shade-23) 32%);
+  --class-10-edge: color-mix(in srgb-linear, var(--class-10), var(--shade-23) 51%);
+  --class-12-edge: color-mix(in srgb-linear, var(--class-12), var(--shade-23) 27%);
+  --class-16-edge: color-mix(in srgb-linear, var(--class-16), var(--shade-23) 28%);
+
+  /* the ink band's ground: the ink itself in the light theme, one shade up in the dark theme so it still reads
+     as a band. */
+  --band-bg: var(--shade-23);
+  --band-bg-2: var(--shade-27);
+
+  /* type */
+  --display: "PT Serif Caption", Georgia, serif;
+  --serif: var(--display);
+  --sans: "Albert Sans", "Segoe UI", system-ui, sans-serif;
+  --t-wordmark: clamp(80px, 12.5vw, 184px);
+  --t-h2: clamp(40px, 5vw, 80px);
+  --t-h3: clamp(26px, 2.4vw, 36px);
+  --t-lead: clamp(19px, 1.5vw, 23px);
+  --t-body: 18px;
+  --t-small: 15px;
+
+  /* layout */
+  --r: 2px;
+  --gut: clamp(16px, 4vw, 56px);
+  --page: 1600px;
+  --nav-h: 76px;
+  --sec: clamp(88px, 10vw, 168px);
+
+  /* motion */
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  --fast: 180ms;
+  --med: 320ms;
+  --slow: 620ms;
+
+  /* ---------- 3. values the website writes out by hand, named here ----------
+     Where the site uses two values for one job, this is the one that was chosen on 2026-11-13; the other is listed in
+     DESIGN.md under "Where the site differs". */
+
+  /* type */
+  --t-label: 17px;        /* button labels, footer links, table values */
+  --t-fine: 14px;         /* source lines, the copyright, notes */  --lh-h2: 1.02;          /* a section's headline */
+  --ls-h2: -.016em;
+  --lh-h3: 1.12;          /* a smaller heading */
+  --ls-h3: -.01em;
+  --lh-lead: 1.5;         /* the paragraph under a headline */
+  --lh-body: 1.55;        /* running text */
+
+  /* controls */
+  --h-control: 56px;      /* the button and the field */
+  --h-control-2: 50px;    /* the invite-link row */
+  --h-tap: 44px;          /* the smallest thing a finger presses; also the small button */
+  --w-field: 520px;       /* the waitlist field at its widest */
+
+  /* lines */
+  --hair: 1px;            /* hairlines and field borders */
+  --rule: 2px;            /* the one heavier rule, in --accent */
+  --underline: 1.5px;     /* a link's underline, 4px under the text */
+  --underline-off: 4px;
+
+  /* the focus outline: --accent, this thick, this far off. Inside a window or a list it sits closer. */
+  --focus: 2px;
+  --focus-off: 3px;
+  --focus-off-in: 2px;
+
+  /* depth: only a window and a block being moved cast a shadow */
+  --shadow-window: 0 30px 60px -32px color-mix(in srgb, var(--shadow) 38%, transparent);
+  --shadow-lift: 0 8px 14px -8px color-mix(in srgb, var(--shadow) 50%, transparent);     /* a block under the pointer */
+  --shadow-held: 0 12px 20px -10px color-mix(in srgb, var(--shadow) 55%, transparent);   /* a block picked up */
+  --shadow-drag: 0 16px 26px -12px color-mix(in srgb, var(--shadow) 60%, transparent);   /* a block being dragged */
+
+  /* motion */
+  --press: 1px;           /* how far a pressed thing moves down */
+  --rise: 16px;           /* how far text rises into place when its section builds */
+  --rise-window: 36px;    /* how far a window rises */
+  --step: 80ms;           /* the wait between one block and the next as a section builds */
+  --step-row: 50ms;       /* the wait between rows of one list */
+
+  /* layout: a section splits in two from 1000px wide */
+  --split: 5fr 7fr;
+  --gap-split: clamp(32px, 6vw, 104px);
+
+  color-scheme: light;
+}
+
+/* ---------- 4. the dark theme: the same roles, pointed at the ink side ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: var(--shade-21); --bg-2: var(--shade-23); --field: var(--shade-23);
+    --ink: var(--cream-2); --ink-2: var(--shade-82); --ink-3: var(--shade-70);
+    --line: var(--shade-33); --line-2: var(--shade-27); --field-line: var(--shade-40);
+    --accent: var(--red-pale); --error: var(--alert-pale); --shadow: var(--black); --wm-lu: var(--cream-2);
+    --class-1: var(--blue-pale); --on-class-1: var(--shade-21); --class-2: var(--green-pale); --on-class-2: var(--shade-21);
+    --class-3: var(--amber-pale); --on-class-3: var(--shade-21); --class-4: var(--violet-pale); --on-class-4: var(--shade-21);
+    --class-5: var(--coral-pale); --on-class-5: var(--shade-21); --class-6: var(--orange-pale); --on-class-6: var(--shade-21);
+    --class-7: var(--brown-pale); --on-class-7: var(--cream-2); --class-8: var(--yellow-pale); --on-class-8: var(--shade-21);
+    --class-9: var(--lime-pale); --on-class-9: var(--shade-21); --class-10: var(--mint-pale); --on-class-10: var(--shade-21);
+    --class-11: var(--teal-pale); --on-class-11: var(--shade-21); --class-12: var(--sky-pale); --on-class-12: var(--shade-21);
+    --class-13: var(--navy-pale); --on-class-13: var(--cream-2); --class-14: var(--lavender-pale); --on-class-14: var(--shade-21);
+    --class-15: var(--magenta-pale); --on-class-15: var(--cream-2); --class-16: var(--pink-pale); --on-class-16: var(--shade-21);
+    --class-8-edge: var(--class-8); --class-9-edge: var(--class-9); --class-10-edge: var(--class-10); --class-12-edge: var(--class-12); --class-16-edge: var(--class-16);
+    --band-bg: var(--shade-27); --band-bg-2: var(--shade-30);
+    --shadow-window: 0 30px 60px -32px color-mix(in srgb, var(--shadow) 60%, transparent);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: var(--shade-21); --bg-2: var(--shade-23); --field: var(--shade-23);
+  --ink: var(--cream-2); --ink-2: var(--shade-82); --ink-3: var(--shade-70);
+  --line: var(--shade-33); --line-2: var(--shade-27); --field-line: var(--shade-40);
+  --accent: var(--red-pale); --error: var(--alert-pale); --shadow: var(--black); --wm-lu: var(--cream-2);
+  --class-1: var(--blue-pale); --on-class-1: var(--shade-21); --class-2: var(--green-pale); --on-class-2: var(--shade-21);
+  --class-3: var(--amber-pale); --on-class-3: var(--shade-21); --class-4: var(--violet-pale); --on-class-4: var(--shade-21);
+  --class-5: var(--coral-pale); --on-class-5: var(--shade-21); --class-6: var(--orange-pale); --on-class-6: var(--shade-21);
+  --class-7: var(--brown-pale); --on-class-7: var(--cream-2); --class-8: var(--yellow-pale); --on-class-8: var(--shade-21);
+  --class-9: var(--lime-pale); --on-class-9: var(--shade-21); --class-10: var(--mint-pale); --on-class-10: var(--shade-21);
+  --class-11: var(--teal-pale); --on-class-11: var(--shade-21); --class-12: var(--sky-pale); --on-class-12: var(--shade-21);
+  --class-13: var(--navy-pale); --on-class-13: var(--cream-2); --class-14: var(--lavender-pale); --on-class-14: var(--shade-21);
+  --class-15: var(--magenta-pale); --on-class-15: var(--cream-2); --class-16: var(--pink-pale); --on-class-16: var(--shade-21);
+  --class-8-edge: var(--class-8); --class-9-edge: var(--class-9); --class-10-edge: var(--class-10); --class-12-edge: var(--class-12); --class-16-edge: var(--class-16);
+  --band-bg: var(--shade-27); --band-bg-2: var(--shade-30);
+  --shadow-window: 0 30px 60px -32px color-mix(in srgb, var(--shadow) 60%, transparent);
+  color-scheme: dark;
+}

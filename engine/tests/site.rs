@@ -1,5 +1,6 @@
-//! The download page (plan 4a, Task 10; spec §7). Plain HTML and CSS, **no scripts**, both pages
-//! carrying the privacy sentence, and no claim the product cannot back.
+//! knowlu.com (plan 4a, Task 10; spec §7; v0.4.0 note §9). The privacy page is plain HTML and CSS,
+//! **no scripts**, carrying the privacy sentence; no page makes a claim the product cannot back; the
+//! ported homepage (A5, A5') is checked apart, and every face the site ships carries its licence.
 //!
 //! **This test pins the sentence against its own literal, and that is all it does.** The
 //! wizard↔site cross-check — the one that fails when a word is edited on either side — is
@@ -14,25 +15,161 @@ fn site(rel: &str) -> std::path::PathBuf { std::path::Path::new(env!("CARGO_MANI
 
 const PRIVACY: &str = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
 
+/// v0.4.0 (note §9, A5, A5'): the index and the privacy page are checked apart. The privacy page
+/// keeps every pin it had; the index is the ported knowlu.com homepage, and four of its old pins and
+/// one of its bans no longer describe it.
 #[test]
-fn the_site_is_plain_html_and_carries_the_privacy_sentence_on_both_pages() {
-    let index = fs::read_to_string(site("index.html")).expect("site/index.html");
+fn the_privacy_page_is_plain_html_and_carries_the_privacy_sentence() {
     let privacy = fs::read_to_string(site("privacy.html")).expect("site/privacy.html");
-    for (name, text) in [("index.html", &index), ("privacy.html", &privacy)] {
-        assert!(!text.contains("<script"), "{name} must carry no script (decision 11)");
-        assert!(text.contains("site.css"), "{name} uses the one stylesheet");
-    }
+    assert!(!privacy.contains("<script"), "privacy.html must carry no script (decision 11)");
+    assert!(privacy.contains("site.css"), "privacy.html uses the one stylesheet");
     assert!(privacy.contains(PRIVACY), "the privacy page carries the exact sentence");
-    assert!(index.contains(PRIVACY), "so does the download page");
-    // M5: the stable name `release.ps1` copies beside the versioned installer, so the page's link
-    // never has to change with a version. The versioned file stays there too.
-    assert!(index.contains("releases/Knowlu-setup.exe"), "the download button points at the stable name");
     // No claim the product cannot back (product plan §8: scraping ToS, minors and FERPA are
     // Quinn's external dependency and the page makes no claim about them).
     for banned in ["FERPA", "compliant", "certified", "guarantee"] {
-        assert!(!index.contains(banned) && !privacy.contains(banned), "the site must not claim {banned}");
+        assert!(!privacy.contains(banned), "the privacy page must not claim {banned}");
     }
+}
+
+#[test]
+fn the_index_makes_no_claim_the_product_cannot_back() {
+    let index = fs::read_to_string(site("index.html")).expect("site/index.html");
+    // Dropped (A5): the download-link pin. The homepage is early access with a mailto form and no
+    // installer link, so `releases/Knowlu-setup.exe` is no longer on it (the M13 fix is reversed).
+    // Dropped (A5): the no-script pin. The homepage runs its own scripts (`js/*.js`, all local).
+    // Dropped (A5, r1): the `site.css` pin. The homepage uses its own stylesheets (`css/*.css`);
+    // `site.css` stays the legal pages' one stylesheet, pinned on the privacy page above.
+    // Dropped (A5): the privacy-sentence pin. The sentence lives on the privacy page, pinned above.
+    // Dropped (A5'): the "guarantee" ban. Quinn's "30-day money-back guarantee" line is on the
+    // homepage, in the pricing section and the FAQ; the privacy page still bans the word.
+    for banned in ["FERPA", "compliant", "certified"] {
+        assert!(!index.contains(banned), "the homepage must not claim {banned}");
+    }
+}
+
+#[test]
+fn the_release_drop_folder_stays_in_git() {
     assert!(site("releases/.gitkeep").is_file(), "the drop folder exists in git");
+}
+
+/// v0.4.0 (note §9, M11; plan P11): every face the site declares, and every font file under `site/`,
+/// carries its OFL and a `SOURCES.md` row whose SHA-256 is the file's own; no file is named as a
+/// subset. A face whose OFL reserves a font name ships whole: its row names a 40-hex upstream commit
+/// and its file name carries no `-latin`, `_latin` or `subset`. The old homepage carried PT Serif
+/// Caption's Google CSS2 `latin` subset under the reserved name "PT Serif"; a subset is a Modified
+/// Version under the OFL, which may not keep a reserved name. A face with no reserved name may be such
+/// a subset (Albert Sans, Zilla Slab). This test cannot prove a file is upstream's; it proves the
+/// paper trail is on disk and true to the bytes, so a reviewer can re-fetch and compare.
+#[test]
+fn every_site_font_has_its_licence_and_a_full_file() {
+    use std::path::{Path, PathBuf};
+    const FONT_EXTS: [&str; 4] = ["ttf", "otf", "woff", "woff2"];
+    fn is_font(p: &Path) -> bool {
+        p.extension().and_then(|e| e.to_str()).map(|e| FONT_EXTS.contains(&e.to_ascii_lowercase().as_str())).unwrap_or(false)
+    }
+    fn is_hex(s: &str, len: usize) -> bool { s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
+    fn slug(family: &str) -> String { family.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect() }
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())).flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().map(|n| n == "releases").unwrap_or(false) { continue; }
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let root = site("");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+
+    // Every `@font-face` in every stylesheet under `site/`, as (family, resolved file).
+    let mut faces: Vec<(String, PathBuf)> = Vec::new();
+    for css in files.iter().filter(|p| p.extension().map(|e| e == "css").unwrap_or(false)) {
+        let text = fs::read_to_string(css).unwrap();
+        for block in text.split("@font-face").skip(1) {
+            let block = block.split('}').next().unwrap_or("");
+            let family = block.split("font-family:").nth(1).and_then(|r| r.split(';').next()).map(|f| f.trim().trim_matches('"').trim_matches('\'').to_string());
+            let family = family.unwrap_or_else(|| panic!("{}: an @font-face without a font-family", css.display()));
+            for part in block.split("url(").skip(1) {
+                let url = part.split(')').next().unwrap().trim().trim_matches('"').trim_matches('\'');
+                faces.push((family.clone(), css.parent().unwrap().join(url)));
+            }
+        }
+    }
+    assert!(!faces.is_empty(), "the site declares no @font-face (the ported homepage carries its own faces)");
+    // A font file on disk that no stylesheet names still needs its paper trail.
+    for f in files.iter().filter(|p| is_font(p)) {
+        let canon = f.canonicalize().unwrap();
+        if !faces.iter().any(|(_, p)| p.canonicalize().map(|c| c == canon).unwrap_or(false)) {
+            faces.push((String::new(), f.clone()));
+        }
+    }
+
+    for (family, path) in &faces {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(path.is_file(), "{family}: {} is not on disk", path.display());
+        assert!(!name.to_ascii_lowercase().contains("subset"), "{name} is named as a subset; ship the whole file");
+        let dir = path.parent().unwrap();
+        let sources_path = dir.join("SOURCES.md");
+        let sources = fs::read_to_string(&sources_path).unwrap_or_else(|e| panic!("{name}: {}: {e}", sources_path.display()));
+        let row: Vec<String> = sources
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('|'))
+            .map(|l| l.trim_matches('|').split('|').map(|c| c.trim().trim_matches('`').to_string()).collect::<Vec<_>>())
+            .find(|cells| cells.first().map(|c| c == &name).unwrap_or(false))
+            .unwrap_or_else(|| panic!("{name}: no row in {}", sources_path.display()));
+        let hash = row.iter().find(|c| is_hex(c, 64)).unwrap_or_else(|| panic!("{name}: no 64-hex SHA-256 in its row"));
+        let bytes = fs::read(path).unwrap();
+        let own: String = ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hash, &own, "{name}: the row's SHA-256 is not the file's");
+        let row_family = row.get(1).cloned().unwrap_or_default();
+        if !family.is_empty() {
+            assert_eq!(&row_family, family, "{name}: the row's family is not the @font-face's");
+        }
+        let ofl = dir.join(format!("OFL-{}.txt", slug(&row_family)));
+        let text = fs::read_to_string(&ofl).unwrap_or_else(|e| panic!("{row_family}'s licence {}: {e}", ofl.display()));
+        assert!(text.contains("SIL Open Font License, Version 1.1"), "{} is not the OFL 1.1 text", ofl.display());
+        // A reserved name (OFL condition 3) travels only on the unmodified file: the row names the
+        // upstream commit, and the file is not named as a per-script subset. The name is reserved in
+        // the copyright header, before the licence body (which defines the term for every font).
+        let header = text.split("This Font Software is licensed under").next().unwrap_or("");
+        if header.contains("Reserved Font Name") {
+            let lower = name.to_ascii_lowercase();
+            for subset in ["-latin", "_latin", "subset"] {
+                assert!(!lower.contains(subset), "{name}: {row_family}'s licence reserves a name, so ship the whole upstream file, not a subset");
+            }
+            assert!(
+                row.iter().any(|c| c.split(|ch: char| !ch.is_ascii_hexdigit()).any(|w| is_hex(w, 40))),
+                "{name}: {row_family}'s licence reserves a name, so its row must name the 40-hex upstream commit"
+            );
+        }
+    }
+}
+
+/// v0.4.0 review I1: site-dist carried review aids (the "REVIEW ONLY" comments, the "Review copy"
+/// stage flow) and a made-up address on the joined page. `release.yml` deploys `site/` whole, so none
+/// of it may ship.
+#[test]
+fn no_shipped_site_file_carries_a_review_aid_or_a_made_up_address() {
+    use std::path::Path;
+    fn walk(dir: &Path, hits: &mut Vec<String>, seen: &mut usize) {
+        for e in fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())).flatten() {
+            let p = e.path();
+            if p.is_dir() { walk(&p, hits, seen); continue; }
+            let Ok(text) = fs::read_to_string(&p) else { continue };
+            *seen += 1;
+            for aid in ["REVIEW ONLY", "Review copy", "example.edu"] {
+                if text.contains(aid) { hits.push(format!("{}: {aid}", p.display())); }
+            }
+        }
+    }
+    let (mut hits, mut seen) = (Vec::new(), 0);
+    walk(&site(""), &mut hits, &mut seen);
+    assert!(seen >= 10, "the scan read only {seen} text files under site/");
+    assert!(hits.is_empty(), "review aids ship: {hits:?}");
 }
 
 /// C3′ Task 11: the bullet said, in published words, that note bodies are never stored and that if

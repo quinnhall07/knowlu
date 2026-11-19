@@ -1,0 +1,116 @@
+/* Knowlu app, Tasks (v0.4.0 note §4, plan T10): the title with New task, the toolbar (Open / Done / All, search, the
+   class, due and sort selects, the count), the unreadable line, then one list of rows on shared columns: check, Task,
+   Class, Due, Estimate. Groups are quiet label rows. Under 760px of page a row takes two lines, the name above its
+   figures. Roles and sizes only, from tokens.css and shell.css; the check is the shell's .ck, never repainted here. */
+
+.tk { container-type: inline-size; max-width: 1180px; }
+
+/* ---------- the title and New task ---------- */
+.tk-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.tk-new { margin-right: -14px; }
+
+/* ---------- the new task form: one line of fields that wraps ---------- */
+.tk-form { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin-top: 18px; padding-bottom: 18px; border-bottom: var(--hair) solid var(--line); }
+.tk-form[hidden] { display: none; }
+.tk-f-title { flex: 2 1 260px; width: auto; }
+.tk-f-cls { flex: 1 1 170px; }
+.tk-f-due { flex: 0 1 170px; width: auto; }
+.tk-f-est { flex: 0 1 120px; width: auto; }
+.tk-f-acts { display: flex; align-items: center; gap: 20px; }
+
+/* ---------- the toolbar ---------- */
+.tk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 18px 0 8px; }
+.tk-tabs { flex: none; margin-left: -14px; }
+.tk-search { position: relative; display: block; flex: 1 1 220px; min-width: 180px; max-width: 360px; }
+.tk-search svg { position: absolute; left: 13px; top: 50%; width: 18px; height: 18px; transform: translateY(-50%); fill: none; stroke: var(--ink-3); stroke-width: 1.5; stroke-linecap: round; pointer-events: none; }
+.tk-search .field { padding-left: 40px; }
+.tk-search .field::-webkit-search-cancel-button { filter: grayscale(1); opacity: .6; cursor: pointer; }
+.tk-sel { flex: 0 1 auto; min-width: 150px; }
+.tk-count { margin-left: auto; color: var(--ink-2); font: 500 var(--t-small)/1 var(--sans); white-space: nowrap; }
+
+/* ---------- unreadable notes: never hidden ---------- */
+.tk-unread { margin: 12px 0 4px; padding: 12px 0; border-top: var(--hair) solid var(--line); }
+.tk-unread[hidden] { display: none; }
+.tk-unread-h { font: 600 var(--t-small)/1.35 var(--sans); color: var(--ink); }
+.tk-unread-l { margin-top: 4px; font: 400 var(--t-fine)/1.4 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* ---------- the list: one set of columns for the head and every row ---------- */
+.tk-list {
+  --tk-cols: var(--h-tap) minmax(0, 1fr) 170px minmax(180px, 230px) 110px;
+  margin-top: 6px;
+}
+.tk-cols, .tk-row {
+  display: grid; grid-template-columns: var(--tk-cols); grid-template-areas: "ck nm cls due min";
+  column-gap: 14px; align-items: center; padding: 0 8px;
+}
+.tk-cols {
+  min-height: 40px; border-bottom: var(--hair) solid var(--line);
+  font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2);
+}
+.tk-cols .tk-num { grid-area: min; text-align: right; }
+.tk-row {
+  min-height: 56px; border-bottom: var(--hair) solid var(--line); border-radius: 0;
+  font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2);
+}
+@media (hover: hover) {
+  .tk-row.hov:hover { border-radius: var(--r-control); }
+}
+.tk-row > .ck { grid-area: ck; justify-self: center; margin: 0; }
+.tk-row > .tk-nm { grid-area: nm; }
+.tk-row > .tk-cls { grid-area: cls; }
+.tk-row > .tk-due { grid-area: due; }
+.tk-row > .tk-min { grid-area: min; justify-self: end; text-align: right; }
+
+/* the name: a bare button in the row name's face that opens Details */
+.tk-nm {
+  display: block; min-width: 0; max-width: 100%; min-height: var(--h-tap); padding: 0; border: 0; background: none;
+  text-align: left; cursor: pointer; overflow-wrap: anywhere;
+  font: var(--name-weight) var(--name-size)/1.25 var(--name-face); letter-spacing: var(--name-track); color: var(--ink);
+  text-decoration: underline; text-decoration-color: transparent; text-decoration-thickness: var(--underline); text-underline-offset: var(--underline-off);
+  transition: color var(--med) var(--ease), text-decoration-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+span.tk-nm { display: flex; align-items: center; cursor: default; text-decoration: none; }
+button.tk-nm:hover { text-decoration-color: var(--field-line); }
+button.tk-nm:active { transform: translateY(var(--press)); }
+button.tk-nm:focus-visible { outline-offset: 2px; }
+
+.tk-cls { display: flex; align-items: center; min-width: 0; }
+.tk-cls a, .tk-cls > span:not(.mk) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-cls a {
+  display: inline-flex; align-items: center; gap: 9px; min-height: var(--h-tap); margin: 0 -8px; padding: 0 8px;
+  border-radius: var(--r-control); color: var(--ink); font-weight: 500;
+}
+.tk-cls a span { overflow: hidden; text-overflow: ellipsis; text-decoration: underline; text-decoration-color: transparent; text-decoration-thickness: var(--underline); text-underline-offset: var(--underline-off); transition: text-decoration-color var(--fast) var(--ease); }
+.tk-cls a:hover span, .tk-cls a:focus-visible span { text-decoration-color: var(--field-line); }
+.tk-cls > .mk { margin-right: 9px; }
+.tk-cls .mk { --mk: 11px; }
+.tk-due { min-width: 0; }
+.tk-late { color: var(--error); font-weight: 600; margin-right: 4px; }
+.tk-none { color: var(--ink-3); }
+.tk-who { color: var(--ink-2); }
+
+/* a group: a quiet label over its rows */
+.tk-grp { display: flex; align-items: flex-end; min-height: 46px; padding: 0 8px 8px; border-bottom: var(--hair) solid var(--line); font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2); }
+
+/* Done: a close is drawn checked in its colour (ink: a close names no class), its name quieter, its figures kept */
+.tk-done { cursor: default; }
+.tk-done circle { fill: var(--cc, var(--ink)); }
+.tk-done path { stroke-dashoffset: 0; }
+.tk-row.is-closed .tk-nm { color: var(--ink-3); }
+
+/* ---------- empty: one line, at most one action ---------- */
+.tk-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 36px 8px 0; }
+.tk-empty[hidden] { display: none; }
+.tk-empty-h { font: 400 var(--t-title)/1.2 var(--display); letter-spacing: -.01em; color: var(--ink); }
+
+/* ---------- a narrower page: the name above its figures, no column head ---------- */
+@container (max-width: 760px) {
+  .tk-list { --tk-cols: var(--h-tap) minmax(0, 1fr) auto auto; }
+  .tk-cols { display: none; }
+  .tk-row { grid-template-areas: "ck nm nm nm" ". cls due min"; row-gap: 0; padding-block: 6px 8px; }
+  .tk-row > .tk-due { justify-self: end; }
+  .tk-row > .tk-cls { min-height: 32px; }
+  .tk-cls a { min-height: 32px; }
+  .tk-row > .tk-min { min-width: 64px; }
+  .tk-search { max-width: none; }
+}

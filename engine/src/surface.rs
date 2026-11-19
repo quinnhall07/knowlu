@@ -2222,6 +2222,97 @@ pub fn note_detail(vault: &Path, id: &str, today: Date, journal: &mut crate::jou
     })
 }
 
+/// How many class colours the page has (`--c1` to `--c16`); the seventeenth course wraps to `c1`.
+pub const COURSE_SLOTS: usize = 16;
+
+/// One course note, read for the page (v0.4.0 note §7): the sidebar, the domain row, the Classes
+/// list and every class colour read it. Each field is always serialised (`null` or `[]` when there
+/// is nothing); only `State::courses` itself is left out when empty.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CourseEntry {
+    /// `slug:`, else the file stem: the key a task's `course:` names (read as `grades` reads it).
+    pub slug: String,
+    /// `title:`, else the slug: the code ("ABC 101") the wizard titles a course note with.
+    pub title: String,
+    /// `name:`, the school's own name for the course.
+    pub name: Option<String>,
+    /// `status:` trimmed, as `commitments::active_courses` reads it; `None` (absent or blank) reads
+    /// as active there and on the page (M1).
+    pub status: Option<String>,
+    /// `"c1"` to `"c16"`: the course's position in slug order, wrapping after [`COURSE_SLOTS`].
+    pub slot: String,
+    /// The vault-wide status word's rule over this course's open tasks alone; `None` with none.
+    pub standing: Option<String>,
+    /// The compact codes `commitments::code_table` maps to this slug, in its (sorted) order (N7).
+    pub codes: Vec<String>,
+}
+
+/// Every readable `courses/*.md` note as a [`CourseEntry`], one per slug, in
+/// `grades::course_grades`'s order `(title lowercased, title, slug)`. A note whose frontmatter
+/// does not read is skipped, as `grades` skips it, and takes no slot. Of two notes naming one slug
+/// the first in file-name order is the course and the other is skipped, as
+/// `commitments::active_courses` keeps one note per slug.
+///
+/// * **Slot.** Position in slug (byte) order, `c{(i mod 16) + 1}`: positional, so up to sixteen
+///   classes get distinct colours, and by slug because a title can be edited. Slugs are unique
+///   here, so the slots are total and repeatable.
+/// * **Standing** (ruling 5, A3). `status_word(runway_days(..))` over the course's own active tasks
+///   (`l.ranked` whose `course` is the slug): the vault-wide word's rule on a subset, so an undated
+///   task reads `ahead` as it does vault-wide. No active task: `None`.
+/// * **Codes** (N7). The keys `code_table` gives this slug. Its warnings (a code two courses claim)
+///   are not this region's: they stay where `code_table`'s other callers put them.
+///
+/// Reads only; one listing of `courses/` and one `code_table` read per page.
+pub fn courses(vault: &Path, l: &Loaded, today: Date) -> Vec<CourseEntry> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(vault.join("courses"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    paths.sort();
+    let field = |meta: &Mapping, key: &str| meta_text(Some(meta), key).filter(|s| !s.is_empty());
+    let mut entries: Vec<CourseEntry> = paths
+        .iter()
+        .filter_map(|path| {
+            let meta = crate::ids::read_meta(path)?;
+            let stem = path.file_stem()?.to_string_lossy().to_string();
+            let slug = field(&meta, "slug").unwrap_or(stem);
+            let title = field(&meta, "title").unwrap_or_else(|| slug.clone());
+            Some(CourseEntry {
+                name: field(&meta, "name"),
+                status: field(&meta, "status").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+                slot: String::new(),
+                standing: None,
+                codes: Vec::new(),
+                slug,
+                title,
+            })
+        })
+        .collect();
+    // `paths` is in file-name order, so the first note naming a slug is the one kept.
+    let mut seen = std::collections::BTreeSet::new();
+    entries.retain(|e| seen.insert(e.slug.clone()));
+    if entries.is_empty() {
+        return entries;
+    }
+    let mut by_slug: Vec<usize> = (0..entries.len()).collect();
+    by_slug.sort_by(|&a, &b| entries[a].slug.cmp(&entries[b].slug));
+    for (i, &at) in by_slug.iter().enumerate() {
+        entries[at].slot = format!("c{}", i % COURSE_SLOTS + 1);
+    }
+    let (table, _warnings) = crate::commitments::code_table(vault);
+    for entry in &mut entries {
+        let mine: Vec<Task> =
+            l.ranked.iter().filter(|t| t.course.as_deref() == Some(entry.slug.as_str())).cloned().collect();
+        entry.standing = (!mine.is_empty()).then(|| status_word(runway_days(&mine, today, &l.cal)).to_string());
+        entry.codes = table.iter().filter(|(_, owner)| **owner == entry.slug).map(|(code, _)| code.clone()).collect();
+    }
+    entries.sort_by(|a, b| (a.title.to_lowercase(), &a.title, &a.slug).cmp(&(b.title.to_lowercase(), &b.title, &b.slug)));
+    entries
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Empty {
     pub active: bool,
@@ -2265,6 +2356,11 @@ pub struct State {
     /// vault with no planning-day note serialises exactly as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moved: Option<crate::commitments::Moved>,
+    /// Every course note (v0.4.0 note §7, [`courses`]): slot, standing and codes per class.
+    /// Omitted when empty, so a vault with no `courses/` notes (the three oracle vaults) serialises
+    /// exactly as before and the three surface references stay byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub courses: Vec<CourseEntry>,
     /// The Grades strip (grades spec §8): one entry per course with grade notes. Omitted when
     /// empty, so a vault with no `grades/` notes serialises exactly as before and the three
     /// surface references stay byte-identical.
@@ -2358,6 +2454,7 @@ fn build_state_with(
         issues_panel: issues,
         unreadable: l.unreadable.iter().map(|n| format!("tasks/{n}")).collect(),
         moved: if view == View::Today { l.moved.clone() } else { None },
+        courses: courses(vault, &l, today),
         grades: crate::grades::course_grades(vault),
         warnings: Vec::new(),
     };
@@ -5297,5 +5394,319 @@ mod evening_tests {
         assert_eq!(count, base, "a bare date is not counted overdue at 21:00");
         assert!(!listed, "and is not in the Overdue view");
         let _ = std::fs::remove_dir_all(&vault);
+    }
+}
+
+/// v0.4.0 T3: the `courses` read-model field (v0.4.0 note §7, N7, M1). Every vault here is a
+/// scratch directory holding invented courses; the three oracle fixtures are only read in place,
+/// by `build_state`, which never writes. The tests read the serialised payload, the bytes the page
+/// receives, so a key's presence, absence and `null` are all pinned.
+#[cfg(test)]
+mod courses_tests {
+    use super::tests::{pinned_now, TODAY};
+    use super::*;
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    /// A scratch vault: no classes in an 08:00-18:00 window every day, a two-hour session cap, and
+    /// empty `tasks/` and `courses/` folders.
+    fn course_vault(name: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("knowlu-courses-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["config", "tasks", "state", "courses"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(
+            dir.join("config").join("week_template.yaml"),
+            "day_start: \"08:00\"\nday_end: \"18:00\"\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  thu: []\n  \
+             fri: []\n  sat: []\n  sun: []\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("config").join("planning.yaml"),
+            "daily_effort_budget: 4.0\nslice_hours: 2.0\ndaily_approval_budget: 15\nrecurring: []\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// `courses/<stem>.md` with this frontmatter, written straight into the scratch vault.
+    fn put_course(v: &Path, stem: &str, front: &str) {
+        std::fs::write(v.join("courses").join(format!("{stem}.md")), format!("---\n{front}---\n\nInvented for a test.\n"))
+            .unwrap();
+    }
+
+    /// A one-hour task note for `course`, due `due` (no `due:` line for `None`), with this `status`.
+    fn put_task(v: &Path, slug: &str, course: &str, due: Option<&str>, status: &str) {
+        let due = due.map(|d| format!("due: {d}\n")).unwrap_or_default();
+        std::fs::write(
+            v.join("tasks").join(format!("{slug}.md")),
+            format!(
+                "---\ntitle: \"Invented {slug}\"\ncourse: {course}\n{due}effort_hours: 1.0\nimportance: 3\n\
+                 status: {status}\nprogress: 0\n---\n\nBody.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn state(v: &Path) -> State {
+        build_state(v, View::Today, TODAY, &pinned_now(), None)
+    }
+
+    /// The `courses` array exactly as the page receives it, or `None` when the key is absent.
+    fn courses_json(v: &Path) -> Option<Vec<Value>> {
+        let json: Value = serde_json::from_str(&state_json(&state(v))).unwrap();
+        json.get("courses").map(|c| c.as_array().expect("courses is an array").clone())
+    }
+
+    /// [`courses_json`], which must be present.
+    fn entries(v: &Path) -> Vec<Value> {
+        courses_json(v).expect("the payload carries a courses key")
+    }
+
+    /// One string field of every entry, in order; `None` is a JSON `null`, and a missing key panics.
+    fn column(entries: &[Value], key: &str) -> Vec<Option<String>> {
+        entries
+            .iter()
+            .map(|e| e.get(key).unwrap_or_else(|| panic!("an entry without {key}: {e}")).as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The entry whose `slug` is `slug`.
+    fn entry<'a>(entries: &'a [Value], slug: &str) -> &'a Value {
+        entries.iter().find(|e| e["slug"] == slug).unwrap_or_else(|| panic!("no entry for {slug}: {entries:?}"))
+    }
+
+    fn some(words: &[&str]) -> Vec<Option<String>> {
+        words.iter().map(|w| Some(w.to_string())).collect()
+    }
+
+    #[test]
+    fn courses_absent_without_a_courses_folder() {
+        for fixture in ["vault-s1", "vault-s1-migrated", "vault-full"] {
+            let vault = Path::new("tests/fixtures").join(fixture);
+            assert!(courses_json(&vault).is_none(), "{fixture}: no courses/, so no courses key");
+        }
+        let v = course_vault("absent");
+        std::fs::remove_dir_all(v.join("courses")).unwrap();
+        assert!(courses_json(&v).is_none(), "no courses/ folder");
+        std::fs::create_dir_all(v.join("courses")).unwrap();
+        assert!(courses_json(&v).is_none(), "an empty courses/ folder");
+        put_course(&v, "abc-101", "title: \"ABC 101\"\n");
+        assert_eq!(courses_json(&v).map(|c| c.len()), Some(1), "one course note, one entry: the key is skipped only when empty");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn courses_ordered_by_title_slotted_by_slug() {
+        let v = course_vault("order");
+        // Slug order abc, def, ghi; title order, case folded, ghi, def, abc.
+        put_course(&v, "abc-101", "title: \"Zoology\"\n");
+        put_course(&v, "def-202", "title: \"botany\"\nname: \"Botany of the Invented Plains\"\n");
+        put_course(&v, "ghi-303", "title: \"Astronomy\"\n");
+        let got = entries(&v);
+        assert_eq!(column(&got, "slug"), some(&["ghi-303", "def-202", "abc-101"]), "(title lowercased, title, slug) order");
+        assert_eq!(column(&got, "slot"), some(&["c3", "c2", "c1"]), "slots follow slug order");
+        assert_eq!(column(&got, "title"), some(&["Astronomy", "botany", "Zoology"]));
+        assert_eq!(column(&got, "name"), vec![None, Some("Botany of the Invented Plains".to_string()), None]);
+        for e in &got {
+            let mut keys: Vec<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["codes", "name", "slot", "slug", "standing", "status", "title"], "note §7's shape: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_retitle_keeps_the_slot() {
+        let v = course_vault("retitle");
+        put_course(&v, "abc-101", "title: \"Ceramics\"\n");
+        put_course(&v, "def-202", "title: \"Botany\"\n");
+        put_course(&v, "ghi-303", "title: \"Astronomy\"\n");
+        let slots = |got: &[Value]| -> BTreeMap<String, String> {
+            got.iter().map(|e| (e["slug"].as_str().unwrap().to_string(), e["slot"].as_str().unwrap().to_string())).collect()
+        };
+        let before = entries(&v);
+        assert_eq!(column(&before, "slug"), some(&["ghi-303", "def-202", "abc-101"]));
+        put_course(&v, "abc-101", "title: \"Acoustics\"\n");
+        let after = entries(&v);
+        assert_eq!(column(&after, "slug"), some(&["abc-101", "ghi-303", "def-202"]), "the retitle moves it in title order");
+        assert_eq!(slots(&after), slots(&before), "but every colour slot is its slug's");
+        assert_eq!(slots(&after)["abc-101"], "c1");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_seventeenth_course_wraps_to_c1() {
+        let v = course_vault("seventeen");
+        for n in 1..=17 {
+            put_course(&v, &format!("abc-1{n:02}"), &format!("title: \"ABC 1{n:02}\"\n"));
+        }
+        let got = entries(&v);
+        assert_eq!(got.len(), 17);
+        for n in 1..=17 {
+            let slug = format!("abc-1{n:02}");
+            assert_eq!(entry(&got, &slug)["slot"], format!("c{}", (n - 1) % 16 + 1).as_str(), "{slug}");
+        }
+        assert_eq!(entry(&got, "abc-117")["slot"], "c1", "the seventeenth wraps");
+        let first: std::collections::BTreeSet<&str> =
+            got.iter().filter(|e| e["slug"] != "abc-117").map(|e| e["slot"].as_str().unwrap()).collect();
+        assert_eq!(first.len(), 16, "sixteen courses, sixteen distinct colours");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn an_unreadable_course_note_is_skipped() {
+        let v = course_vault("unreadable");
+        std::fs::write(v.join("courses").join("aaa-000.md"), "---\ntitle: [\n---\n\nBroken.\n").unwrap();
+        put_course(&v, "bbb-111", "title: \"BBB 111\"\n");
+        let got = entries(&v);
+        assert_eq!(column(&got, "slug"), some(&["bbb-111"]), "the broken note has no entry");
+        assert_eq!(column(&got, "slot"), some(&["c1"]), "and takes no slot");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_course_without_status_is_present_and_active() {
+        let v = course_vault("status");
+        // No title and no status: present, titled by its slug, status null (active, M1).
+        put_course(&v, "abc-101", "id: crs_0000000001\n");
+        put_course(&v, "def-202", "title: \"DEF 202\"\nstatus: active\n");
+        put_course(&v, "ghi-303", "title: \"GHI 303\"\nstatus: dropped\n");
+        // A `slug:` field names the course, whatever the file is called.
+        put_course(&v, "renamed-file", "title: \"JKL 404\"\nslug: jkl-404\n");
+        let got = entries(&v);
+        assert_eq!(column(&got, "slug"), some(&["abc-101", "def-202", "ghi-303", "jkl-404"]));
+        assert_eq!(
+            column(&got, "status"),
+            vec![None, Some("active".to_string()), Some("dropped".to_string()), None],
+            "status as written; null is active"
+        );
+        assert_eq!(column(&got, "title")[0].as_deref(), Some("abc-101"), "no title: the slug");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Review fix 1: `status` is read as `commitments::active_courses` reads it (`commitments.rs`'s
+    /// trim): blank is absent (active), and padding is not part of the word.
+    #[test]
+    fn a_blank_or_padded_status_reads_as_the_engine_reads_it() {
+        let v = course_vault("trim");
+        put_course(&v, "abc-101", "title: \"ABC 101\"\nstatus: \"  \"\n");
+        put_course(&v, "def-202", "title: \"DEF 202\"\nstatus: \"active \"\n");
+        put_course(&v, "ghi-303", "title: \"GHI 303\"\nstatus: \" dropped\"\n");
+        let got = entries(&v);
+        assert_eq!(column(&got, "slug"), some(&["abc-101", "def-202", "ghi-303"]));
+        assert_eq!(
+            column(&got, "status"),
+            vec![None, Some("active".to_string()), Some("dropped".to_string())],
+            "blank reads as absent (active); padding is trimmed"
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// Review fix 2: two notes naming one slug are one course, the first in file-name order, as
+    /// `commitments::active_courses` keeps one per slug; the second takes no slot.
+    #[test]
+    fn two_notes_with_one_slug_give_one_entry() {
+        let v = course_vault("duplicate");
+        put_course(&v, "aaa-copy", "title: \"First by file name\"\nslug: def-202\n");
+        put_course(&v, "abc-101", "title: \"ABC 101\"\n");
+        put_course(&v, "def-202", "title: \"DEF 202\"\n");
+        let got = entries(&v);
+        assert_eq!(column(&got, "slug"), some(&["abc-101", "def-202"]), "one entry per slug");
+        assert_eq!(column(&got, "title"), some(&["ABC 101", "First by file name"]), "the first note in file-name order");
+        assert_eq!(column(&got, "slot"), some(&["c1", "c2"]), "the second note takes no slot");
+        assert_eq!(entries(&v), got, "and reads the same twice");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn standing_is_status_word_of_the_courses_tasks() {
+        let v = course_vault("standing");
+        let slugs = ["abc-101", "def-202", "ghi-303", "jkl-404", "mno-505", "pqr-606", "stu-707"];
+        for slug in slugs {
+            put_course(&v, slug, &format!("title: \"{}\"\n", slug.to_uppercase().replace('-', " ")));
+        }
+        // TODAY is Fri 2026-08-28; a one-hour task's slack is (its due date - 1 day) - today.
+        put_task(&v, "late", "abc-101", Some("2026-08-27"), "active"); // -2: behind
+        put_task(&v, "far", "abc-101", Some("2026-09-07"), "active"); // 9, but the minimum wins
+        put_task(&v, "close", "def-202", Some("2026-08-29"), "active"); // 0: tight
+        put_task(&v, "mid", "ghi-303", Some("2026-09-01"), "active"); // 3: steady
+        put_task(&v, "later", "jkl-404", Some("2026-09-07"), "active"); // 9: ahead
+        put_task(&v, "undated", "mno-505", None, "active"); // 999: ahead, as the vault-wide word
+        put_task(&v, "finished", "pqr-606", Some("2026-08-27"), "done"); // no open task: null
+        put_task(&v, "orphan", "zzz-999", Some("2026-08-27"), "active"); // no course note: no entry
+        let got = entries(&v);
+        let words: Vec<Option<String>> = slugs.iter().map(|s| entry(&got, s)["standing"].as_str().map(str::to_string)).collect();
+        assert_eq!(words, [some(&["behind", "tight", "steady", "ahead", "ahead"]), vec![None, None]].concat());
+        assert!(got.iter().all(|e| e.get("standing").is_some()), "null, never absent");
+        assert!(got.iter().all(|e| e["slug"] != "zzz-999"), "a task's course without a note is no entry");
+        // The vault-wide word's own rule, over the course's open tasks alone.
+        let l = load(&v, TODAY);
+        for e in &got {
+            let slug = e["slug"].as_str().unwrap();
+            let mine: Vec<Task> = l.ranked.iter().filter(|t| t.course.as_deref() == Some(slug)).cloned().collect();
+            let want = (!mine.is_empty()).then(|| status_word(runway_days(&mine, TODAY, &l.cal)).to_string());
+            assert_eq!(e["standing"].as_str().map(str::to_string), want, "{slug}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn codes_are_code_tables_claims_for_the_slug() {
+        let v = course_vault("codes");
+        // The wizard's note (`app/src/scaffold.rs`): titled by the code, the school's name, the LMS key.
+        put_course(
+            &v,
+            "ghi-303",
+            "title: \"GHI 303\"\nname: \"Invented Studies\"\nslug: ghi-303\ncode: \"UAGHI303Fall2026\"\nstatus: active\n",
+        );
+        // A long title carries its code at the front.
+        put_course(&v, "abc-101", "title: \"ABC 101 \u{2013} Intro\"\n");
+        // Only an LMS `code:` names this one.
+        put_course(&v, "seminar", "title: \"Invented Seminar\"\ncode: \"202640-JKL-404-101\"\n");
+        // Only `config/ingest.yaml`'s `course_map` names this one.
+        put_course(&v, "studio", "title: \"Invented Studio\"\n");
+        std::fs::write(v.join("config").join("ingest.yaml"), "course_map:\n  \"PQR 505\": studio\n").unwrap();
+        // Two notes claim one code: `code_table` drops it from both and keeps its warning to itself.
+        put_course(&v, "lab-a", "title: \"STU 606\"\n");
+        put_course(&v, "lab-b", "title: \"STU 606 Lab\"\n");
+        let (table, warnings) = crate::commitments::code_table(&v);
+        assert!(warnings.iter().any(|w| w.contains("STU606")), "setup: the clash warns: {warnings:?}");
+        let s = state(&v);
+        let json: Value = serde_json::from_str(&state_json(&s)).unwrap();
+        let got = json["courses"].as_array().cloned().unwrap_or_default();
+        let codes = |slug: &str| -> Vec<String> {
+            let list = entry(&got, slug)["codes"].as_array().unwrap_or_else(|| panic!("{slug}: codes is an array"));
+            list.iter().map(|c| c.as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(codes("abc-101"), ["ABC101"], "a long title");
+        assert_eq!(codes("ghi-303"), ["GHI303"], "the wizard's note");
+        assert_eq!(codes("seminar"), ["JKL404"], "an LMS code:");
+        assert_eq!(codes("studio"), ["PQR505"], "a course_map key");
+        assert!(codes("lab-a").is_empty() && codes("lab-b").is_empty(), "a dropped code is nobody's");
+        for e in &got {
+            let slug = e["slug"].as_str().unwrap();
+            let claims: Vec<String> = table.iter().filter(|(_, owner)| owner.as_str() == slug).map(|(c, _)| c.clone()).collect();
+            assert_eq!(codes(slug), claims, "{slug}: exactly code_table's claims, in its order");
+        }
+        assert!(!s.warnings.iter().any(|w| w.contains("STU606")), "code_table's warnings stay where they are: {:?}", s.warnings);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn revision_changes_when_a_course_note_changes() {
+        let v = course_vault("revision");
+        put_course(&v, "abc-101", "title: \"ABC 101\"\n");
+        let first = state(&v).revision;
+        assert_eq!(state(&v).revision, first, "an unchanged vault keeps its revision");
+        put_course(&v, "abc-101", "title: \"ABC 101 \u{2013} Intro\"\n");
+        let retitled = state(&v).revision;
+        assert_ne!(retitled, first, "a retitled course repaints");
+        put_course(&v, "abc-101", "title: \"ABC 101 \u{2013} Intro\"\nstatus: dropped\n");
+        assert_ne!(state(&v).revision, retitled, "a status change repaints");
+        let _ = std::fs::remove_dir_all(&v);
     }
 }

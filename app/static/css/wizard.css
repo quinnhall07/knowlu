@@ -1,0 +1,95 @@
+/* Knowlu app: the wizard (v0.4.0 note §6; plan §5 T21). The ten panels drawn in #boot (html.mode-boot: no sidebar, no
+   center; the band and its caption buttons stay above). One column, the wordmark and "step N of 10" at its head, one
+   panel, then the nav: Back as a quiet control and Next as the one red action. Every color, face and size is a role
+   from tokens.css or shell.css; a control has no outline at rest (a fill or a bare label), every target is 44px.
+   .wbtn and .wiz-box are shared with the picker (picker.css). */
+
+.wiz { min-height: 100%; }
+.wiz-in { max-width: 800px; margin: 0 auto; padding: 36px 48px 40px; }
+.wiz-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 36px; }
+.wiz-wm { margin: 0; font: 400 var(--t-logo)/1 var(--display); color: var(--ink); white-space: nowrap; }
+.wiz-wm b { font-size: var(--t-logo); }
+.wiz-n { font: 500 var(--t-small)/1.2 var(--sans); color: var(--ink-3); white-space: nowrap; }
+
+/* a panel: its heading in the display face, a lede, then its rows */
+.wiz-panel h2 { margin: 0 0 14px; font: 400 44px/1.08 var(--display); letter-spacing: -.016em; color: var(--ink); text-wrap: balance; overflow-wrap: anywhere; }
+/* a heading takes focus when its panel opens (renderWizard); it is not a control, so it draws no ring */
+.wiz-panel h2:focus { outline: none; }
+.wiz-panel h3 { margin: 32px 0 6px; font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2); }
+.wiz-panel .lede { max-width: 38em; margin: 0 0 18px; font: 400 var(--t-label)/1.45 var(--sans); color: var(--ink-2); text-wrap: pretty; }
+.wiz-p { max-width: 40em; margin: 0 0 12px; font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-2); text-wrap: pretty; }
+.wiz-panel .meta { max-width: 40em; margin: 8px 0; font: 400 var(--t-fine)/1.45 var(--sans); color: var(--ink-3); text-wrap: pretty; }
+.wiz-panel .meta b { font-weight: 600; color: var(--ink-2); }
+.wiz-panel p.meta:empty { display: none; }
+.wiz-row .meta { margin: 0; }
+
+.wiz-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin: 14px 0; }
+.wiz-row > .field { flex: 1 1 260px; width: auto; min-width: 0; }
+.wiz-row > .meta { flex: 1 1 220px; min-width: 0; }
+.wiz-panel > .field { max-width: 600px; margin: 10px 0 0; }
+.wiz-row > .wiz-state { flex: 0 1 160px; }
+.wiz-slots > .wiz-tz { flex: 2 1 240px; }
+.wiz-slots > .wiz-slot { flex: 1 1 110px; }
+
+/* a check box with its words: a 20px box in a 44px row */
+.wiz-box { display: flex; align-items: center; gap: 12px; min-height: var(--h-tap); cursor: pointer; font: 400 var(--t-label)/1.35 var(--sans); color: var(--ink); }
+.wiz-box input { flex: none; width: 20px; height: 20px; margin: 0; accent-color: var(--ink); cursor: pointer; }
+.wiz-box a { text-decoration: underline; text-decoration-thickness: var(--underline); text-decoration-color: var(--field-line); text-underline-offset: var(--underline-off); transition: color var(--fast) var(--ease), text-decoration-color var(--fast) var(--ease); }
+.wiz-box a:hover, .wiz-box a:focus-visible { color: var(--accent); text-decoration-color: var(--accent); }
+
+/* the second fill: a button with a soft fill, beside the inverted one (.ibtn); never red */
+.wbtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: var(--h-tap); padding: 8px 18px;
+  border: 0; border-radius: var(--r-control); background: var(--line-2); color: var(--ink); text-align: center;
+  font: 600 var(--t-small)/1.2 var(--sans); cursor: pointer;
+  transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.wbtn:hover, .wbtn:focus-visible { background: var(--line); }
+.wbtn:active { transform: translateY(var(--press)); }
+.wbtn:focus-visible { outline-offset: var(--focus-off); }
+.wbtn:disabled, .wiz .ibtn:disabled, .pick .ibtn:disabled { opacity: .55; cursor: default; transform: none; }
+.wiz .ibtn { height: auto; min-height: var(--h-tap); padding: 8px 20px; white-space: normal; text-align: center; line-height: 1.2; }
+
+/* the brand marks: the sources' own colors; marks with dark ink parts turn light on the dark ground */
+.wiz-logo-b img { flex: none; height: 18px; width: auto; max-width: 96px; }
+.wiz-mark { flex: none; width: 28px; height: 28px; }
+:root[data-theme="dark"] :is(.wiz, .pick) img.inv { filter: brightness(0) invert(.92); }
+
+/* the school typeahead's rows */
+.wiz-hits { max-width: 600px; margin: 4px 0 0; }
+.wiz-hits:empty { display: none; }
+.wiz-hits .hit { display: flex; flex-wrap: wrap; align-items: center; min-height: var(--h-tap); padding: 8px 14px; border-radius: var(--r-control); cursor: pointer; font: 500 var(--t-small)/1.3 var(--sans); color: var(--ink); transition: background-color var(--fast) var(--ease); }
+.wiz-hits .hit:hover, .wiz-hits .hit:focus-visible { background: var(--line-2); }
+.wiz-hits .hit .meta { margin: 0 0 0 4px; font-weight: 400; color: var(--ink-3); }
+
+/* the coursework logins: the mark, then the two fields */
+.wiz-login { display: grid; grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 12px 16px; margin: 14px 0; }
+.wiz-login img { width: 88px; height: 24px; object-fit: contain; object-position: left center; }
+
+/* the class list and the mapping: rows on hairlines */
+.wiz-list { margin: 8px 0; }
+.wiz-list:empty { display: none; }
+.wiz-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 56px; padding: 6px 0; border-bottom: var(--hair) solid var(--line); }
+.wiz-item:first-child { border-top: var(--hair) solid var(--line); }
+.wiz-item-t { flex: 1 1 220px; min-width: 0; font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
+.wiz-map-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 240px) auto; column-gap: 16px; }
+.wiz-map-row > .field { width: 100%; min-width: 0; }
+.wiz-hint { display: block; margin-top: 2px; font: 400 var(--t-fine)/1.3 var(--sans); color: var(--ink-3); }
+
+/* the nav: the refusal at the left, Back, then Next */
+.wiz-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px 16px; margin-top: 36px; padding-top: 20px; border-top: var(--hair) solid var(--line); }
+.wiz-err { flex: 1 1 240px; min-width: 0; font: 600 var(--t-small)/1.35 var(--sans); color: var(--error); }
+.wiz-err.flash { animation: wiz-again var(--med) var(--ease); }
+@keyframes wiz-again { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .wiz-err.flash { animation: none; } }
+
+/* the 820 x 600 window */
+@media (max-width: 1000px) {
+  .wiz-in { padding: 24px 20px 28px; }
+  .wiz-hd { margin-bottom: 24px; }
+  .wiz-panel h2 { font-size: 36px; }
+  .wiz-login { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .wiz-login img { grid-column: 1 / -1; }
+  .wiz-map-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; padding: 10px 0; }
+  .wiz-map-row > .wiz-item-t { grid-column: 1 / -1; }
+}
