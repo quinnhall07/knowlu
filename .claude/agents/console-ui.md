@@ -1,9 +1,9 @@
 ---
 name: console-ui
 description: >-
-  Front-end work on the app window and the marketing site: app/static (console.js, console.css,
-  index.html), site/*.html and site.css, and the screenshot and check scripts under scripts/ that drive
-  them. Use for layout, styling, copy, view rendering from the surface JSON, and small interaction
+  Front-end work on the app window and the marketing site: app/static (index.html, css/, js/ with
+  pages/ and carried/), site/*.html and site.css, and the fixture harness under scripts/ui-fixture/
+  and the check scripts that drive them. Use for layout, styling, copy, view rendering from the surface JSON, and small interaction
   changes. Do not use for anything that changes what the read model computes (engine/src/surface.rs),
   for Tauri command behavior, or for vault writes; use contract-engineer or the main session. Use instead of impeccable:* agents in this repo.
 model: claude-opus-5-5
