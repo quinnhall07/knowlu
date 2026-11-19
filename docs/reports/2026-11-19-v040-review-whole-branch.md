@@ -214,3 +214,31 @@ No report file was written; this message is the report, for `C:/Users/danie/GitH
 
 ---
 Reviewer: `reviewer` (Opus, high), read-only; report text saved by the main session.
+
+## Re-check after the fixes (2026-11-19): PASS
+
+Fixes: I1 in f832549d, after a contract review PASS (three minors fixed); I2 and M2 in dcd2b1c2. M1 (docs) is in a0a2d545 and e9956033. M3 is a pre-tag line in plan §8 for Quinn's ruling.
+
+**I1 is closed (f832549d).** Both window-state builders now skip the initial state of `"main"`, `grades::WINDOW`, `mail::WINDOW` and `mail::POPUP` (`app/src/main.rs:161`, `:222`). That means a saved maximized state can no longer reach `ShowWindow(SW_MAXIMIZE)` for a window built hidden. The new `window_chrome::every_window_built_hidden_is_in_the_skip_list` scans every `WebviewWindowBuilder` chain under `app/src`, and its `.visible(visible)` match covers the mail step. Saving on close is unchanged. The commit matches what the report described.
+
+**I2 is closed (dcd2b1c2).** Each point you asked about:
+- **No spurious listeners.** `data.js:80-82` copies `now` into the state on screen and then returns on an unchanged revision without calling `emit`. Only `onPoll` subscribers run.
+- **Held state.** A waiting held state also gets the new `now` (`data.js:81`). Note that the only hold in `data.js` is the hover hold on a list, which is the one this covers.
+- **Focus.** Home's aside redraws only `#ha-sched`, and puts focus back on the same `[data-lane-remove]` button. The "N earlier" toggle sits outside `#ha-sched`, so it is never replaced. The Calendar moves its now line, gutter label and `is-past` classes in place, so the grid node and focus stay.
+- **Repaint.** Both pages compare the minute and stop on an unchanged one, so no page repaints every poll.
+- **Home's marks at a block's end.** The schedule redraws when the past count changes or when the now mark's presence flips, so the next block and the now mark move at a block's end and at the first block's start.
+- **Calendar day rollover.** It reloads `your_week` and redraws, and `draw()` resets the drawn day and minute.
+- **Text.** The new text is set only with `textContent`, plus `innerHTML` built through `h()` in `drawSched`.
+- **The red (53236506) failed as stated.** It sent the same revision twice with `now` at 09:01 and then 11:30. The fix turns it green.
+
+**M2 is closed.** `serve.py:35-53` reads `app.security.csp` from `app/tauri.conf.json` and appends `'self'` to `connect-src` only. Every other directive is the shipped one, and the server exits if there is no `connect-src` to widen. The stub is loaded as the external `__fixture__/stub.js`, which the shipped CSP allows as `'self'`, so the CSP needed no exception for it.
+
+**Shell rules hold.** There is no new `<script>` or `<link>`, and `index.html` is unchanged.
+
+**Minor findings (none blocks the PASS):**
+- **m1** `app/static/js/shell.js:375`: `drawClock` now also runs from `onPoll`, which fires three times per poll (state, `grades_status`, `mail_status`). Each run clears `#clock` and rebuilds its two spans even when the minute has not changed. It is `aria-hidden`, so a screen reader announces nothing. But it is the one node that is rewritten on every poll. Fix: return early when the date and clock text are unchanged.
+- **m2** `app/static/js/pages/calendar.js:298`: the day-rollover branch has no test, because `t05.py` stays on 2026-08-28. The page also keeps its current window (`FROM` is not re-anchored). So a week view left open from Sunday into Monday shows last week, with no today column and no now line. This matches the old `update()` behaviour, so it is not a regression. Fix: add a check that crosses midnight, and decide whether a window still anchored on yesterday should follow today.
+
+Nothing was written to disk: `docs/reports/2026-11-19-v040-review-whole-branch.md` already exists and the hook refuses an existing file. This reply is the text for you to append to `C:\Users\danie\GitHub\knowlu\.claude\worktrees\v040-ui\docs\reports\2026-11-19-v040-review-whole-branch.md`.
+
+The re-check's m1 (the clock redrawn on every poll) and m2 (the Calendar's day rollover is untested, and a week left open across midnight keeps last week) are recorded as v0.4.1 candidates.
