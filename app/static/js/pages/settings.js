@@ -212,28 +212,11 @@
     notify("mail", s);
   }
 
-  /* ---- a Saved, Undo toast held ten seconds (KnowluKit.toast's six are too short to change your mind) ---- */
+  /* ---- a Saved, Undo toast held ten seconds (the kit's default six are too short to change your mind), one at a time ---- */
   function undoToast(text, action, fn) {
-    var host = byId("toasts");
-    if (!host) { return null; }
     if (TOAST && TOAST.parentNode) { TOAST.parentNode.removeChild(TOAST); }
-    var t = document.createElement("div");
-    t.className = "toast";
-    t.setAttribute("role", "status");
-    var line = document.createElement("span");
-    line.textContent = text;
-    t.appendChild(line);
-    var b = document.createElement("button");
-    b.type = "button";
-    b.className = "tbtn";
-    b.textContent = action;
-    var gone = function () { if (t.parentNode) { t.parentNode.removeChild(t); } };
-    var timer = setTimeout(gone, 10000);
-    b.addEventListener("click", function () { clearTimeout(timer); gone(); fn(); });
-    t.appendChild(b);
-    host.appendChild(t);
-    TOAST = t;
-    return t;
+    TOAST = KnowluKit.toast(text, action, fn, false, 10000);
+    return TOAST;
   }
 
   /* ---- About you: "How you like to work". PREFS.loaded is the text profile last returned, the expected of a save.

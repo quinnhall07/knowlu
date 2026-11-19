@@ -99,7 +99,7 @@ PROBE = """() => {
 def registered_routes():
     """The routes a page registers itself for (`KnowluRouter.add("<name>"` under js/pages/): a route with no page leaves #center empty."""
     found = set()
-    for f in (REPO / "app" / "static" / "next" / "js").rglob("*.js"):
+    for f in (serve.ROOT / "js").rglob("*.js"):
         found.update(re.findall(r'KnowluRouter\.add\(\s*"([a-z]+)"', f.read_text(encoding="utf-8")))
     return found
 

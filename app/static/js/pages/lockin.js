@@ -4,7 +4,8 @@
      The queue   Home's order (Do today's rows, then Recommended's), open rows only, from the chosen id (the route's
                  argument); an id not in it, or none, starts at the lead. Taken once, when the page opens: the page
                  never ranks and never reorders under the student.
-     Done        the kit's check (KnowluKit.check: set_fields {progress: 100, status: "done"}), from Done or the ring;
+     Done        the kit's check (KnowluKit.check: set_fields {progress: 100, status: "done"}), quiet (the beat's
+                 Undo is the one Undo, so the kit shows no Done toast), from Done or the ring;
                  a refused check stays on the assignment. Then the beat: what is left, the finished one (checked, with
                  Undo, the kit's uncheck), the next one, and Start next in the next class's colour. It waits for Start
                  next. With nothing left, the closing page: what was done, the time focused, Home.
@@ -227,7 +228,7 @@
     var ring = ROOT.querySelector(".lk-ring[data-lk-done]");
     if (ring) { ring.setAttribute("aria-pressed", "true"); }
     var old = typeof cur.progress_pct === "number" ? cur.progress_pct : 0;
-    KnowluKit.check(cur).then(function (env) {
+    KnowluKit.check(cur, { quiet: true }).then(function (env) {
       BUSY = false;
       if (!ROOT || QUEUE[POS] !== cur) { return; }
       if (!env || !env.ok) {

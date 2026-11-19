@@ -34,7 +34,7 @@ fn lockin_queue_is_homes_order_and_stores_nothing() {
     assert!(commands_sent(&js).is_empty(), "Lock in sends no command of its own: {:?}", commands_sent(&js));
 }
 
-/// Note §4: Done is the check (`KnowluKit.check`: `set_fields {progress: 100, status: "done"}`), and
+/// Note §4: Done is the check (`KnowluKit.check`: `set_fields {progress: 100, status: "done"}`), quiet, and
 /// the beat's Undo is its Undo (`KnowluKit.uncheck`). The ring on the field is the page's own button,
 /// not the kit's `data-ck`, so one press writes once. Then the beat: what is left, the finished one,
 /// the next one, Start next; with nothing left, the closing page and Home. End leaves for Home.
@@ -42,7 +42,7 @@ fn lockin_queue_is_homes_order_and_stores_nothing() {
 fn lockin_done_is_check() {
     let js = lockin_js();
     let done = fn_body(&js, "function finish(");
-    assert!(done.contains("KnowluKit.check(cur)"), "Done is the kit's check: {done}");
+    assert!(done.contains("KnowluKit.check(cur, { quiet: true })"), "Done is the kit's check, quiet: the beat is its Undo, so no Done toast (T05): {done}");
     assert!(done.contains("if (!env || !env.ok)"), "a refused check stays on the assignment: {done}");
     let undo = fn_body(&js, "function undo(");
     assert!(undo.contains("KnowluKit.uncheck("), "the beat's Undo is the kit's uncheck: {undo}");

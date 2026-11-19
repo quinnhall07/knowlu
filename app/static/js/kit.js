@@ -17,10 +17,13 @@
    KnowluKit.checkHtml(row)      the one check control for a task row: a ring in the row's class colour; done, filled
                                  with it (A8; ink with no course entry). A press anywhere on the page writes through
                                  check / uncheck below, so a page only draws it.
-   KnowluKit.check(row)          set_fields {progress: 100, status: "done"}, then a toast with Undo
+   KnowluKit.check(row, opts)    set_fields {progress: 100, status: "done"}, then a toast with Undo; {quiet: true} shows
+                                 no Done toast, for a page with an Undo of its own (Lock in's beat). A refusal is said.
    KnowluKit.uncheck(row, old)   set_fields {progress: old, status: "active"} (the Undo)
    KnowluKit.markHtml(course)    the class mark (.mk in the course's slot; ink with no entry)
-   KnowluKit.toast(text, action, fn, isError)   a quiet line at the foot of the window, with one optional action
+   KnowluKit.toast(text, action, fn, isError, ms)   a quiet line at the foot of the window, with one optional action;
+                                 it closes after ms (6 s, or 8 s for an error, when ms is not a number) and answers its
+                                 element, so a page that keeps one toast at a time can remove the last one
    KnowluKit.refusal(env)        the sentence for a refused envelope
    KnowluKit.watchSeen()         after a paint: object_seen once per [data-id] that stays 60% visible for 2 s
    KnowluKit.startLook()         the end-of-look stamp: mark_seen on blur and when the page is hidden (R37), never at boot
@@ -54,9 +57,9 @@
   }
 
   /* ---- toasts ---- */
-  function toast(text, action, fn, isError) {
+  function toast(text, action, fn, isError, ms) {
     var host = document.getElementById("toasts");
-    if (!host) { return; }
+    if (!host) { return null; }
     var t = document.createElement("div");
     t.className = "toast" + (isError ? " is-error" : "");
     t.setAttribute("role", isError ? "alert" : "status");
@@ -74,7 +77,8 @@
     }
     while (host.children.length >= 3) { host.removeChild(host.firstChild); }
     host.appendChild(t);
-    setTimeout(gone, isError ? 8000 : 6000);
+    setTimeout(gone, typeof ms === "number" ? ms : (isError ? 8000 : 6000));
+    return t;
   }
 
   /* ---- the check control ---- */
@@ -190,12 +194,12 @@
     owedHtml: owedHtml,
     setOwed: function (on) { OWED = !!on; },
     isOwed: function () { return OWED; },
-    check: function (row) {
+    check: function (row, opts) {
       var old = typeof row.progress_pct === "number" && row.progress_pct < 100 ? row.progress_pct : 0;
       return KnowluData.call("set_fields", { id: row.id, fields: { progress: 100, status: "done" } }).then(function (env) {
         if (env && env.ok) {
           ev("edit_committed", row.id, "progress");
-          toast("Done", "Undo", function () { KIT.uncheck(row, old); });
+          if (!(opts && opts.quiet)) { toast("Done", "Undo", function () { KIT.uncheck(row, old); }); }
         } else {
           toast(refusal(env), null, null, true);
         }

@@ -2,9 +2,9 @@
 
 Binds 127.0.0.1 on a port the OS picks (port 0) and serves:
 
-  /index.html?set=<set>       the shipped document from app/static/next, with one <script> added at the top of
+  /index.html?set=<set>       the shipped document from app/static, with one <script> added at the top of
                               <head>: the stub below, which loads before prefs.js
-  /<path>                     any other file under app/static/next, unchanged
+  /<path>                     any other file under app/static, unchanged
   /__fixture__/stub.js        the stub host (STUB, below)
   /__fixture__/envelopes/...  the staged envelopes (envelopes/<set>-{today,all}.json, <set>-answers.json)
 
@@ -23,8 +23,8 @@ import urllib.parse
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
-# The page's root. T23 (the swap) moves this one line to app/static.
-ROOT = REPO / "app" / "static" / "next"
+# The page's root (T23, the swap, moved it here from app/static/next).
+ROOT = REPO / "app" / "static"
 ENVELOPES = HERE / "envelopes"
 
 STUB = r"""

@@ -56,8 +56,8 @@
       out[iso(d)] = [];
     }
     list(week && week.commitments).forEach(function (cm) {
-      var first = cm["from"] ? String(cm["from"]).slice(0, 10) : "";
-      var last = cm["until"] ? String(cm["until"]).slice(0, 10) : "";
+      var first = cm.from ? String(cm.from).slice(0, 10) : "";
+      var last = cm.until ? String(cm.until).slice(0, 10) : "";
       var slot = slotOf(cm.course);
       list(cm.meets).forEach(function (m, mi) {
         var s = mins(m.start), e = mins(m.end);

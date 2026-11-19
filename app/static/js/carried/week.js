@@ -262,7 +262,7 @@
     return '<span class="wk-card">' + h(words) + "</span>";
   }
   function changedHtml(e, ctx) {
-    return regTitle(e.note, null, ctx.commitments) + ": " + h(regField(e.field)) + " " + h(regValue(e["from"])) + " → " + h(regValue(e.to));
+    return regTitle(e.note, null, ctx.commitments) + ": " + h(regField(e.field)) + " " + h(regValue(e.from)) + " → " + h(regValue(e.to));
   }
   function endedHtml(e, ctx) {
     var tail = e.kept_yours ? KEPT_YOURS_HTML : "";

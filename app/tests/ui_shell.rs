@@ -741,9 +741,9 @@ fn mail_derived_text_renders_inert() {
         assert!(kit.contains(ch), "h escapes to {ch}");
     }
     for (f, code) in all_code() {
-        for (n, line, upto) in field_reads(&code, &MAIL_FIELDS) {
+        for (n, line, upto) in mail_reads(&code) {
             if HTML_SINKS.iter().any(|s| line.contains(s)) || line.contains('<') {
-                assert!(read_is_safe(line, &upto), "{f}:{n}: a mail field in markup outside h(): {}", line.trim());
+                assert!(read_is_safe(&line, &upto), "{f}:{n}: a mail field in markup outside h(): {}", line.trim());
             }
         }
     }
@@ -755,8 +755,8 @@ fn mail_derived_text_renders_inert() {
 #[test]
 fn no_mail_field_reaches_the_dom_without_h() {
     for (f, code) in all_code() {
-        for (n, line, upto) in field_reads(&code, &MAIL_FIELDS) {
-            assert!(read_is_safe(line, &upto), "{f}:{n}: a mail field outside h(): {}", line.trim());
+        for (n, line, upto) in mail_reads(&code) {
+            assert!(read_is_safe(&line, &upto), "{f}:{n}: a mail field outside h(): {}", line.trim());
         }
         for (n, line, upto) in field_reads(&code, &["title", "why"]) {
             let var = upto.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("");
@@ -996,4 +996,99 @@ fn dark_floating_surfaces_keep_fields_and_segments_visible() {
             assert!(!code.contains(patch), "{f}: a local dark-theme patch ({patch})");
         }
     }
+}
+
+// ---- shell polish for the swap (T05, before T23) ------------------------------------------------
+
+/// The fields only a mail-derived card or row carries; `from` is a common word (a commitment's first
+/// day, a registrar change's old value), so it counts as a mail field only on an object that carries one
+/// of these too.
+const MAIL_ONLY: [&str; 3] = ["mail_date", "evidence", "sender"];
+
+/// `x["field"]` and `x['field']` read as `x.field` for every mail field, so a bracket read is scanned
+/// like a dot read.
+fn dot_brackets(code: &str) -> String {
+    let mut out = code.to_string();
+    for f in MAIL_FIELDS {
+        for q in ['"', '\''] {
+            out = out.replace(&format!("[{q}{f}{q}]"), &format!(".{f}"));
+        }
+    }
+    out
+}
+
+/// The object a read is made on: `c` for `h(c.from` up to `.from`.
+fn receiver<'a>(upto: &'a str, field: &str) -> &'a str {
+    let base = &upto[..upto.len() - field.len() - 1];
+    base.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("")
+}
+
+/// Every read of a mail field in `code` (dot or bracket), as (line number, line, the line up to the end
+/// of the read): every `mail_date`, `evidence` and `sender`, and `from` only on an object the same file
+/// also reads one of those on. The scan exists for the mail card and the applied rows, so a
+/// commitment's `cm.from` is not a mail field.
+fn mail_reads(code: &str) -> Vec<(usize, String, String)> {
+    let code = dot_brackets(code);
+    let mut mail_objects = BTreeSet::new();
+    for (_, _, upto) in field_reads(&code, &MAIL_ONLY) {
+        let f = MAIL_ONLY.iter().find(|f| upto.ends_with(&format!(".{f}"))).unwrap();
+        mail_objects.insert(receiver(&upto, f).to_string());
+    }
+    let mut out: Vec<(usize, String, String)> = field_reads(&code, &MAIL_ONLY).into_iter().map(|(n, l, u)| (n, l.to_string(), u)).collect();
+    for (n, line, upto) in field_reads(&code, &["from"]) {
+        if mail_objects.contains(receiver(&upto, "from")) { out.push((n, line.to_string(), upto)); }
+    }
+    out
+}
+
+/// The narrowed mail scan: it flags a mail field read outside `h()` on a mail object, dot or bracket, and
+/// leaves a `from` on an object that carries no mail field alone, so the Calendar reads a commitment's
+/// `cm.from` plainly (the bracket workaround is gone).
+#[test]
+fn the_mail_scan_reads_mail_objects_and_bracket_reads() {
+    for bad in [
+        "var who = x[\"from\"] + \" \"; var q = h(x.evidence);",
+        "r = '<p>' + c['sender'] + '</p>';",
+        "r = h(m.when) + m[\"mail_date\"];",
+        "t = c.from; u = c.mail_date ? h(c.mail_date) : \"\";",
+    ] {
+        let reads = mail_reads(bad);
+        assert!(reads.iter().any(|(_, l, u)| !read_is_safe(l, u)), "should be rejected: {bad}");
+    }
+    for good in ["r = h(c[\"from\"]) + h(c.evidence);", "r = c.from ? h(c.from) : \"\"; s = h(c.sender);", "var first = cm.from ? String(cm.from).slice(0, 10) : \"\";", "var v = e.from + e.to;"] {
+        let reads = mail_reads(good);
+        assert!(reads.iter().all(|(_, l, u)| read_is_safe(l, u)), "should pass: {good}");
+    }
+    assert!(mail_reads("var a = cm.from; var b = String(cm[\"from\"]);").is_empty(), "a from on an object with no mail field is not a mail read");
+    let deck = code_of("js/carried/deck.js");
+    assert!(mail_reads(&deck).iter().filter(|(_, _, u)| u.ends_with("c.from")).count() >= 2, "the deck's card line still has its from reads scanned");
+    let cal = code_of("js/pages/calendar_data.js");
+    assert!(cal.contains("cm.from ? String(cm.from)") && !cal.contains("cm[\"from\"]") && !cal.contains("cm[\"until\"]"), "the Calendar reads a commitment's from and until plainly");
+}
+
+/// `KnowluKit.toast(text, action, fn, isError, ms)`: an optional duration, 6 s (8 s for an error) when it
+/// is not a number; it answers the toast's element, so a page that keeps one toast at a time can remove
+/// the last one.
+#[test]
+fn the_toast_takes_an_optional_duration() {
+    let kit = code_of("js/kit.js");
+    let toast = fn_body(&kit, "function toast(");
+    assert!(toast.starts_with("function toast(text, action, fn, isError, ms) {"), "the duration is the fifth argument: {toast}");
+    assert!(toast.contains("setTimeout(gone, typeof ms === \"number\" ? ms : (isError ? 8000 : 6000));"), "the duration, else the defaults");
+    assert!(toast.contains("return t;"), "it answers the element");
+    assert!(read("js/kit.js").contains("KnowluKit.toast(text, action, fn, isError, ms)"), "the header names the new argument");
+}
+
+/// `KnowluKit.check(row, {quiet: true})` writes the same `set_fields` and shows no "Done · Undo" toast,
+/// for a page with an Undo of its own (Lock in's beat). A refusal is still said.
+#[test]
+fn a_quiet_check_shows_no_done_toast() {
+    let kit = code_of("js/kit.js");
+    let check = fn_body(&kit, "check: function (");
+    assert!(check.starts_with("check: function (row, opts) {"), "check takes options: {check}");
+    let quiet = check.find("!(opts && opts.quiet)").expect("the Done toast is skipped when quiet");
+    let done = check.find("toast(\"Done\", \"Undo\"").expect("the Done toast");
+    assert!(quiet < done, "the quiet test guards the Done toast: {check}");
+    assert!(check.contains("toast(refusal(env), null, null, true)"), "a refusal is still said, quiet or not");
+    assert!(read("js/kit.js").contains("KnowluKit.check(row, opts)"), "the header names the option");
 }

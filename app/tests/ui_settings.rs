@@ -215,6 +215,17 @@ fn settings_offers_undo_for_preferences() {
     assert!(!u.contains(".value"), "never the text box's value");
 }
 
+/// T05's toast duration, adopted: the Saved, Undo toast is the kit's toast held ten seconds, one at a time (the last
+/// one is removed when a new save lands), not a toast of Settings' own.
+#[test]
+fn the_undo_toast_is_the_kits_toast_held_ten_seconds() {
+    let js = js();
+    let u = fn_body(&js, "function undoToast(");
+    assert!(u.contains("KnowluKit.toast(text, action, fn, false, 10000)"), "the kit's toast, ten seconds: {u}");
+    assert!(u.contains("TOAST.parentNode.removeChild(TOAST)") && u.contains("TOAST = "), "one Saved toast at a time");
+    assert!(!u.contains("createElement") && !u.contains("setTimeout("), "no toast of its own: {u}");
+}
+
 /// Re-homed: "Campus events", the four lists, read from `profile` and saved as four lists; the disclosure keeps every
 /// fixed fact on its own line.
 #[test]

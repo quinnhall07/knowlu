@@ -32,7 +32,7 @@ fn commitments_expand_per_day_and_match_by_codes() {
     let js = data_js();
     assert!(js.contains("window.KnowluCalData = "), "calendar_data.js publishes KnowluCalData");
     let expand = fn_body(&js, "function expand(");
-    for f in ["meets", "days", "start", "end", "\"from\"", "\"until\""] {
+    for f in ["meets", "days", "start", "end", "cm.from", "cm.until"] {
         assert!(expand.contains(f), "expand reads each commitment's {f}");
     }
     assert!(js.contains("[\"mon\", \"tue\", \"wed\", \"thu\", \"fri\", \"sat\", \"sun\"]"), "the engine's day keys, Monday first");

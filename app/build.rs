@@ -69,7 +69,7 @@ fn stage_sidecar_placeholder() {
 
     let Ok(target) = std::env::var("TARGET") else { return };
     // The third and last spelling of the sidecar stem. `scripts/release.ps1` cross-checks its own
-    // against `bundle.externalBin`, and `app/tests/static_assets.rs` checks this one against the
+    // against `bundle.externalBin`, and `app/tests/bundle_config.rs` checks this one against the
     // same config, so the three cannot drift apart unnoticed.
     let path = format!("binaries/knowlu-engine-{target}.exe");
     if std::path::Path::new(&path).exists() {

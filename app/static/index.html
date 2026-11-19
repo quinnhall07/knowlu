@@ -4,275 +4,106 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Knowlu</title>
-<link rel="stylesheet" href="console.css">
+<!-- prefs.js runs first and blocks: it sets the theme, the reading font, the text size and the rail on <html>
+     before the first stylesheet, so the first paint is already right (note D4). -->
+<script src="js/prefs.js"></script>
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/shell.css">
+<link rel="stylesheet" href="css/slots.css">
+<!-- one stylesheet per page or surface, each owned by its page task (plan §4) -->
+<link rel="stylesheet" href="css/home.css">
+<link rel="stylesheet" href="css/home_aside.css">
+<link rel="stylesheet" href="css/lockin.css">
+<link rel="stylesheet" href="css/tasks.css">
+<link rel="stylesheet" href="css/calendar.css">
+<link rel="stylesheet" href="css/classes.css">
+<link rel="stylesheet" href="css/details.css">
+<link rel="stylesheet" href="css/deck.css">
+<link rel="stylesheet" href="css/settings.css">
+<link rel="stylesheet" href="css/mail.css">
+<link rel="stylesheet" href="css/week.css">
+<link rel="stylesheet" href="css/status.css">
+<link rel="stylesheet" href="css/sheets.css">
+<link rel="stylesheet" href="css/wizard.css">
+<link rel="stylesheet" href="css/picker.css">
+<!-- the shell's scripts, then the pages, the carried surfaces, the wizard and the picker. Every module registers
+     itself, so the order past "shell first" does not matter; boot.js starts the page on DOMContentLoaded. -->
+<script src="js/fmt.js" defer></script>
+<script src="js/kit.js" defer></script>
+<script src="js/data.js" defer></script>
+<script src="js/router.js" defer></script>
+<script src="js/shell.js" defer></script>
+<script src="js/boot.js" defer></script>
+<script src="js/pages/home.js" defer></script>
+<script src="js/pages/home_aside.js" defer></script>
+<script src="js/pages/lockin.js" defer></script>
+<script src="js/pages/tasks.js" defer></script>
+<script src="js/pages/calendar_data.js" defer></script>
+<script src="js/pages/calendar.js" defer></script>
+<script src="js/pages/classes.js" defer></script>
+<script src="js/pages/class.js" defer></script>
+<script src="js/pages/settings.js" defer></script>
+<script src="js/carried/details.js" defer></script>
+<script src="js/carried/deck.js" defer></script>
+<script src="js/carried/sources.js" defer></script>
+<script src="js/carried/mail.js" defer></script>
+<script src="js/carried/week.js" defer></script>
+<script src="js/carried/weeksetup.js" defer></script>
+<script src="js/carried/status.js" defer></script>
+<script src="js/carried/update.js" defer></script>
+<script src="js/carried/account.js" defer></script>
+<script src="js/carried/reconsent.js" defer></script>
+<script src="js/carried/report.js" defer></script>
+<script src="js/wizard.js" defer></script>
+<script src="js/picker.js" defer></script>
 </head>
 <body>
+<button class="skip" id="skip" type="button">Skip to content</button>
 <div class="app">
-  <nav>
-    <div class="brand"><span class="mark"></span><b>Knowlu</b></div>
-    <div class="navlinks" id="navlinks">
-      <a href="#today" data-view="today"><span class="dot"></span>Today<span class="ct"></span></a>
-      <a href="#overdue" data-view="overdue"><span class="dot crit"></span>Overdue<span class="ct"></span></a>
-      <a href="#week" data-view="week"><span class="dot warn"></span>This week<span class="ct"></span></a>
-      <a href="#later" data-view="later"><span class="dot"></span>Later<span class="ct"></span></a>
-      <a href="#all" data-view="all"><span class="dot"></span>All active<span class="ct"></span></a>
-      <a href="#schedule" data-view="schedule"><span class="dot"></span>Schedule<span class="ct"></span></a>
-      <div class="grp">Attention</div>
-      <a href="#decisions" data-view="decisions"><span class="dot"></span>Decisions<span class="ct"></span></a>
-      <a href="#good-to-know" data-view="good-to-know"><span class="dot"></span>Good to know<span class="ct"></span></a>
-      <a href="#issues" data-view="issues"><span class="dot"></span>Issues raised<span class="ct"></span></a>
-      <div class="grp">System</div>
-      <a href="#runs" data-view="runs"><span class="dot warn"></span>Runs<span class="ct"></span></a>
+  <aside class="side" id="side" aria-label="Knowlu">
+    <div class="side-head" data-tauri-drag-region="deep">
+      <a class="wm" href="#home" aria-label="Knowlu, Home">Know<b>lu</b></a>
+      <button class="obtn rail-toggle" id="rail-toggle" type="button" aria-pressed="false" aria-label="Pin sidebar"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 3.5h15v13h-15zM7.5 3.5v13"/></svg></button>
     </div>
-    <div class="navsec">
-      <div class="navsec-hd"><h2>The day</h2><span class="n" id="dayopen"></span></div>
-      <div id="allday" class="allday"></div>
-      <div class="day" id="theday"></div>
-      <div id="commitments"></div>
+    <nav class="nav" aria-label="Main"><ul>
+      <li><a href="#home" data-route="home"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 9.2L10 3.8l6.5 5.4v7.3h-4.3v-4.6H7.8v4.6H3.5z"/></svg><span>Home</span></a></li>
+      <li><a href="#tasks" data-route="tasks"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.6 6l1.6 1.6 2.6-2.8M10.2 6.4h6.3M3.6 12.6l1.6 1.6 2.6-2.8M10.2 13h6.3"/></svg><span>Tasks</span></a></li>
+      <li><a href="#calendar" data-route="calendar"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13v11.5h-13zM3.5 8.6h13M7 3v3.6M13 3v3.6"/></svg><span>Calendar</span></a></li>
+      <li><div class="nav-row"><a href="#classes" data-route="classes"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 4.5h4.4a2.1 2.1 0 0 1 2.1 2.1v9.9a1.7 1.7 0 0 0-1.7-1.6H3.5zM16.5 4.5h-4.4a2.1 2.1 0 0 0-2.1 2.1v9.9a1.7 1.7 0 0 1 1.7-1.6h4.8z"/></svg><span>Classes</span></a><button class="tab" id="classes-toggle" type="button" aria-expanded="true" aria-controls="side-classes" aria-label="This semester&#8217;s classes"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+        <ul class="classes" id="side-classes"></ul></li>
+    </ul></nav>
+    <div class="sbar" id="sbar" role="region" aria-labelledby="sbar-h" tabindex="-1">
+      <h2 class="sbar-h" id="sbar-h">Status</h2>
+      <ul id="sbar-list"></ul>
     </div>
-  </nav>
-  <main>
-    <div class="topline" id="topline"></div>
-    <div class="upd" id="upd" hidden></div>
-    <div id="syncline" class="syncline"></div>
-    <div class="delta" id="delta"></div>
-    <div id="first-run" hidden>
-      <span class="mark" aria-hidden="true"></span>
-      <h1>Knowlu is doing its first run. Your day appears here in about a minute.</h1>
-      <ol id="first-run-steps" aria-live="polite"></ol>
-      <p id="first-run-end" hidden>The first run didn't finish. Knowlu will try again on its own.</p>
-      <div class="fr-foot"><button class="b" type="button" data-settings>Settings</button></div>
+    <div class="side-foot">
+      <div class="foot-row"><a href="#settings" data-route="settings"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 6.5h5.2M12.8 6.5h3.7M3.5 13.5h2.7M10.3 13.5h6.2M10.8 4.5v4M8.3 11.5v4"/></svg><span>Settings</span></a><button class="obtn status" id="status-toggle" type="button" aria-controls="sbar" aria-expanded="false" aria-label="Status"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10.5h3.6l2.1-5.6 4.2 10.4 2.3-4.8H18"/></svg><span>Status</span><i class="dot" id="status-dot" aria-hidden="true" hidden></i></button></div>
     </div>
-    <div id="main-today">
-      <h1 id="headline"></h1>
-      <p class="moved" id="moved" hidden></p>
-      <p class="lede" id="lede"></p>
-      <div class="meter">
-        <div class="meter-hd"><h2>Today&rsquo;s capacity</h2><span class="sub" id="metersub"></span></div>
-        <div class="meter-body"><div class="fits" id="fits"></div><div class="spill" id="spill"></div></div>
-        <div class="meter-key" id="meterkey"></div>
-        <p class="overflow" id="overflow"></p>
-        <p class="overflow give" id="give" hidden></p>
-      </div>
-      <div class="sec grades" id="grades" hidden></div>
-      <div class="sec"><div class="sec-hd"><h2>Must do</h2><span class="n" id="mustdo-n"></span><button class="b" id="newtask">+ task</button></div><div id="mustdo"></div></div>
-      <div class="sec"><div class="sec-hd"><h2>Recommended</h2><span class="n" id="recommended-n"></span></div><div id="recommended"></div></div>
-    </div>
-    <div id="main-list" hidden><div class="sec"><div class="sec-hd"><h2 id="list-title"></h2><span class="n" id="list-n"></span></div><div id="list"></div></div></div>
-    <section id="main-decisions" hidden>
-      <div class="sec"><div class="sec-hd"><h2>Decisions</h2><span class="n" id="dec-n"></span></div>
-      <div class="hint" id="dec-hint"></div>
-      <div id="dec-list"></div></div>
-    </section>
-    <section id="main-gtk" hidden>
-      <div class="sec"><div class="sec-hd"><h2>Good to know</h2><span class="n" id="gtkv-n"></span></div><div id="gtk-list"></div></div>
-    </section>
-    <section id="main-issues" hidden>
-      <div class="sec"><div class="sec-hd"><h2>Issues raised</h2><span class="n" id="issv-n"></span></div><div id="iss-list"></div></div>
-    </section>
-    <section id="main-schedule" hidden>
-      <div class="sec" id="sched-reg-sec" hidden><div class="sec-hd"><h2>Your classes</h2></div>
-        <div class="reg" id="sched-reg"><button class="b" type="button" data-reg-open>Get my class times</button><button class="b pri y" type="button" data-reg-done hidden>I'm signed in</button><button class="b" type="button" data-reg-cancel hidden>Cancel</button><span class="hint" data-reg-say></span></div>
-        <div class="reg-changes" id="sched-reg-changes" hidden></div>
-        <div id="sched-reg-rows"></div></div>
-      <div class="sec"><div class="sec-hd"><h2>Your week</h2><span class="n" id="sched-n"></span></div><div id="sched-list"></div></div>
-      <div class="sec"><div class="sec-hd"><h2>Office hours</h2></div><div id="sched-oh"></div></div>
-      <div class="sec"><div class="sec-hd"><h2>Your day</h2></div>
-        <div class="wined" id="sched-window"></div>
-        <div class="wined-foot"><button class="b pri y" type="button" id="sched-save">Save</button><span class="hint" id="sched-say"></span></div>
-        <div class="preview"><p id="sched-moved"></p><ol id="sched-items"></ol></div>
-      </div>
-    </section>
-    <section id="main-runs" hidden><h1>Runs</h1><div id="runs-view"></div></section>
-  </main>
-  <aside>
-    <section class="rblock"><div class="rail-hd"><h2>Decisions</h2><span class="n" id="dcount"></span></div><div class="deck" id="deck"></div><div class="deck-foot"><span id="deckrest"></span><span class="adv" id="deckhint"></span></div></section>
-    <section class="rblock"><div class="rail-hd"><h2>Ahead</h2><span class="n">hours due per day</span></div><div class="ribbon" id="ribbon"></div><div class="ribbon-ax" id="ribbonax"></div><div class="ahead-note" id="aheadnote"></div></section>
-    <section class="rblock" id="coming-up"><div class="rail-hd"><h2>Coming up</h2><span class="n" id="cu-n"></span></div><div id="cu"></div><div id="cu-ns"></div></section>
-    <section class="rblock"><div class="rail-hd"><h2>Good to know</h2><span class="n" id="gtk-n"></span></div><div id="gtk"></div></section>
-    <section class="rblock"><div class="rail-hd"><h2>Closed this week</h2><span class="n" id="closed-n"></span></div><div id="closed"></div></section>
-    <section class="rblock"><div class="rail-hd"><h2>Runs</h2><span class="n" id="runs-n"></span></div><div id="runs"></div></section>
   </aside>
+  <div class="main">
+    <div class="top" data-tauri-drag-region="deep">
+      <!-- #top-note: the update line's host (plan §3). The update surface (T19) writes one short line here; the shell
+           only keeps the place, left of the clock, and hides it while empty. -->
+      <p class="top-note" id="top-note" aria-live="polite"></p>
+      <p class="clock" id="clock" aria-hidden="true"></p>
+      <div class="wc" role="group" aria-label="Window">
+        <button class="wc-b" type="button" data-wc="minimize" aria-label="Minimize"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5.5h10"/></svg></button>
+        <button class="wc-b" type="button" data-wc="toggle" aria-label="Maximize"><svg class="i-max" viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 .5h9v9h-9z"/></svg><svg class="i-res" viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 2.5h7v7h-7zM2.5 2.5v-2h7v7h-2"/></svg></button>
+        <button class="wc-b" type="button" data-wc="close" aria-label="Close"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 .5l9 9M9.5 .5l-9 9"/></svg></button>
+      </div>
+    </div>
+    <main class="center" id="center" tabindex="-1"></main>
+    <div class="boot" id="boot" hidden></div>
+  </div>
 </div>
-<section class="week-setup" id="week-setup" hidden aria-labelledby="ws-title">
-  <h1 id="ws-title">When do your classes meet?</h1>
-  <p class="lede" id="ws-status">Reading your calendar&hellip;</p>
-  <div class="ws-group" id="ws-classes"><h2>Your classes</h2><div class="reg" id="ws-reg" hidden><button class="b" type="button" data-reg-open>Get my class times</button><button class="b pri y" type="button" data-reg-done hidden>I'm signed in</button><button class="b" type="button" data-reg-cancel hidden>Cancel</button><span class="hint" data-reg-say></span></div><div class="reg-added" id="ws-reg-added" hidden></div><div id="ws-class-rows"></div></div>
-  <div class="ws-group" id="ws-week"><h2>Your week</h2><div id="ws-week-rows"></div></div>
-  <div class="ws-group" id="ws-oh"><h2>Office hours</h2><div id="ws-oh-rows"></div></div>
-  <div class="ws-group"><h2>Your day</h2><div class="wined" id="ws-window"></div></div>
-  <div class="ws-nav"><button class="b" type="button" id="ws-later">Not now</button><button class="b pri y" type="button" id="ws-finish">Finish</button></div>
-  <p class="hint">Rows you leave blank will come back as questions over the next few days.</p>
-</section>
-<section class="picker" id="picker" hidden>
-  <h1>Knowlu</h1>
-  <p class="lede" id="pick-lede"></p>
-  <div id="pick-list"></div>
-  <div class="wiz-nav"><button class="b" id="pick-adopt">Use an existing vault…</button><button class="b" id="pick-restore-backup" title="This restores from a local Backups folder on this device, never from your account — sign in instead to bring back your account&rsquo;s vault.">Restore from a backup folder…</button><button class="b pri y" id="pick-add">Create a new vault…</button></div>
-  <div class="wiz-nav" id="pick-restore-options" hidden>
-    <input type="text" id="pick-restore-name" placeholder="Knowlu">
-    <label><input type="checkbox" id="pick-restore-autostart" checked> Start Knowlu with Windows</label>
-    <button class="b pri y" id="pick-restore-go">Restore</button>
+<aside class="panel" id="panel" aria-labelledby="panel-h" inert>
+  <div class="panel-in">
+    <div class="panel-head"><span class="det-ck" id="panel-ck"></span><h2 id="panel-h"></h2><button class="qbtn" id="panel-close" type="button">Close</button></div>
+    <div class="panel-body" id="panel-body"></div>
   </div>
-</section>
-<section class="wiz" id="wizard" hidden>
-  <div class="wiz-hd"><h1>Knowlu</h1><span class="n" id="wiz-step"></span></div>
-  <div class="wiz-panel" id="wiz-welcome" hidden><h2>Welcome</h2>
-    <p class="lede">Knowlu answers one question every morning: what should I work on today, and in what order?</p>
-    <p id="wiz-privacy"></p>
-    <p class="meta">Knowlu costs $9.99 a month after a 7-day trial. You can cancel any time, in Settings.</p>
-  </div>
-  <div class="wiz-panel" id="wiz-account" hidden><h2>Your account</h2>
-    <label><input type="checkbox" id="wiz-18"> I am 18 or older</label>
-    <label><input type="checkbox" id="wiz-terms"> I accept the <a href="terms.html" class="policy" data-policy="terms" id="wiz-terms-link">terms</a> and the <a href="privacy.html" class="policy" data-policy="privacy" id="wiz-privacy-link">privacy policy</a></label>
-    <div class="wiz-row"><button class="b pri y" id="wiz-google-signin">Continue with Google</button></div>
-    <p class="meta">Knowlu asks Google for your email address and your name, and nothing else. Your calendar and your mail are separate permissions, asked for later, and you can say no to both.</p>
-    <div class="wiz-row"><input type="text" id="wiz-email" placeholder="Or use your email address"><button class="b" id="wiz-magic">Email me a code</button></div>
-    <div class="wiz-row" id="wiz-code-row" hidden><input type="text" id="wiz-code" placeholder="The code from the email"><button class="b pri y" id="wiz-code-go">Sign in with the code</button></div>
-    <p class="meta" id="wiz-account-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-subscribe" hidden><h2>Subscribe</h2>
-    <p class="lede">$9.99 a month, or $69.99 for the academic year. Seven days free first; your card is taken now and not charged until the trial ends. Cancel any time in Settings.</p>
-    <div class="wiz-row"><button class="b pri y" id="wiz-sub-month">Start the trial &mdash; $9.99/month</button><button class="b" id="wiz-sub-year">$69.99 / academic year</button></div>
-    <p class="meta" id="wiz-sub-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-mail" hidden><h2>Next: connect your school email</h2>
-    <p class="lede">Knowlu sets up forwarding from your school mailbox, reads what arrives for things you have to do, and proposes each one for you to approve. It starts when Knowlu first opens.</p>
-    <div class="wiz-row"><button class="b" id="wiz-mail-notnow">Not now</button><span class="meta" id="wiz-mail-note"></span></div>
-    <p class="meta">If your school's rules don't allow forwarding your school email, skip this.</p>
-  </div>
-  <div class="wiz-panel" id="wiz-vault" hidden><h2>Name this setup</h2>
-    <p class="lede">Knowlu keeps your work as plain files you can open, copy and take with you.</p>
-    <div class="wiz-row"><input type="text" id="wiz-name" placeholder="Name"></div>
-    <p class="meta" id="wiz-vault-path"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-calendars" hidden><h2>Connect your calendars</h2>
-    <p class="lede">Two things, and Knowlu needs both before it can tell you what to do today: what your school says is due, and what your week already looks like.</p>
-    <h3>Your school</h3>
-    <p class="meta">Start typing its name. Every US college and university is in this list.</p>
-    <div class="wiz-row"><input type="text" id="wiz-school" placeholder="Search for your school" autocomplete="off"><span class="meta" id="wiz-school-picked"></span></div>
-    <div id="wiz-school-hits" class="wiz-hits"></div>
-    <p class="meta"><button class="b" id="wiz-school-none">My school isn&rsquo;t listed</button></p>
-    <div class="wiz-row" id="wiz-school-free" hidden><input type="text" id="wiz-school-name" placeholder="Your school&rsquo;s name"><input type="text" id="wiz-school-state" placeholder="State, e.g. AL"></div>
-    <p class="meta">Sign in the way you always do. Knowlu opens your school&rsquo;s own page in a window, you sign in there, and Knowlu keeps only the calendar link &mdash; never what you type into it.</p>
-    <div class="wiz-row" id="wiz-lms-kind" hidden><span class="meta">Which does your school use?</span><button class="b" data-lms="blackboard">Blackboard</button><button class="b" data-lms="canvas">Canvas</button></div>
-    <div class="wiz-row"><button class="b pri y" id="wiz-lms-open">Sign in to my school</button><button class="b" id="wiz-lms-capture" hidden>I have signed in &mdash; find my calendar</button><span class="meta" id="wiz-lms-state"></span></div>
-    <p class="meta">Or paste the link yourself: Blackboard &rarr; Calendar &rarr; Calendar Settings &rarr; Share Calendar. Canvas &rarr; Calendar &rarr; Calendar Feed.</p>
-    <input type="text" id="wiz-ics" placeholder="Paste the school feed link (it ends in .ics)">
-    <p class="meta" id="wiz-ics-note"></p>
-    <div id="wiz-courses" hidden>
-      <h3>Your classes</h3>
-      <p class="meta" id="wiz-courses-note"></p>
-      <div id="wiz-course-rows"></div>
-      <div class="wiz-row"><input type="text" id="wiz-course-add" placeholder="Add a course code, e.g. CS 100"><button class="b" id="wiz-course-add-go">Add</button></div>
-    </div>
-    <h3>Your own calendar</h3>
-    <p class="meta">This is what makes today&rsquo;s page know your day is already half full. In Google Calendar: <b>Settings</b> &rarr; click your calendar under <b>Settings for my calendars</b> &rarr; <b>Integrate calendar</b> &rarr; copy the <b>Secret address in iCal format</b>. Press <b>Reset</b> beside it first if that address has ever been shared with anyone &mdash; whoever holds it can read your calendar.</p>
-    <input type="text" id="wiz-cal-ics" placeholder="Paste the secret iCal address">
-    <p class="meta" id="wiz-cal-note"></p>
-    <div class="wiz-row" id="wiz-google-row"><button class="b" id="wiz-google">Sign in with Google instead</button><span class="meta">Reads your Google Calendar so Knowlu knows when you are busy. Read-only, and you can disconnect at any time. While Knowlu is in Google's testing programme this works for invited testers and the connection needs renewing about once a week.</span></div>
-    <p class="meta" id="wiz-google-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-logins" hidden><h2>Coursework logins</h2>
-    <p class="lede">Optional. Stored in Windows Credential Manager on this machine &mdash; never in the vault, never in a backup, and never sent to us.</p>
-    <div class="wiz-row"><input type="text" id="wiz-zy-user" placeholder="zyBooks email"><input type="password" id="wiz-zy-pass" placeholder="zyBooks password"></div>
-    <div class="wiz-row"><input type="text" id="wiz-vhl-user" placeholder="VHL email"><input type="password" id="wiz-vhl-pass" placeholder="VHL password"></div>
-    <datalist id="wiz-course-codes"></datalist>
-    <div id="wiz-map" hidden>
-      <h3 id="wiz-map-heading">Which class is which?</h3>
-      <p class="meta" id="wiz-map-note">Knowlu found these on your accounts. Confirm the course each one belongs to &mdash; without this, Knowlu can see the work but not what it is for.</p>
-      <div id="wiz-map-rows"></div>
-    </div>
-  </div>
-  <div class="wiz-panel" id="wiz-gmail" hidden><h2>Gmail</h2>
-    <p class="lede">Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings.</p>
-    <p class="meta">While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.</p>
-    <div class="wiz-row"><button class="b" id="wiz-gmail-connect">Connect Gmail directly (Google testers only)</button></div>
-    <p class="meta" id="wiz-gmail-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-slots" hidden><h2>When should Knowlu look?</h2>
-    <div class="wiz-row"><input type="text" id="wiz-tz" placeholder="Timezone"><input type="text" id="wiz-slot1" placeholder="12:00"><input type="text" id="wiz-slot2" placeholder="18:00"></div>
-    <label><input type="checkbox" id="wiz-autostart" checked> Start Knowlu with Windows</label>
-  </div>
-  <div class="wiz-panel" id="wiz-finish" hidden><h2>Ready</h2><p class="lede" id="wiz-summary"></p>
-    <p class="meta">Your first look runs as soon as you finish, and today&rsquo;s page will be waiting.</p>
-    <p class="meta" id="wiz-restore-note"></p>
-  </div>
-  <div class="wiz-nav"><span class="crit" id="wiz-error"></span><button class="b" id="wiz-back">Back</button><button class="b pri y" id="wiz-next">Next</button></div>
-</section>
-<aside class="drawer" id="drawer" hidden></aside>
-<aside class="setpanel" id="settings" hidden>
-  <div class="set-hd"><h2>Settings</h2><button class="b" id="set-close">Close</button></div>
-  <p class="meta" id="set-owed-note" hidden></p>
-  <div class="set-row" id="set-name"><span class="k">Profile name</span><input type="text" id="set-name-in"><button class="b" id="set-name-save">Save</button></div>
-  <div class="set-row" id="set-vault"><span class="k">Vault</span><span class="meta" id="set-vault-path"></span><button class="b" id="set-vault-copy">Copy</button><button class="b" id="set-switch">Switch profile&hellip;</button></div>
-  <div class="set-row" id="set-backup"><span class="k">Backup folder</span><span class="meta" id="set-bdir"></span><button class="b" id="set-bdir-pick">Choose&hellip;</button><button class="b" id="set-backup-now">Back up now</button></div>
-  <div class="set-row" id="set-autostart"><span class="k">Start with Windows</span><input type="checkbox" id="set-autostart-in"></div>
-  <div class="set-row" id="set-updates"><span class="k">Updates</span><span class="meta" id="set-update-state"></span><button class="b" id="set-update-check">Check now</button></div>
-  <div class="set-row" id="set-account"><span class="k">Account</span><span class="meta" id="set-account-state"></span><button class="b" id="set-portal">Manage subscription</button></div>
-  <div class="set-row" id="set-google" hidden><span class="k">Google</span><span class="meta" id="set-google-state"></span><button class="b" id="set-google-retry" hidden>Try again</button> <button class="b" id="set-google-check" hidden>Check again</button><button class="b" id="set-google-connect" hidden>Connect Gmail</button><button class="b" id="set-google-reconnect" hidden>Reconnect</button><button class="b" id="set-google-disconnect-1" hidden>Disconnect Google</button><button class="b crit" id="set-google-disconnect-2" hidden>Yes, disconnect</button><span class="meta" id="set-google-note"></span></div>
-  <div class="set-row" id="set-email"><span class="k">Email</span><span class="meta" id="set-email-state"></span><button class="b" id="set-email-open" hidden>Show progress</button><button class="b" id="set-email-start" hidden>Connect school email</button><button class="b" id="set-email-applied">From your email</button></div>
-  <div class="set-sec" id="set-email-boxes"></div>
-  <div class="set-row" id="set-email-keeprow"><span class="k">Email sign-in</span><label class="meta"><input type="checkbox" id="set-email-keep"> Keep my email sign-in saved on this computer so Knowlu can check forwarding</label><span class="meta" id="set-email-keep-note"></span></div>
-  <div class="set-row" id="set-email-profile" hidden><span class="k"></span><span class="meta em-amber" id="set-email-profile-note"></span></div>
-  <div class="set-row" id="set-grades"><span class="k">Blackboard sign-in</span><span class="meta" id="set-grades-note"></span><button class="b" id="set-grades-forget">Forget Blackboard sign-in</button></div>
-  <div class="set-row" id="set-grades-hide"><span class="k">Hide grades</span><input type="checkbox" id="set-grades-hide-in"></div>
-  <div class="set-sec" id="set-prefs-sec"><h3>Your preferences</h3>
-    <div class="set-row" id="set-prefs"><span class="k">How you like to work</span>
-      <textarea id="set-prefs-ta" rows="5"></textarea>
-      <span class="meta" id="set-prefs-count"></span>
-      <button class="b" id="set-prefs-save">Save</button><button class="b" id="set-prefs-cancel">Cancel</button>
-      <p class="meta set-prefs-copy">Knowlu&rsquo;s judge reads the first 600 characters of this when it sizes up a task. They are sent for that one call, and neither we nor the model&rsquo;s host keep them. Otherwise this stays on this computer.</p>
-    </div>
-    <div class="set-row" id="set-ints"><span class="k">Campus events</span>
-      <label class="set-int">Always show me<textarea id="set-int-strong" rows="3"></textarea></label>
-      <label class="set-int">Maybe<textarea id="set-int-mild" rows="3"></textarea></label>
-      <label class="set-int">Never show me<textarea id="set-int-never" rows="3"></textarea></label>
-      <label class="set-int">Clubs I&rsquo;m in<textarea id="set-int-clubs" rows="3"></textarea></label>
-      <button class="b" id="set-int-save">Save</button><button class="b" id="set-int-cancel">Cancel</button>
-      <p class="meta set-prefs-copy" id="set-int-note">One item per line. Knowlu uses these to choose which campus events to show you. The first 600 characters also go to its judge with each event it judges, for that one call, and neither we nor the model&rsquo;s host keep them. Otherwise these lists stay on this computer.</p>
-    </div>
-  </div>
-  <div class="set-row" id="set-report"><span class="k">Problems</span><button class="b" id="set-report-go">Report an issue</button></div>
-  <div class="set-row" id="set-delete"><span class="k">Delete my data</span><span class="meta" id="set-delete-note"></span><button class="b" id="set-delete-1">Delete everything</button><button class="b crit" id="set-delete-2" hidden>Yes, delete it all</button></div>
-  <div class="set-row" id="set-diag"><span class="k">Diagnostics</span><button class="b" id="set-diag-copy">Copy diagnostics</button><span class="meta" id="set-diag-note"></span></div>
 </aside>
-<aside class="setpanel" id="mail-progress" hidden>
-  <div class="set-hd"><h2>Connecting your email</h2><button class="b" id="mp-leave">Leave</button></div>
-  <p class="meta" id="mp-sentence"></p>
-  <div id="mp-rows"></div>
-  <p class="meta" id="mp-backfill"></p>
-  <div class="set-row"><button class="b" id="mp-applied">See what came from your email</button></div>
-  <div id="mp-ask"></div>
-  <p class="meta" id="mp-end"></p>
-  <div class="set-row"><button class="b" id="mp-stop">Stop</button></div>
-</aside>
-<aside class="setpanel" id="mail-applied" hidden>
-  <div class="set-hd"><h2>From your email</h2><button class="b" id="ma-close">Close</button></div>
-  <div id="ma-body"></div>
-</aside>
-<aside class="setpanel" id="report" hidden>
-  <div class="set-hd"><h2>Report an issue</h2><button class="b" id="report-cancel">Close</button></div>
-  <p class="meta">This is exactly what will be sent. Emails, links and long keys are already replaced. Edit anything you do not want to send, and add what went wrong at the bottom.</p>
-  <textarea id="report-text" rows="20"></textarea>
-  <div class="set-row"><span class="meta" id="report-note"></span><button class="b pri y" id="report-send">Send</button></div>
-</aside>
-<aside class="setpanel" id="upgrade" hidden>
-  <div class="set-hd"><h2>Knowlu now needs an account</h2><button class="b" id="up-later">Not now</button></div>
-  <p class="meta">Your work stays exactly where it is. Sign in and Knowlu picks up where it left off. Today&rsquo;s page is underneath and still works &mdash; ranking never needed an account.</p>
-  <label><input type="checkbox" id="up-18"> I am 18 or older</label>
-  <label><input type="checkbox" id="up-terms"> I accept the <a href="terms.html" class="policy" data-policy="terms">terms</a> and the <a href="privacy.html" class="policy" data-policy="privacy">privacy policy</a></label>
-  <div class="set-row"><button class="b pri y" id="up-google">Continue with Google</button></div>
-  <div class="set-row"><input type="text" id="up-email" placeholder="Or use your email address"><button class="b" id="up-magic">Email me a code</button></div>
-  <div class="set-row" id="up-code-row" hidden><input type="text" id="up-code" placeholder="The code from the email"><button class="b pri y" id="up-code-go">Sign in with the code</button></div>
-  <div class="set-row"><button class="b pri y" id="up-subscribe" hidden>Subscribe</button><span class="crit" id="up-error"></span></div>
-</aside>
-<aside class="setpanel" id="reconsent" hidden>
-  <div class="set-hd"><h2>Our privacy policy changed</h2></div>
-  <div id="rc-changes"></div>
-  <p class="meta">Read the <a href="privacy.html" class="policy" data-policy="privacy">privacy policy</a>. Today&rsquo;s page is underneath and still works.</p>
-  <div class="set-row"><button class="b pri y" id="rc-accept">Accept</button><button class="b" id="rc-settings">Settings</button><span class="crit" id="rc-error"></span></div>
-</aside>
-<script src="console.js"></script>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" hidden></div>
+<div class="layer" id="layer" role="region" aria-label="Privacy update" hidden></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 </body>
 </html>

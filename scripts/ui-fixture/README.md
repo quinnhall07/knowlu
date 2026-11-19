@@ -1,6 +1,6 @@
 # The new page's fixture harness
 
-Loads the new page (`app/static/next/`) in headless Edge against staged read-model envelopes, checks
+Loads the page (`app/static/`) in headless Edge against staged read-model envelopes, checks
 it and takes shots (v0.4.0 note §8 M12, plan T5c). It replaces the old page's `?fixture=` path: no
 review aid ships, and nothing here is in `app/static`.
 
@@ -34,7 +34,7 @@ Page tasks add their own DOM checks to `run.py` as their pages land.
 
 ## The pieces
 
-- `serve.py` binds `127.0.0.1` on a port the OS picks and serves `app/static/next/` with one
+- `serve.py` binds `127.0.0.1` on a port the OS picks and serves `app/static/` with one
   `<script>` added at the top of `<head>`: a stub `window.__TAURI__` (in `serve.py` as `STUB`).
   `core.invoke` answers from the named set and records every call in `window.__fixture.calls`;
   `event.emit` records in `window.__fixture.events`; the window does nothing. The stub freezes `Date`
@@ -64,4 +64,4 @@ Page tasks add their own DOM checks to `run.py` as their pages land.
 | `base-signed-out` | the base envelopes, and `grades_status` signed out (the Status dot turns red after the paint) |
 | `base-engine-down` | `state` answers `ok: false` (the Status dot turns red: the engine did not answer) |
 
-After T23 (the swap) the page lives in `app/static`; `serve.py`'s `ROOT` is the one line that moves.
+Since T23 (the swap) the page lives in `app/static`; `serve.py`'s `ROOT` names it once.

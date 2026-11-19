@@ -10,8 +10,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The new page's root, relative to the app crate. T23 (the swap) changes this one line to `static`.
-pub const ROOT: &str = "static/next";
+/// The page's root, relative to the app crate. T23 (the swap) moved the new page here from `static/next`.
+pub const ROOT: &str = "static";
 
 /// The app crate's own folder (`app/`), whatever the test's working directory.
 pub fn app_dir() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")) }

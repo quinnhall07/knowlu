@@ -11,7 +11,7 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-fn fonts_dir() -> PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join("static").join("next").join("fonts") }
+fn fonts_dir() -> PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join("static").join("fonts") }
 
 const FONT_EXTS: [&str; 4] = ["ttf", "otf", "woff", "woff2"];
 
@@ -39,7 +39,7 @@ fn each_next_font_family_has_files_an_ofl_and_a_hashed_sources_row() {
     let dir = fonts_dir();
     let sources = std::fs::read_to_string(dir.join("SOURCES.md")).unwrap_or_else(|e| panic!("{}: {e}", dir.join("SOURCES.md").display()));
     let table = rows(&sources);
-    let files: Vec<PathBuf> = std::fs::read_dir(&dir).expect("static/next/fonts").flatten().map(|e| e.path()).filter(|p| is_font(p)).collect();
+    let files: Vec<PathBuf> = std::fs::read_dir(&dir).expect("static/fonts").flatten().map(|e| e.path()).filter(|p| is_font(p)).collect();
     assert!(!files.is_empty(), "no font files under {}", dir.display());
 
     // Every font file on disk has exactly one row: its name first, a 40-hex source commit somewhere in
