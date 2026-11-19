@@ -4,3 +4,6 @@
 # Frozen test fixtures are bytes. Several are golden files compared byte-for-byte, and users'
 # vaults are CRLF on Windows, so these stay exactly as committed — never re-encoded.
 engine/tests/fixtures/** -text
+# Icons are bytes: the app icon and the tray's raw RGBA images (scripts/brand-icons.py).
+*.ico binary
+*.rgba binary
