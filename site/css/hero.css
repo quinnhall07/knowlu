@@ -1,5 +1,6 @@
-/* Knowlu hero: white paper with the dot grid (js/dots.js), the big wordmark and tagline, one line that shows
-   what Knowlu would say right now (js/hero-line.js), then the waitlist form.
+/* Knowlu hero: white paper with the dot grid (js/dots.js), the big wordmark and tagline, a small piece of Knowlu's
+   list for today (what you'd get), and the pilot button. On a wide screen the lockup and the button sit on the left and
+   the list on the right; narrower, they stack: lockup, list, button.
    dots.js reads its colors from this section: the paper is its background, the dots mix toward --hero-dot,
    the dots around the sign-up box tint toward --hero-hot, and a stirred dot takes one of the four class colors. */
 
@@ -20,71 +21,96 @@
 .hero-fx { position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%; max-width: none; pointer-events: none; }
 
 .hero-in {
-  justify-self: center; align-self: start; width: 100%;
-  display: grid; justify-items: center;
-  padding: clamp(124px, 20svh, 220px) var(--gut) clamp(56px, 8svh, 88px);
+  justify-self: center; align-self: center; width: 100%; max-width: var(--page);
+  display: grid; justify-items: center; grid-template-areas: "lock" "today" "go";
+  padding: calc(var(--nav-h) + clamp(40px, 7svh, 80px)) var(--gut) clamp(56px, 8svh, 88px);
   /* pressing and holding gathers the dots; that should not select the words */
   user-select: none; -webkit-user-select: none;
 }
-.hero-in :is(input, .wl-msg, .wl-done, .hero-now) { user-select: text; -webkit-user-select: text; }
+.hero-in :is(input, .wl-msg, .wl-done, .hero-today) { user-select: text; -webkit-user-select: text; }
 
 /* ---------- the lockup ---------- */
 /* never wider than the screen: the wordmark is 3.96em wide */
-.lockup { font-size: min(var(--t-wordmark), calc((100vw - 2 * var(--gut)) / 3.96)); font-weight: 400; line-height: 1; display: grid; justify-items: start; }
+.lockup { grid-area: lock; font-size: min(var(--t-wordmark), calc((100vw - 2 * var(--gut)) / 3.96)); font-weight: 400; line-height: 1; display: grid; justify-items: start; }
 .wm.wm-xl { font-size: 1em; color: var(--ink); white-space: nowrap; }
 .lockup .tag { font: 400 .2745em/1.2 var(--serif); margin: .04em 0 0 .093em; color: var(--ink); text-shadow: var(--hero-halo); }
 
-/* ---------- the line that changes: what Knowlu would say right now ----------
-   Every line sits in the same grid cell, so the cell is as tall as the tallest line at every width and nothing
-   below it moves when the line changes. */
-.hero-now {
-  margin-top: clamp(28px, 4.6svh, 52px); width: min(100%, 30em);
-  font: 400 clamp(21px, 2.1vw, 32px)/1.35 var(--serif); color: var(--ink); text-align: center;
-  border-radius: var(--r);
+/* ---------- what you'd get: a piece of Knowlu's list for today ----------
+   The product's own look, without a window around it: a sheet of the page's paper with an ink hairline (a softer
+   line in the dark theme), the answer on top in the display face with its reason, the rest of the day under it.
+   Solid, so the dots part around it. Sizes are in em off the sheet's font size. */
+.hero-today { grid-area: today; margin: clamp(36px, 5svh, 52px) 0 0; width: min(100%, 27em); font: 400 clamp(15px, 1.12vw, 17px)/1.4 var(--sans); }
+.ht-sheet {
+  container: hts / inline-size;
+  --sbg: var(--bg); --sedge: var(--ink);
+  background: var(--sbg); color: var(--ink); border: 1px solid var(--sedge); border-radius: var(--r);
+  box-shadow: 0 30px 60px -32px color-mix(in srgb, var(--shadow) 38%, transparent);
+  padding: 1.1em 1.4em .35em; text-align: left;
 }
-.hero-now:focus-visible { outline-offset: 10px; }
-.hero-now-list { list-style: none; display: grid; }
-.hero-now-i {
-  grid-area: 1 / 1; text-shadow: var(--hero-halo); text-wrap: balance;
-  opacity: 0; visibility: hidden; transform: translateY(.75em);
-  transition: opacity var(--med) var(--ease), transform var(--slow) var(--ease), visibility 0s linear var(--slow);
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .ht-sheet { --sbg: var(--bg-2); --sedge: var(--field-line); box-shadow: 0 30px 60px -30px color-mix(in srgb, var(--shadow) 60%, transparent); }
 }
-.hero-now-i.is-cur {
-  opacity: 1; visibility: visible; transform: none;
-  transition: opacity var(--slow) var(--ease) 120ms, transform var(--slow) var(--ease) 120ms, visibility 0s linear 0s;
-}
-.hero-now-i.is-out { opacity: 0; visibility: visible; transform: translateY(-.75em); }
-/* each sentence is one piece, so a narrow screen breaks the line between sentences and never inside one */
-.hero-now-i > span { display: inline-block; }
-/* the square says which class the line is about; a line about no class gets an empty one. It rides with the first sentence. */
-.hero-now-i > span:first-child::before {
-  content: ""; display: inline-block; width: .5em; height: .5em; margin-right: .6em; vertical-align: .08em;
-  background: var(--ink); border-radius: 1px;
-}
-.hero-now-i[data-class="cs"] > span:first-child::before { background: var(--c-cs); }
-.hero-now-i[data-class="chem"] > span:first-child::before { background: var(--c-chem); }
-.hero-now-i[data-class="span"] > span:first-child::before { background: var(--c-span); }
-.hero-now-i[data-class="psyc"] > span:first-child::before { background: var(--c-psyc); }
-.hero-now-i[data-class="none"] > span:first-child::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+:root[data-theme="dark"] .ht-sheet { --sbg: var(--bg-2); --sedge: var(--field-line); box-shadow: 0 30px 60px -30px color-mix(in srgb, var(--shadow) 60%, transparent); }
 
-/* ---------- the form on the dot grid ---------- */
-.hero .wl { margin-top: clamp(24px, 3.6svh, 40px); }
-.hero .wl-msg { color: var(--ink-2); text-align: center; text-shadow: var(--hero-halo); }
-.hero .wl.err .wl-msg { color: var(--error); }
-.hero .wl-done :is(p, b) { text-shadow: var(--hero-halo); }
-.hero .wl-done .nx-row input { text-shadow: none; }
+.ht-day { display: flex; justify-content: space-between; gap: 1em; font-size: .82em; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.ht-day span:first-child { font-weight: 600; color: var(--ink-2); }
 
-/* a phone: the hero stops 96px short of the screen's end, so the logo strip's logos and their "Coming" words show
-   on the first screen, and the words sit in the middle of the paper that is left. On a screen too short for that the
-   hero is as tall as its words need. */
+/* class colors: which class an item belongs to, as a small square only */
+.hero-today [data-class="cs"] { --cc: var(--c-cs); }
+.hero-today [data-class="chem"] { --cc: var(--c-chem); }
+.hero-today [data-class="span"] { --cc: var(--c-span); }
+.hero-today [data-class="psyc"] { --cc: var(--c-psyc); }
+.ht-mk { display: block; width: .72em; height: .72em; background: var(--cc, var(--ink)); }
+
+.ht-next { display: grid; grid-template-columns: .72em minmax(0, 1fr); column-gap: .85em; padding: 1em 0 1.3em; }
+.ht-next .ht-mk { margin-top: .78em; }
+.ht-t { font: 400 2.1em/1.1 var(--display); letter-spacing: -.016em; color: var(--ink); }
+.ht-m { margin-top: .4em; font-size: .86em; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ht-why { margin-top: .7em; font: 400 1.12em/1.4 var(--serif); color: var(--ink); }
+
+.ht-then { list-style: none; margin: 0; padding: 0; }
+.ht-then li {
+  display: grid; grid-template-columns: .72em minmax(0, 1fr) auto; grid-template-areas: "mk t m";
+  column-gap: .85em; align-items: center; padding: .72em 0; border-top: 1px solid var(--line);
+}
+.ht-then .ht-mk { grid-area: mk; }
+.ht-t2 { grid-area: t; min-width: 0; font: 400 1.1em/1.2 var(--display); letter-spacing: -.006em; color: var(--ink); }
+.ht-then .ht-m { grid-area: m; margin: 0; color: var(--ink-3); white-space: nowrap; }
+/* a narrow sheet: the class and time go under the item's name */
+@container hts (max-width: 290px) {
+  .ht-then li { grid-template-areas: "mk t" ". m"; grid-template-columns: .72em minmax(0, 1fr); row-gap: .15em; }
+  .ht-then .ht-mk { align-self: center; }
+}
+
+.ht-cap { margin-top: 12px; font: 400 14px/1.45 var(--sans); color: var(--ink-3); text-align: center; text-wrap: balance; text-shadow: var(--hero-halo); }
+
+/* ---------- the pilot button ---------- */
+.hero-go { grid-area: go; margin-top: clamp(28px, 4svh, 44px); display: grid; justify-items: center; gap: 14px; }
+.hero-go-btn { height: 60px; padding: 0 32px; font-size: 18px; }
+.hero-go-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.hero-go-note { font: 400 var(--t-body)/1.5 var(--serif); color: var(--ink-2); text-align: center; text-wrap: balance; text-shadow: var(--hero-halo); }
+
+/* ---------- a wide screen: lockup and button on the left, the list on the right ---------- */
+@media (min-width: 1000px) {
+  .hero-in {
+    grid-template-columns: max-content minmax(0, 27em); grid-template-rows: auto auto;
+    grid-template-areas: "lock today" "go today";
+    justify-content: center; justify-items: start; column-gap: clamp(72px, 7vw, 128px);
+    padding-block: calc(var(--nav-h) + 32px) 56px;
+  }
+  .lockup { font-size: clamp(112px, 10.6vw, 172px); align-self: end; }
+  .hero-today { align-self: center; margin: 0; width: clamp(25em, 30vw, 27em); }
+  .ht-cap { text-align: left; }
+  .hero-go { align-self: start; justify-items: start; margin-top: clamp(32px, 4.4svh, 48px); }
+  .hero-go-note { text-align: left; }
+}
+
+/* a phone: the words sit in the middle of the paper, and the hero is as tall as they need */
 @media (max-width: 520px) {
   .hero { min-height: calc(100svh - 96px); }
-  .hero-in { align-self: center; padding-top: 104px; padding-bottom: max(48px, 12svh - 32px); }
-  .hero-now { margin-top: 28px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .hero-now-i, .hero-now-i.is-out, .hero-now-i.is-cur { transform: none; }
-  .hero-now-i { transition: opacity 200ms linear, visibility 0s linear 200ms; }
-  .hero-now-i.is-cur { transition: opacity 200ms linear, visibility 0s linear 0s; }
+  .hero-in { padding-top: calc(var(--nav-h) + 32px); padding-bottom: 48px; }
+  .hero-today { margin-top: 28px; font-size: 15px; }
+  .ht-sheet { padding-inline: 1.15em; }
+  .hero-go { margin-top: 28px; }
+  .hero-go-note { font-size: 17px; }
 }

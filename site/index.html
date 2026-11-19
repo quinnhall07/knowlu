@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Knowlu: know what’s next.</title>
-<meta name="description" content="Knowlu is a Windows app for college students that gathers your classes, assignments and deadlines and tells you what to do next.">
+<meta name="description" content="Knowlu is a desktop app for college students, on Windows and Mac, that gathers your classes, assignments and deadlines and tells you what to do next.">
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#fffefb" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#19161a" media="(prefers-color-scheme: dark)">
@@ -33,10 +33,10 @@
     <a class="wm nav-wm" href="#top" aria-label="Knowlu, back to top"><span class="wm-k">Know<b>lu</b></span></a>
     <nav aria-label="Main">
       <a href="#what">What it does</a>
-      <a href="#pricing">Pricing</a>
+      <a href="#pilot">Pilot</a>
       <a href="#questions">Questions</a>
     </nav>
-    <a class="btn small" href="#join" data-focus-join>Get early access</a>
+    <a class="btn small" href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Apply for the pilot</a>
   </div>
 </header>
 
@@ -46,28 +46,33 @@
     <div class="hero-in">
       <h1 class="lockup"><span class="vh">Knowlu: know what’s next.</span><span class="wm wm-xl" aria-hidden="true"><span class="wm-k">Know<b>lu</b></span></span><span class="tag" aria-hidden="true">know what’s next.</span></h1>
 
-      <!-- What Knowlu would say right now. One line shows at a time and the next comes in about every 4 seconds.
-           Edit, add or remove lines freely; each sentence goes in its own span, so a narrow screen breaks the line
-           between sentences and never inside one. data-class picks the square's class color (cs, chem, span, psyc, or none);
-           is-cur marks the line shown first, and the only one shown with scripts off. -->
-      <div class="hero-now" data-hero-now tabindex="0" role="group" aria-label="Examples of what Knowlu tells you">
-        <ul class="hero-now-list">
-          <li class="hero-now-i is-cur" data-class="cs"><span>zyBooks 6.4 is next.</span> <span>Due tonight, about 45 minutes.</span></li>
-          <li class="hero-now-i" data-class="chem"><span>Lab in an hour.</span> <span>Nothing due before it.</span></li>
-          <li class="hero-now-i" data-class="chem"><span>Chem midterm Monday.</span> <span>Start studying Thursday.</span></li>
-          <li class="hero-now-i" data-class="none"><span>Nothing due today.</span></li>
-        </ul>
-      </div>
-
-      <form class="wl" id="join" novalidate data-wl>
-        <label class="vh" for="wl-email">Email</label>
-        <div class="wl-row">
-          <input id="wl-email" type="email" name="email" autocomplete="email" placeholder="you@school.edu" required>
-          <button class="btn" type="submit">Get early access</button>
+      <!-- What you'd get: a small piece of Knowlu's list for today, built in HTML, no screenshot. The first item is the
+           answer to "what's next?", with its reason; the rest of the day sits under it. data-class picks each square's
+           class color (cs, chem, span, psyc). The student and classes are made up, and the caption says so. -->
+      <figure class="hero-today" data-hero-today aria-labelledby="ht-cap">
+        <div class="ht-sheet">
+          <p class="ht-day"><span>Today</span> <span>Tue 2:40 PM</span></p>
+          <div class="ht-next" data-class="cs">
+            <span class="ht-mk" aria-hidden="true"></span>
+            <div class="ht-tx">
+              <p class="ht-t">zyBooks 6.4</p>
+              <p class="ht-m">CS 150 · due tonight · about 45 min</p>
+              <p class="ht-why">Fits now, before your 3:30 lab.</p>
+            </div>
+          </div>
+          <ol class="ht-then">
+            <li data-class="chem"><span class="ht-mk" aria-hidden="true"></span><span class="ht-t2">Lab</span><span class="ht-m">CHEM 110 · 3:30 PM</span></li>
+            <li data-class="psyc"><span class="ht-mk" aria-hidden="true"></span><span class="ht-t2">Chapter 7 reading</span><span class="ht-m">PSYC 101 · 20 min</span></li>
+            <li data-class="chem"><span class="ht-mk" aria-hidden="true"></span><span class="ht-t2">Review for quiz 4</span><span class="ht-m">CHEM 110 · 30 min</span></li>
+          </ol>
         </div>
-        <p class="wl-msg" aria-live="polite">For college students, on Windows. Opens spring semester 2027.</p>
-        <p class="wl-count" data-wl-count hidden></p>
-      </form>
+        <figcaption class="ht-cap" id="ht-cap">An example. The student and classes are made up.</figcaption>
+      </figure>
+
+      <div class="hero-go">
+        <a class="btn hero-go-btn" href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Apply for the free pilot</a>
+        <p class="hero-go-note">About two minutes to apply. Stay the semester and it’s free forever.<br>For college students, on Windows and Mac.</p>
+      </div>
     </div>
   </section>
 
@@ -298,7 +303,7 @@
       <div class="lt-text">
         <p>I’m a student. My week lives in Canvas, zyBooks, VHL, my school email and a calendar, and none of them talk to each other. The date that matters most is usually on page three of a syllabus.</p>
         <p>So I started building Knowlu for myself. It reads all of those places and gives me one answer: what to do next. Anything it works out on its own waits for your yes. Your school passwords stay on your computer. And it never does your homework.</p>
-        <p>If that sounds like your week too, <a href="#join" data-focus-join>join the waitlist</a>. I’ll write when it’s ready.</p>
+        <p>If that sounds like your week too, <a href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">join the pilot</a> and help me shape it.</p>
       </div>
       <p class="lt-sign">Quinn</p>
       <p class="lt-role">Founder, and a student too</p>
@@ -309,7 +314,93 @@
       <figcaption class="lt-by">[First name], [what they study]</figcaption>
     </figure>
   </section>
-  <section class="price" id="pricing" aria-labelledby="pr-h" data-build="parts" data-dots>
+  <!-- The pilot: the price band's look (ink in both themes, the dot grid). On the left the heading, the line under it
+       and the short form (name, school email, which of these you have lived through), which Quinn gets by email; on the
+       right the pilot as three steps along one fine line, which draws down through them as the band scrolls in
+       (js/pilot.js) and ends in the third, the payoff, set largest, with the way straight to the full application at
+       the foot. On phones: the heading, the form, the steps, then that way.
+       The form posts to a short Google Form. js/pilot-form.js checks it and sends it from the page, then puts the
+       thank-you and the full application in its place. With scripts off it is a plain post that ends on Google's own
+       thank-you page. The honeypot field has no name, so it is never posted. -->
+  <section class="price pilot" id="pilot" aria-labelledby="pl-h" data-build="parts" data-dots>
+    <canvas class="pr-fx" data-dots-fx aria-hidden="true"></canvas>
+    <div class="pl-in">
+      <div class="pl-head">
+        <h2 id="pl-h">Join the pilot.</h2>
+        <p class="pl-sub">Your input shapes Knowlu.</p>
+        <p class="pl-lead">A small group of college students gets it first.</p>
+      </div>
+      <div class="pf" data-pf>
+        <form class="pk-form" data-pf-form action="https://docs.google.com/forms/d/e/1FAIpQLSfXfZie7NPpQH9Y26-1HdKTxfK33ZndbwoU6FBFbWkqA9TiKA/formResponse" method="POST" accept-charset="UTF-8">
+          <div class="pk-two">
+            <div class="pk-f">
+              <label class="pk-l" for="pk-name">First and last name</label>
+              <input class="pk-in" id="pk-name" name="entry.2058486394" type="text" autocomplete="name" autocapitalize="words" spellcheck="false" required aria-describedby="pk-name-err" data-pf-name>
+              <p class="pk-err" id="pk-name-err" aria-live="polite"></p>
+            </div>
+            <div class="pk-f">
+              <label class="pk-l" for="pk-email">School email</label>
+              <input class="pk-in" id="pk-email" name="entry.1258614817" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" required aria-describedby="pk-email-err" data-pf-email>
+              <p class="pk-err" id="pk-email-err" aria-live="polite"></p>
+            </div>
+          </div>
+          <fieldset class="pk-exp" aria-describedby="pk-exp-hint">
+            <legend class="pk-q">Which of these have you experienced?</legend>
+            <p class="pk-hint" id="pk-exp-hint">Check any that fit. This part is optional.</p>
+            <ul class="pk-opts" role="list">
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="I missed an assignment because I didn't know it was due"><span>I missed an assignment because I didn’t know it was due</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="A due date surprised me because it was only on one platform or in an email"><span>A due date surprised me because it was only on one platform or in an email</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="I didn't know what to work on first"><span>I didn’t know what to work on first</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="I started something too late because it took longer than I thought"><span>I started something too late because it took longer than I thought</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="A heavy week caught me off guard"><span>A heavy week caught me off guard</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="I found out my grade in a class was lower than I thought"><span>I found out my grade in a class was lower than I thought</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="I've tried planners or to-do apps and stopped using them"><span>I’ve tried planners or to-do apps and stopped using them</span></label></li>
+              <li><label class="pk-o"><input type="checkbox" name="entry.1841072310" value="My classes, job and other commitments are hard to fit together"><span>My classes, job and other commitments are hard to fit together</span></label></li>
+            </ul>
+          </fieldset>
+          <div class="pk-hp" aria-hidden="true">
+            <label for="pk-site">Website</label>
+            <input id="pk-site" type="text" tabindex="-1" autocomplete="off" data-pf-trap>
+          </div>
+          <input type="hidden" name="pageHistory" value="0,1">
+          <div class="pk-act">
+            <button class="btn pr-go" type="submit" data-pf-send>Have Quinn email me</button>
+            <p class="pk-fail" data-pf-fail aria-live="polite"></p>
+          </div>
+        </form>
+        <div class="pk-done" data-pf-done hidden>
+          <p class="pk-thx">Thanks. Quinn will be in touch.</p>
+          <p class="pk-to">Look for an email at <b data-pf-to></b>.</p>
+          <p class="pk-next">The full application is next. It takes about two minutes, on a Google Form, and your name and email are already in it.</p>
+          <a class="btn pr-go" data-pf-full href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Fill out the full application</a>
+        </div>
+        <p class="vh" role="status" data-pf-say></p>
+        <p class="pl-priv"><a href="privacy.html">Your passwords never leave your device. Your data is never sold or shared.</a></p>
+      </div>
+      <div class="pl-side">
+        <ol class="pl-steps" role="list" data-pl-steps>
+          <li class="pl-step">
+            <h3>Apply.</h3>
+            <p>Tell us your schools and homework sites. Your answers decide which ones Knowlu supports first.</p>
+          </li>
+          <li class="pl-step">
+            <h3>Use it for your classes.</h3>
+            <p>It’s free during the pilot. Tell us what’s wrong as&nbsp;you&nbsp;go.</p>
+          </li>
+          <li class="pl-step pl-end">
+            <h3>Keep it free forever.</h3>
+            <p>Take part for the whole semester and Knowlu is free for you forever.</p>
+          </li>
+        </ol>
+        <div class="pl-go" data-pf-later>
+          <a class="btn pl-full" data-pf-full href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Or go straight to the full application</a>
+          <p class="pr-note">About two minutes, on a Google Form.<br>For Windows and Mac.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- Pricing is hidden for now (2026-11-18); remove hidden to bring it back and point the nav links at #pricing again. -->
+  <section class="price" id="pricing" hidden aria-labelledby="pr-h" data-build="parts" data-dots>
     <canvas class="pr-fx" data-dots-fx aria-hidden="true"></canvas>
     <div class="pr-in">
       <div class="pr-head">
@@ -332,12 +423,12 @@
   <section class="faq" id="questions" aria-labelledby="faq-h" data-build="parts">
     <h2 id="faq-h">Questions.</h2>
     <div class="faq-list">
-      <details><summary>When does it launch?</summary><p class="faq-a">For spring semester 2027, on Windows. The waitlist hears first.</p></details>
+      <details><summary>When does it launch?</summary><p class="faq-a">For spring semester 2027, on Windows and Mac. Pilot students get it first.</p></details>
       <details><summary>What does Knowlu read?</summary><p class="faq-a">Canvas and other course calendars, zyBooks, VHL, your school email or Gmail, Google and Outlook calendars, syllabi you upload, campus events, and your registrar where your school offers it.</p></details>
       <details><summary>Does it do my homework?</summary><p class="faq-a">No. Knowlu plans your time and explains why. It never does the work and never writes anything you send to someone else.</p></details>
-      <details><summary>Where do my school passwords go?</summary><p class="faq-a">Nowhere. They stay on your computer, in Windows Credential Manager, and Knowlu signs in to your portals from there. What it reads, like assignments and due dates, goes to Knowlu’s servers to plan your day.</p></details>
+      <details><summary>Where do my school passwords go?</summary><p class="faq-a">Nowhere. They stay on your computer, and Knowlu signs in to your portals from there. What it reads, like assignments and due dates, goes to Knowlu’s servers to plan your day.</p></details>
       <details><summary>What will it cost?</summary><p class="faq-a">Pricing will be announced before launch. 30-day money-back guarantee on the yearly plan. Cancel anytime.</p></details>
-      <details><summary>Mac or phone?</summary><p class="faq-a">Windows desktop first. Nothing else is promised yet.</p></details>
+      <details><summary>Mac or phone?</summary><p class="faq-a">Windows and Mac. No phone app yet.</p></details>
     </div>
   </section>
 </main>
@@ -347,11 +438,11 @@
     <div class="ft-brand">
       <a class="wm" href="#top" aria-label="Knowlu, back to top"><span class="wm-k">Know<b>lu</b></span></a>
       <p class="ft-tag">know what’s next.</p>
-      <p class="ft-when">A Windows desktop app. Opens for spring semester 2027.</p>
+      <p class="ft-when">A desktop app for Windows and Mac. Opens for spring semester 2027.</p>
     </div>
     <nav class="ft-nav" aria-label="Footer">
       <a href="#what">What it does</a>
-      <a href="#pricing">Pricing</a>
+      <a href="#pilot">Pilot</a>
       <a href="#questions">Questions</a>
       <a href="#letter">From the founder</a>
       <a href="privacy.html">Privacy</a>
@@ -370,5 +461,7 @@
 <script src="js/hero-line.js" defer></script>
 <script src="js/pieces.js" defer></script>
 <script src="js/price.js" defer></script>
+<script src="js/pilot.js" defer></script>
+<script src="js/pilot-form.js" defer></script>
 </body>
 </html>

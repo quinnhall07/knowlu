@@ -1,4 +1,5 @@
-/* Price band: the pricing note, on warm ink in both themes, with the second waitlist form.
+/* Price band: on warm ink in both themes. It holds the pilot and, hidden for now, the pricing note with the second
+   waitlist form.
    The band carries the hero's dot grid (js/dots.js draws both), on the band's ink: gray at rest, the class colors
    where the pointer stirs it. With scripts off a plain still grid stands in. */
 
@@ -29,25 +30,252 @@ html:not(.js) .price::before {
   opacity: .6;
 }
 
+/* ---------- the hidden pricing band ---------- */
 .pr-in {
   max-width: var(--page); margin: 0 auto; padding: var(--sec) var(--gut);
   display: grid; gap: clamp(44px, 5vw, 72px);
 }
 .price h2 { font-size: var(--t-h2); line-height: 1.02; letter-spacing: -.016em; max-width: 10em; text-shadow: var(--halo); }
 .pr-when { margin-top: 16px; font: 400 var(--t-lead)/1.5 var(--serif); color: var(--ink-2); text-shadow: var(--halo); }
-
-/* ---------- the form ---------- */
+.pr-join { display: grid; justify-items: start; gap: 14px; }
 .pr-join .wl { width: min(100%, 560px); }
 .price .wl-msg, .price .wl-done { text-shadow: var(--halo); }
 .price .wl-done :is(.btn, input) { text-shadow: none; }
 
+/* ---------- the pilot ----------
+   Two even columns on a wide screen: on the left the heading, the line under it and the short form; on the right the
+   pilot as three steps along one fine line, with the way straight to the full application after them. The line runs from the first step's tick to the third and turns into it: the third step, free
+   forever, is where it ends, and it is set largest. On phones it all stacks as heading, form, steps, then that way.
+   Red stays on the buttons. */
+.pl-in {
+  max-width: var(--page); margin: 0 auto;
+  padding: clamp(88px, 8vw, 128px) var(--gut) clamp(88px, 8.5vw, 136px);
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "head" "form" "side";
+}
+.pl-head { grid-area: head; }
+.pl-head h2 { max-width: none; }
+.pl-sub {
+  margin-top: clamp(14px, 1.4vw, 22px); max-width: 16em;
+  font: 400 var(--t-h3)/1.2 var(--serif); color: var(--ink); text-wrap: balance; text-shadow: var(--halo);
+}
+.pl-lead { margin-top: 12px; max-width: 26em; font: 400 var(--t-lead)/1.5 var(--serif); color: var(--ink-2); text-wrap: balance; text-shadow: var(--halo); }
+
+/* ---------- the steps ----------
+   Each step: a tick off the line, its number, a short bold lead (h3) and one sentence. --h is the lead's size, and
+   the tick sits at .64 of it, the middle of its lowercase letters. The line between two ticks is drawn by the upper
+   step (::before), down to the next step's tick: --gn is the room between the two steps, --hn the next lead's size.
+   That line is the track; js/pilot.js draws a brighter one over it as the band scrolls in. */
+.pl-side { grid-area: side; margin-top: 72px; display: flex; flex-direction: column; }
+.pl-steps {
+  position: relative; list-style: none; counter-reset: pl;
+  --x: 64px; --tick: 24px; --gap: clamp(40px, 3.6vw, 52px); --gap-end: clamp(52px, 5vw, 76px);
+  --h-step: clamp(26px, 2.2vw, 34px); --h-end: clamp(40px, 4.4vw, 66px);
+  --lit: var(--ink-2); --track: var(--line);
+}
+.pl-step { position: relative; padding-left: var(--x); counter-increment: pl; --h: var(--h-step); --gn: var(--gap); --hn: var(--h-step); }
+.pl-step + .pl-step { margin-top: var(--gap); }
+.pl-step:nth-child(2) { --gn: var(--gap-end); --hn: var(--h-end); }
+.pl-end { --h: var(--h-end); }
+.pl-step + .pl-end { margin-top: var(--gap-end); }
+
+/* the line down to the next tick, and this step's tick */
+.pl-step:not(:last-child)::before {
+  content: ""; position: absolute; left: 0; width: 1px;
+  top: calc(var(--h) * .64); bottom: calc(-1 * (var(--gn) + var(--hn) * .64));
+  background: var(--lit);
+}
+.pl-step::after {
+  content: ""; position: absolute; left: 0; top: calc(var(--h) * .64); width: var(--tick); height: 1px;
+  background: var(--lit); transform-origin: 0 50%;
+}
+/* the number, just past the tick */
+.pl-step h3::before {
+  content: counter(pl); position: absolute; left: calc(var(--tick) + 10px); top: calc(var(--h) * .64);
+  transform: translateY(-52%);
+  font: 600 14px/1 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: 0; color: var(--ink-3);
+  text-shadow: var(--halo);
+}
+.pl-step h3 {
+  font: 400 var(--h)/1.1 var(--display); letter-spacing: -.012em; color: var(--ink); text-shadow: var(--halo);
+}
+.pl-step p {
+  margin-top: 10px; max-width: 30em;
+  font: 400 var(--t-body)/1.55 var(--serif); color: var(--ink-2); text-shadow: var(--halo);
+}
+/* the payoff: the lead at nearly the heading's size, its sentence at lead size, its number in cream */
+.pl-end h3 { letter-spacing: -.02em; line-height: 1.04; }
+.pl-end h3::before { color: var(--ink); }
+.pl-end p { margin-top: 14px; max-width: 24em; font-size: var(--t-lead); line-height: 1.5; }
+
+/* js/pilot.js is drawing the line: the track goes dim, the drawn line sits over it (top and length measured, the
+   share drawn in --pl-p), and each tick and number lights as the line reaches it */
+.pl-steps.pl-live { --lit: var(--track); }
+.pl-steps.pl-live::after {
+  content: ""; position: absolute; left: 0; width: 1px; top: var(--pl-a, 0); height: var(--pl-len, 0);
+  background: var(--ink-2); transform-origin: 50% 0; transform: scaleY(var(--pl-p, 0));
+  transition: transform 260ms linear;
+}
+.pl-live .pl-step::after { transform: scaleX(0); transition: transform var(--med) var(--ease), background-color var(--med) var(--ease); }
+.pl-live .pl-step.is-on::after { transform: none; background: var(--ink-2); }
+.pl-live .pl-step h3::before { transition: color var(--med) var(--ease); }
+.pl-live .pl-step:not(.is-on) h3::before { color: var(--shade-51); }
+.pl-live .pl-end h3 { transition: color var(--slow) var(--ease); }
+.pl-live .pl-end:not(.is-on) h3 { color: var(--ink-2); }
+
+
+/* ---------- the short form ----------
+   Labels sit above their fields. The fields are the band's own: a step lighter than the ground, a fine edge that
+   turns cream on focus and the error color when wrong, with the reason in words under them. The list of what the
+   student has lived through is ruled like a list on paper, each row a 48px target with a square box: cream when
+   checked, never red. Text set on the dots wears the band's halo. */
+.pf { grid-area: form; margin-top: clamp(36px, 3.2vw, 48px); width: min(100%, 620px); }
+.pk-form { display: grid; gap: 36px; }
+.pk-two { display: grid; gap: 22px; }
+.pk-f { display: grid; align-content: start; min-width: 0; }
+.pk-l, .pk-q { padding: 0; font: 600 16px/1.3 var(--sans); color: var(--ink); text-shadow: var(--halo); }
+.pk-l { margin-bottom: 10px; justify-self: start; }
+.pk-in {
+  width: 100%; min-width: 0; height: 56px; padding: 0 16px;
+  font: 400 18px/1 var(--sans); color: var(--ink); background: var(--field);
+  border: 1px solid var(--field-line); border-radius: var(--r); outline: none;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.pk-in:hover { border-color: var(--ink-3); }
+.pk-in:focus { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.pk-in[aria-invalid="true"] { border-color: var(--error); box-shadow: 0 0 0 1px var(--error); }
+.pk-in[aria-invalid="true"]:focus { box-shadow: 0 0 0 1px var(--error), 0 0 0 4px var(--bg), 0 0 0 5px var(--ink-3); }
+.pk-err, .pk-fail { font: 500 var(--t-small)/1.4 var(--sans); color: var(--error); text-shadow: var(--halo); }
+.pk-err:not(:empty) { margin-top: 8px; }
+
+/* the list */
+.pk-exp { margin: 0; padding: 0; border: 0; min-width: 0; }
+.pk-hint { margin-top: 4px; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-3); text-shadow: var(--halo); }
+.pk-opts { margin-top: 14px; list-style: none; border-bottom: 1px solid var(--line); }
+.pk-opts li { border-top: 1px solid var(--line); }
+.pk-o {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr); column-gap: 16px; align-items: start;
+  min-height: 48px; padding: 12px 0; cursor: pointer;
+  font: 400 18px/1.35 var(--serif); color: var(--ink-2); text-shadow: var(--halo);
+  transition: color var(--fast) var(--ease);
+  -webkit-tap-highlight-color: transparent;
+}
+.pk-o:hover, .pk-o:has(input:checked) { color: var(--ink); }
+.pk-o input {
+  appearance: none; -webkit-appearance: none; margin: 1px 0 0; width: 22px; height: 22px;
+  display: grid; place-content: center; cursor: pointer;
+  background: var(--field); border: 1.5px solid var(--field-line); border-radius: var(--r);
+  transition: background-color var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.pk-o input::before {
+  content: ""; width: 11px; height: 6px; margin-top: -3px;
+  border: solid var(--bg); border-width: 0 0 2px 2px; transform: rotate(-45deg) scale(0);
+  transition: transform var(--fast) var(--ease);
+}
+.pk-o:hover input { border-color: var(--ink-3); }
+.pk-o input:checked { background: var(--ink); border-color: var(--ink); }
+.pk-o input:checked::before { transform: rotate(-45deg) scale(1); }
+.pk-o input:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+@media (forced-colors: active) {
+  .pk-o input { appearance: auto; -webkit-appearance: auto; }
+  .pk-o input::before { display: none; }
+}
+
+/* the honeypot: out of sight and out of reach for people, there for bots */
+.pk-hp { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
+
+/* the send button and what went wrong sending */
+.pk-act { display: grid; justify-items: start; gap: 12px; }
+.pr-go { height: 60px; padding: 0 32px; font-size: 18px; }
+.pr-go:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.pr-go[aria-disabled="true"] { opacity: .72; cursor: progress; transform: none; }
+
+/* after sending: the thank-you, then the full application as the next step */
+.pk-done { display: grid; justify-items: start; gap: 16px; }
+.pk-thx { max-width: 17em; font: 400 var(--t-h3)/1.2 var(--display); letter-spacing: -.01em; color: var(--ink); text-wrap: pretty; text-shadow: var(--halo); }
+.pk-to { max-width: 26em; font: 400 var(--t-lead)/1.45 var(--serif); color: var(--ink); text-shadow: var(--halo); }
+.pk-to b { font-weight: 600; overflow-wrap: anywhere; }
+.pk-next { max-width: 26em; font: 400 var(--t-lead)/1.5 var(--serif); color: var(--ink-2); text-shadow: var(--halo); }
+.pk-done .btn { margin-top: 10px; }
+@media (prefers-reduced-motion: no-preference) {
+  .pk-done:not([hidden]) { animation: pk-in var(--med) var(--ease) both; }
+  @keyframes pk-in { from { opacity: 0; transform: translateY(8px); } }
+}
+
+/* the privacy line, under the form in both states */
+.pl-priv { margin-top: 22px; max-width: 26em; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-3); text-wrap: balance; text-shadow: var(--halo); }
+.pl-priv a { display: inline-block; padding: 6px 0; text-decoration-color: var(--field-line); text-decoration-thickness: 1px; }
+.pl-priv a:hover, .pl-priv a:focus-visible { color: var(--ink); text-decoration-color: currentColor; }
+.pl-priv a:focus-visible { outline-color: var(--ink); }
+
+/* ---------- the way straight to the full application, at the foot of the steps ----------
+   A second choice, so drawn in ink: an outline button. Once the form is sent it goes, and the thank-you carries the
+   full application in red instead. */
+.pl-go { margin-top: 56px; display: grid; justify-items: start; gap: 14px; }
+.pl-full {
+  height: 56px; padding: 0 26px; color: var(--ink); background: transparent;
+  box-shadow: inset 0 0 0 1px var(--field-line); white-space: normal; text-align: center;
+  transition: box-shadow var(--fast) var(--ease), background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.pl-full:hover, .pl-full:focus-visible { background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--ink); }
+.pl-full:active { background: var(--bg-2); }
+.pl-full:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.pr-note { font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink-3); text-wrap: balance; text-shadow: var(--halo); }
+
+/* ---------- wide screens: heading and form on the left, the steps on the right ---------- */
+@media (min-width: 1000px) {
+  .pl-in {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: clamp(48px, 6.4vw, 112px);
+    grid-template-areas: "head side" "form side"; grid-template-rows: auto 1fr;
+  }
+  .pl-side { margin-top: 0; }
+  /* the first step's lead lines up with the heading's letters; the way to the full application follows the
+     payoff, under the steps' words */
+  .pl-steps { padding-top: clamp(8px, .9vw, 14px); }
+  .pl-go { margin-top: clamp(48px, 4.4vw, 64px); padding-left: 64px; }
+  .pl-step p { font-size: 19px; }
+  .pl-end p { font-size: var(--t-lead); }
+}
+@media (min-width: 1200px) {
+  .pk-two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 18px; }
+}
+
+/* ---------- phones ---------- */
+@media (max-width: 520px) {
+  .pl-in { padding-block: 80px 80px; }
+  .pl-sub { font-size: 24px; }
+  .pl-lead { font-size: 19px; }
+  .pf { margin-top: 32px; }
+  .pk-form { gap: 32px; }
+  .pk-o { font-size: 17px; column-gap: 14px; }
+  .pl-side { margin-top: 64px; }
+  .pl-steps { --x: 44px; --tick: 14px; --h-step: 24px; --h-end: clamp(32px, 9.4vw, 40px); }
+  .pl-step h3::before { left: calc(var(--tick) + 8px); font-size: 13px; }
+  .pl-step p { font-size: 17px; }
+  .pl-end p { font-size: 19px; }
+  .pl-go { margin-top: 48px; justify-items: stretch; }
+  .pr-go, .pl-full { width: 100%; }
+  .pl-full { height: auto; min-height: 56px; padding: 14px 20px; line-height: 1.25; }
+  .pk-done { justify-items: stretch; }
+}
+
 /* ---------- motion ---------- */
 @media (prefers-reduced-motion: no-preference) {
-  /* building on scroll: heading, then the form */
-  .pr-head > *, .pr-join {
-    transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease);
-  }
+  /* building on scroll: the hidden pricing band's heading, then its form */
+  .pr-head > *, .pr-join { transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease); }
   .pr-head > :nth-child(2) { transition-delay: 100ms; }
-  .pr-join { transition-delay: 260ms; }
-  .js .price[data-build]:not(.is-in) :is(.pr-head > *, .pr-join) { opacity: 0; transform: translateY(18px); }
+  .pr-join { transition-delay: 360ms; }
+  .js .price:not(.pilot)[data-build]:not(.is-in) :is(.pr-head > *, .pr-join) { opacity: 0; transform: translateY(18px); }
+
+  /* the pilot: the heading and the lines under it rise, then the form, the steps one after another, then the way to
+     the full application. The line through the steps is drawn by the scroll itself (js/pilot.js), not on a clock. */
+  .pl-head > *, .pf, .pl-step, .pl-go { transition: opacity var(--slow) var(--ease), transform var(--slow) var(--ease); }
+  .pl-head > :nth-child(2) { transition-delay: 90ms; }
+  .pl-head > :nth-child(3) { transition-delay: 160ms; }
+  .pf { transition-delay: 220ms; }
+  .pl-step:nth-child(1) { transition-delay: 200ms; }
+  .pl-step:nth-child(2) { transition-delay: 280ms; }
+  .pl-step:nth-child(3) { transition-delay: 360ms; }
+  .pl-go { transition-delay: 420ms; }
+  .js .price.pilot[data-build]:not(.is-in) :is(.pl-head > *, .pf, .pl-step, .pl-go) { opacity: 0; transform: translateY(16px); }
 }
