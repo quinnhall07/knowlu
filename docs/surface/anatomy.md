@@ -38,6 +38,8 @@ record something that was already tried and rejected.
 
 ## 2. The page set
 
+> **Since v0.4.0** the shipped page is the new one-document UI (`docs/reference/app.md`, "The page"): Home, Tasks, Calendar, Classes, Lock in and Settings. This section and §3's region notes describe the read model's regions and the pre-v0.4.0 page that first drew them; the engine's regions are unchanged.
+
 Eight pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
 
 | Page | The question it answers |
@@ -501,6 +503,26 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **`fetched_at`** is the strip's "updated 2 h ago", read from `state/grades.json`; a missing or
   unreadable file leaves it null and nothing else changes.
 - **Left out:** any ranking weight, GPA and a per-course scale until a syllabus supplies one.
+
+---
+
+## 3.17 COURSES (the `courses` region, v0.4.0)
+
+**The question it answers:** which classes does the student have, what colour is each, and how is each doing? The sidebar, the domain row, the Classes list and every class colour read it, so no page derives a slot or a code of its own.
+
+- **Where it comes from:** `surface::courses`, one entry per readable `courses/*.md` note, serialised as the top-level `courses` array of every view's payload. It reads only.
+- **Entry fields**, all always present (`null` or `[]` when there is nothing):
+  - `slug`: `slug:`, else the file stem (the key a task's `course:` names);
+  - `title`: `title:`, else the slug (the code, "ABC 101");
+  - `name`: `name:`, the school's own name, or `null`;
+  - `status`: `status:` trimmed, or `null` (absent or blank reads as active, as `commitments::active_courses` reads it);
+  - `slot`: `c1` to `c16`, the course's position in slug (byte) order, wrapping after sixteen. By slug, not title, because a title can be edited; so up to sixteen classes get distinct colours, and the page's `--c1` to `--c16` follow it;
+  - `standing`: the vault-wide status word's rule over this course's open tasks alone, or `null` with none;
+  - `codes`: the compact codes `commitments::code_table` maps to this slug, in its sorted order. The table's warnings (a code two courses claim) stay where `code_table`'s other callers put them.
+- **Order:** `(title lowercased, title, slug)`, as `grades::course_grades` orders.
+- **Omitted when empty.** A vault with no `courses/` notes serialises with no `courses` key, so every older output, the three surface references included, is byte-identical.
+- **A duplicate slug keeps the first note in file-name order**, and the other is skipped and takes no slot. A note whose frontmatter does not read is skipped too, as `grades` skips it.
+- **Left out:** a term (there is no term field, so Classes groups Current and Not current by `status`), and any colour value: the engine names the slot, the stylesheet owns the colour.
 
 ---
 

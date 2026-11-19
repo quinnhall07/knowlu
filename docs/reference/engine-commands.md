@@ -133,6 +133,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   moment, when it falls on the day (`surface::load_at`); the note drawer (`note_detail`) keeps `load`.
   Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
   exits 2 — and reports `moved` against the current window without writing one.
+  Since v0.4.0 the payload also carries a top-level `courses` array (slot `c1`-`c16`, standing, codes per class), omitted when the vault has no course notes: `docs/surface/anatomy.md` §3.17.
 - `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]]`
   — without `--confirm`, it fetches the configured calendar feeds, refreshes
   `state/calendar-series.json`, and prints the current commitment proposals as of today
