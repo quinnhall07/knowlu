@@ -2,7 +2,7 @@
 //! `main.rs` source text. The window cannot be started in a test (no GUI is launched here), so
 //! these pins hold the shape the live proof then checks by `PrintWindow`: a window that starts
 //! hidden and undecorated, a window-state plugin that never restores the native frame and never
-//! touches `main` at creation (B1, N2), one show path run once after first paint or after 3 s
+//! touches `main` or the hidden windows at creation (B1, N2, I1), one show path run once after first paint or after 3 s
 //! (N9), the Windows 11 border set to none (N8), and the page's exact capability list (N6).
 
 use serde_json::Value;
@@ -91,15 +91,116 @@ fn both_window_state_builders_skip_main_and_never_restore_the_frame() {
         2,
         "exactly one window-state plugin per builder"
     );
+    // The hidden windows are skipped too (whole-branch review I1). FLAGS keeps MAXIMIZED, and the
+    // plugin applies a saved maximized state with `ShowWindow(SW_MAXIMIZE)`, which shows and
+    // activates a window built `visible(false)`: a `mail` or `lms-grades` window once closed
+    // maximized would put the hidden mail step or grades refresh over the student's work.
+    // `mail::POPUP` is built visible, focused and on top, and is skipped for its own reason: it keeps
+    // the size the site asks for, and a popup saved maximized would cover the screen. Named by
+    // their constants, so a renamed label cannot fall out of the list.
     for b in BUILDERS {
         let body = squash(fn_body(&src, b));
         assert!(
             body.contains(
-                ".plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state(\"main\").build())"
+                ".plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state(\"main\").skip_initial_state(grades::WINDOW).skip_initial_state(mail::WINDOW).skip_initial_state(mail::POPUP).build())"
             ),
-            "`{b}` registers the window-state plugin with FLAGS and skip_initial_state(\"main\") (N2)"
+            "`{b}` registers the window-state plugin with FLAGS and skips the initial state of main (N2), of the hidden windows grades::WINDOW and mail::WINDOW, and of the popup mail::POPUP (I1)"
         );
     }
+}
+
+/// The labels the window-state skips name, read from their source and checked against the
+/// compiled constants: the skip list in `main.rs` means these windows and no others.
+#[test]
+fn the_skipped_hidden_window_labels_are_the_grades_and_mail_windows() {
+    let read = |rel: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(rel);
+        squash(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+    };
+    let grades = read("grades.rs");
+    let mail = read("mail.rs");
+    assert!(grades.contains("pubconstWINDOW:&str=\"lms-grades\";"), "grades.rs names its window `lms-grades`");
+    assert!(mail.contains("pubconstWINDOW:&str=\"mail\";"), "mail.rs names its window `mail`");
+    assert!(mail.contains("pubconstPOPUP:&str=\"mail-popup\";"), "mail.rs names its popup `mail-popup`");
+    assert_eq!(knowlu::grades::WINDOW, "lms-grades");
+    assert_eq!(knowlu::mail::WINDOW, "mail");
+    assert_eq!(knowlu::mail::POPUP, "mail-popup");
+    // The hidden refresh and the mail step are built under exactly these labels.
+    assert!(grades.contains("WebviewWindowBuilder::new(app,WINDOW,") && grades.contains(".visible(false)"),
+            "the grades refresh window is built hidden under grades::WINDOW");
+    assert!(mail.contains("WebviewWindowBuilder::new(app,WINDOW,") && mail.contains(".visible(visible)"),
+            "the mail window is built under mail::WINDOW, hidden for the mail step");
+    assert!(mail.contains("WebviewWindowBuilder::new(app,POPUP,"), "the mail popup is built under mail::POPUP");
+}
+
+/// Every `.rs` file under `dir`, recursively, in a fixed order.
+fn rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            rs_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// The labels `run_console`'s window-state plugin skips, as written: `"main"`, `grades::WINDOW`, ...
+/// (the other builder's line is pinned identical above).
+fn skipped_labels(src: &str) -> Vec<String> {
+    let body = squash(fn_body(src, "run_console"));
+    body.match_indices(".skip_initial_state(")
+        .map(|(i, m)| {
+            let rest = &body[i + m.len()..];
+            rest[..rest.find(')').expect("a closed skip_initial_state(")].to_string()
+        })
+        .collect()
+}
+
+/// **The general form of I1's pin**: every window built anywhere in `app/src` with `.visible(` set
+/// to anything but `true` is in `main.rs`'s skip list, so a window built hidden, now or later, is
+/// never shown by a saved maximized state at creation. A label written as a bare constant `X` in
+/// `<module>.rs` is named `<module>::X` in `main.rs`; a string literal is compared as written.
+#[test]
+fn every_window_built_hidden_is_in_the_skip_list() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let skips = skipped_labels(&main_rs());
+    let mut files = Vec::new();
+    rs_files(&src_dir, &mut files);
+    let mut hidden = 0usize;
+    for path in files {
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Whole-line comments out, so a comment inside a chain cannot add or hide a `.visible(`.
+        let code: String = text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        let flat = squash(&code);
+        let rel = path.strip_prefix(&src_dir).unwrap().with_extension("");
+        let module: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .filter(|c| c != "mod").collect();
+        let module = module.join("::");
+        for (i, m) in flat.match_indices("WebviewWindowBuilder::new(") {
+            let rest = &flat[i + m.len()..];
+            let chain = &rest[..rest.find(".build()").unwrap_or_else(|| panic!("{}: a builder chain with no .build()", path.display()))];
+            let mut args = chain.splitn(3, ',');
+            let _app = args.next();
+            let label = args.next().unwrap_or_else(|| panic!("{}: a builder with no label", path.display()));
+            let set_hidden = chain.match_indices(".visible(").any(|(j, v)| !chain[j + v.len()..].starts_with("true)"));
+            if !set_hidden {
+                continue;
+            }
+            hidden += 1;
+            let named = if label.starts_with('"') || label.contains("::") { label.to_string() } else { format!("{module}::{label}") };
+            assert!(
+                skips.contains(&named),
+                "{}: the window `{named}` is built with `.visible(` not `true`, so main.rs must skip its initial state (I1); skips: {skips:?}",
+                path.display()
+            );
+        }
+    }
+    assert!(hidden >= 2, "the scan finds the grades refresh and the mail window, at least ({hidden} found)");
 }
 
 #[test]

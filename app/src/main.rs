@@ -24,7 +24,14 @@ fn fatal(msg: &str) -> ! {
 /// visibility. The plugin's defaults restore `decorated`, so a saved `"decorated": true` would put a
 /// native bar over the drawn one, and its VISIBLE restore would show `main` before WebView2 has
 /// painted. The frame is always the config's (`decorations: false`); Rust shows the window. Written
-/// with `difference` because bitflags' `&` and `!` are not `const`.
+/// with `difference` because bitflags' `&` and `!` are not `const`. `MAXIMIZED` stays, and the plugin
+/// applies it with `ShowWindow(SW_MAXIMIZE)`, which shows a hidden window: so both builders skip the
+/// initial state of `main` and of the hidden windows (`grades::WINDOW`, `mail::WINDOW`), and nothing
+/// the plugin restores at creation shows a window built hidden (review I1; `show_main` restores
+/// `main` itself, just before it shows it). `mail::POPUP` is built visible, focused and on top, and
+/// is skipped for its own reason: it keeps the size the site asks for, and a popup saved maximized
+/// would cover the screen. `app/tests/window_chrome.rs` fails on any window built with `.visible(`
+/// not `true` whose label is missing here.
 const FLAGS: StateFlags = StateFlags::all().difference(StateFlags::DECORATIONS).difference(StateFlags::VISIBLE);
 
 /// `show_main` runs once per process. The two builders are two processes (each ends in
@@ -151,7 +158,7 @@ fn main() {
 fn run_shell(root: std::path::PathBuf, mode: &'static str, ps: Vec<profiles::Profile>) -> ! {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }))
-        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state("main").build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state("main").skip_initial_state(grades::WINDOW).skip_initial_state(mail::WINDOW).skip_initial_state(mail::POPUP).build())
         .setup(move |app| {
             app.manage(onboarding::Onboarding { root, mode, profiles: std::sync::Mutex::new(ps) });
             // R-C1-40 (I1b): the app holds the sign-in window's session directory, so wiping it does
@@ -212,7 +219,7 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
     let vault_str: &'static str = Box::leak(vault.to_string_lossy().into_owned().into_boxed_str());
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }))
-        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state("main").build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(FLAGS).skip_initial_state("main").skip_initial_state(grades::WINDOW).skip_initial_state(mail::WINDOW).skip_initial_state(mail::POPUP).build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--vault", vault_str])))
         // Plan 4a Task 8's key-gated step, and **on this builder only**: `run_shell` has no vault,

@@ -76,8 +76,12 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   and focuses. A 3 s timer calls the same function, so a script error never leaves an invisible app. Both builders
   (console and picker/wizard) register the two triggers.
 - **Window-state plugin flags.** `FLAGS` is every `StateFlags` bit except `DECORATIONS` and `VISIBLE`, and both
-  builders pass it to `tauri_plugin_window_state` with `skip_initial_state("main")`, so it applies to every window
-  the plugin tracks while `main` is restored only by `show_main`. Restoring `DECORATIONS` would bring back a saved
+  builders pass it to `tauri_plugin_window_state` with four `skip_initial_state` labels, so it applies to every
+  other window the plugin tracks. `main` is restored only by `show_main`. `grades::WINDOW` (`lms-grades`) and
+  `mail::WINDOW` (`mail`) are built hidden for the grades refresh and the mail step, and a saved maximized state
+  would show them through `ShowWindow(SW_MAXIMIZE)`. `mail::POPUP` (`mail-popup`) keeps the size the site asks
+  for, since a popup saved maximized would cover the screen. `app/tests/window_chrome.rs` fails on any window built
+  with `.visible(` not `true` whose label is not skipped. Saving on close is unchanged for all of them. Restoring `DECORATIONS` would bring back a saved
   native frame over the drawn one; restoring `VISIBLE` would show `main` before WebView2 has painted. The page is
   granted no window-state permission.
 - **The page: `app/static/`** (v0.4.0, replacing the single `console.js`/`console.css` page). One document,
