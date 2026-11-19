@@ -17,7 +17,7 @@
     "externalBin": ["binaries/knowlu-engine"],
     "windows": {
       "webviewInstallMode": { "type": "embedBootstrapper" },
-      "nsis": { "installMode": "currentUser" },
+      "nsis": { "installMode": "currentUser", "installerIcon": "icons/icon.ico" },
       "signCommand": { "cmd": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "../scripts/sign.ps1", "%1"] }
     }
   },
