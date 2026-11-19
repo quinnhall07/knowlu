@@ -1,0 +1,32 @@
+{
+ "launch_state": {
+  "ok": true,
+  "error": null,
+  "mode": "picker",
+  "profiles": [
+   {
+    "id": "profile-one",
+    "name": "Knowlu",
+    "vault": "C:\\Users\\student\\Knowlu\\Knowlu"
+   },
+   {
+    "id": "profile-two",
+    "name": "Second term",
+    "vault": "D:\\Example\\Second term"
+   }
+  ],
+  "machine": "EXAMPLE-PC",
+  "tz": "America/Chicago",
+  "default_parent": "C:\\Users\\student\\Knowlu",
+  "default_backup": "C:\\Users\\student\\Knowlu\\Backups"
+ },
+ "open_profile": {
+  "ok": true,
+  "error": null
+ },
+ "pick_folder": {
+  "ok": true,
+  "error": null,
+  "path": null
+ }
+}
