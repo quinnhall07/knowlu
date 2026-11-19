@@ -28,6 +28,8 @@ Uses Playwright with the system's Edge (channel "msedge"), headless; no network 
 import argparse
 import json
 import pathlib
+import re
+import subprocess
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -94,6 +96,17 @@ PROBE = """() => {
 }"""
 
 
+def registered_routes():
+    """The routes a page registers itself for (`KnowluRouter.add("<name>"` under js/pages/): a route with no page leaves #center empty."""
+    found = set()
+    for f in (REPO / "app" / "static" / "next" / "js").rglob("*.js"):
+        found.update(re.findall(r'KnowluRouter\.add\(\s*"([a-z]+)"', f.read_text(encoding="utf-8")))
+    return found
+
+
+REGISTERED = registered_routes()
+
+
 def go(page, hash_, route):
     """Set the address's hash and wait until the router shows `route` with no view transition running."""
     page.evaluate("(h) => { location.hash = h; }", hash_)
@@ -132,13 +145,15 @@ def check_one(page, base, set_name, size, theme, text, want):
     need(p["level"] == want["level"], "status dot %r, want %r" % (p["level"], want["level"]))
     need(p["frameless"] and p["wcShown"], "window controls")
     need(p["current"] == ["home"], "sidebar marks %s" % p["current"])
-    need(p["centerHtml"] == "", "#center is not empty with no Home page registered")
+    if "home" not in REGISTERED:
+        need(p["centerHtml"] == "", "#center is not empty with no Home page registered")
 
     go(page, "#tasks", "tasks")
     page.wait_for_function("() => window.__fixture.calls.some(c => c.cmd === 'state' && c.args.view === 'all')", timeout=5000)
     q = page.evaluate(PROBE)
     need(q["route"] == "tasks" and q["current"] == ["tasks"], "#tasks: route %s, marks %s" % (q["route"], q["current"]))
-    need(q["centerHtml"] == "", "#tasks: #center not empty")
+    if "tasks" not in REGISTERED:
+        need(q["centerHtml"] == "", "#tasks: #center not empty with no Tasks page registered")
     if want["first_class"]:
         go(page, "#class/" + want["first_class"], "class")
         q = page.evaluate(PROBE)
@@ -214,8 +229,13 @@ def sidebar(browser, base, size, theme):
 def main():
     ap = argparse.ArgumentParser(description="Check the new page against staged envelopes in headless Edge.")
     ap.add_argument("prefix", nargs="?", default="base", help="run every envelope set whose name starts with this")
+    ap.add_argument("--checks", action="store_true", help="run every checks/t*.py in turn instead; fail if any fails")
     ap.add_argument("--scale", type=float, default=1.0, help="device scale factor (1, 1.25, 1.5)")
     args = ap.parse_args()
+    if args.checks:
+        bad = [c.name for c in sorted((HERE / "checks").glob("t*.py")) if print("== " + c.name, flush=True) or subprocess.run([sys.executable, str(c)]).returncode != 0]
+        print("checks failed: %s" % ", ".join(bad) if bad else "all checks passed")
+        sys.exit(1 if bad else 0)
     names = sets_for(args.prefix)
     if not names:
         sys.exit("no envelope set starts with %r (run make_base_courses.py)" % args.prefix)

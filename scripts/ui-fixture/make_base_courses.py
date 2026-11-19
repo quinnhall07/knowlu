@@ -196,10 +196,10 @@ def digest_only(root):
 
 
 def surface(vault, view):
-    out = subprocess.run([str(ENGINE), "surface", "--vault", str(vault), "--view", view] + PINS, capture_output=True)
+    out = subprocess.run([str(ENGINE), "surface", "--vault", str(vault), "--view", view] + PINS, capture_output=True, encoding="utf-8")
     if out.returncode != 0:
-        sys.exit("surface --view %s failed: %s" % (view, out.stderr.decode("utf-8", "replace")))
-    return json.loads(out.stdout.decode("utf-8"))
+        sys.exit("surface --view %s failed: %s" % (view, out.stderr))
+    return json.loads(out.stdout)
 
 
 def envelope(state):

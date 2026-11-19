@@ -194,7 +194,7 @@
       var old = typeof row.progress_pct === "number" && row.progress_pct < 100 ? row.progress_pct : 0;
       return KnowluData.call("set_fields", { id: row.id, fields: { progress: 100, status: "done" } }).then(function (env) {
         if (env && env.ok) {
-          ev("task_done", row.id, "task");
+          ev("edit_committed", row.id, "progress");
           toast("Done", "Undo", function () { KIT.uncheck(row, old); });
         } else {
           toast(refusal(env), null, null, true);
@@ -205,7 +205,7 @@
     uncheck: function (row, old) {
       var back = typeof old === "number" && old < 100 ? old : 0;
       return KnowluData.call("set_fields", { id: row.id, fields: { progress: back, status: "active" } }).then(function (env) {
-        if (env && env.ok) { ev("task_undone", row.id, "task"); } else { toast(refusal(env), null, null, true); }
+        if (env && env.ok) { ev("edit_committed", row.id, "progress"); } else { toast(refusal(env), null, null, true); }
         return env;
       });
     },

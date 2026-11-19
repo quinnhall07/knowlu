@@ -940,3 +940,27 @@ fn the_logos_are_the_sources_v040_reads() {
     let shipped: Vec<String> = shipped_files().into_iter().filter(|f| f.starts_with("logos/")).collect();
     assert_eq!(shipped.len(), LOGOS.len(), "logos/ holds exactly the seven marks: {shipped:?}");
 }
+
+/// Every `ev(` kind the new page sends is one `ui_event` accepts: the engine's `uievents::ACTIONS`, read from
+/// its source (the app refuses any other name at `record`, so a made-up kind would be dropped silently).
+#[test]
+fn every_ev_kind_is_an_accepted_ui_event_action() {
+    let src = std::fs::read_to_string(app_dir().join("..").join("engine/src/uievents.rs")).expect("engine/src/uievents.rs");
+    let start = src.find("pub const ACTIONS").expect("ACTIONS list");
+    let list = &src[start..start + src[start..].find("];").expect("end of ACTIONS")];
+    let accepted: BTreeSet<String> = string_literals(list).into_iter().collect();
+    assert!(accepted.contains("view_opened") && accepted.len() >= 11, "read the list: {accepted:?}");
+    let mut seen = BTreeSet::new();
+    for (file, code) in scripts() {
+        for (i, _) in code.match_indices("ev(") {
+            if code[..i].chars().next_back().map_or(false, |c| c.is_alphanumeric() || c == '_' || c == '.') { continue; }
+            let rest = code[i + 3..].trim_start();
+            if let Some(q) = rest.strip_prefix('"') {
+                let kind = &q[..q.find('"').unwrap_or(q.len())];
+                assert!(accepted.contains(kind), "{file}: ev({kind:?}) is not an accepted ui_event action {accepted:?}");
+                seen.insert(kind.to_string());
+            }
+        }
+    }
+    assert!(seen.len() >= 5, "found the page's ev( calls: {seen:?}");
+}
