@@ -1,1 +1,108 @@
-/* T9 owns */
+/* Knowlu app, Lock in (v0.4.0 note §4, D6, plan T9; DESIGN.md "Lock in session").
+   One assignment on its class's soft field and one clock beside it; the beat after Done (what is left, the finished
+   one, the next one, Start next) and the closing page stand on the ground. The sidebar steps aside on this route.
+   One scale unit, --k: one pixel of the design's 1440 x 900 stage, measured on the center (its own container), held
+   between .7 and 1.25. Display type and the air inside each half scale by it; controls and labels do not. The soft
+   field, the ring and the filled controls come from the slot table (slots.css): this file mixes no class colour. */
+
+/* ---------- the sidebar steps aside ---------- */
+html[data-route="lockin"] .side { display: none; }
+html[data-route="lockin"] .app { grid-template-columns: minmax(0, 1fr); }
+
+/* ---------- the page's measures ---------- */
+.lk { container: lk / size; height: 100%; min-height: 420px; --in: 24px; }
+.lk-stage {
+  --k: clamp(.7px, min(calc((100cqw - 3 * var(--in)) / 1368), calc((100cqh - var(--in) - 2 * var(--h-tap) - var(--h-control)) / 672)), 1.25px);
+  --pad: calc(56 * var(--k));
+  --meta: max(17px, calc(24 * var(--k)));
+  --nm: calc(80 * var(--k));
+  /* the clock: 196 units, never wider than its half (four figures and a colon, about 2.9 em) */
+  --clock: min(calc(196 * var(--k)), calc((50cqw - 1.5 * var(--in) - var(--pad) - 8px) / 2.9));
+  --lbl-gap: calc(28 * var(--k));
+  height: 100%;
+  padding: 0 var(--in) var(--in);
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: var(--in);
+  grid-template-rows: var(--h-tap) var(--pad) minmax(0, 1fr) auto calc(var(--lbl-gap) + 20px) auto minmax(0, 1.3fr) var(--h-control) var(--pad);
+  isolation: isolate;
+}
+.lk-set { display: contents; }
+
+/* row 1: End, at the right edge */
+.lk-head { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; }
+.lk-end { margin-right: -14px; }
+
+/* the field, behind everything in its half */
+.lk-field { grid-column: 1; grid-row: 2 / -1; z-index: -1; border-radius: var(--r-surface); background: var(--soft); }
+.lk-l, .lk-r { padding-inline: var(--pad); min-width: 0; }
+.lk-l { grid-column: 1; }
+.lk-r { grid-column: 2; }
+
+/* row 4: the labels, one size and one line height so their baselines meet */
+.lk-lbl { grid-row: 4; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 22px; min-height: var(--h-tap); font: 500 var(--meta)/1 var(--sans); color: var(--ink); }
+.lk-code, .lk-left, .lk-done-n { white-space: nowrap; }
+.lk-due { white-space: nowrap; }
+.lk-due i, .lk-r.lk-lbl { font-style: normal; color: var(--ink-2); }
+/* row 5, under the clock's label: where the student is in the run */
+.lk-place { grid-row: 5; align-self: start; margin: -6px 0 0; font: 400 var(--t-small)/1.2 var(--sans); color: var(--ink-2); white-space: nowrap; }
+
+/* the ring on the field: a 44px target around a ring in the class colour, flush with the content edge; pressed, it
+   fills with the class colour (shell.css, A8) */
+.lk-stage .ck { --ck: max(22px, calc(28 * var(--k))); margin: 0 calc((var(--ck) - var(--h-tap)) / 2); }
+.lk-stage .ck circle { stroke: var(--ring, var(--cc)); }
+@media (hover: hover) {
+  .lk-stage .ck:not([aria-pressed="true"]):hover path { stroke: var(--ring, var(--cc)); }
+}
+.lk-stage span.ck { cursor: default; pointer-events: none; }
+/* a finished assignment's mark: done as everywhere, filled with its class colour and the check in the on-class colour */
+.ck.lk-on circle { fill: var(--cc, var(--ink)); stroke: var(--cc-edge, var(--cc, var(--ink))); }
+.ck.lk-on path { stroke: var(--on-cc, var(--bg)); stroke-dashoffset: 0; }
+
+/* row 6: the name beside the clock, both on one baseline */
+.lk-main { grid-row: 6; align-self: last baseline; }
+.lk-name { font: 400 var(--nm)/1 var(--display); letter-spacing: -.018em; text-wrap: balance; font-variant-numeric: lining-nums proportional-nums; color: var(--ink); overflow-wrap: anywhere; }
+.lk-clock { padding-left: calc(var(--pad) - .06em); font: 500 var(--clock)/.8 var(--sans); letter-spacing: -.035em; font-variant-numeric: tabular-nums lining-nums; color: var(--ink); white-space: nowrap; }
+/* a still clock (Break ready) is the second ink; a running one, ink */
+.lk[data-phase="ready"] .lk-clock { color: var(--ink-2); }
+/* time hidden: the figure goes, its place and its label stay */
+.lk[data-hide] .lk-clock { visibility: hidden; }
+
+/* row 8: every control on one line across the window */
+.lk-acts { grid-row: 8; display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lk-r.lk-acts > .obtn:first-child { margin-left: -14px; }
+.lk-acts .obtn { font-size: var(--t-label); }
+/* the filled control in the class colour: Done on its field, Start next on the ground in the next class's colour */
+.lk-do {
+  display: inline-flex; align-items: center; justify-content: center; height: var(--h-control); padding: 0 30px;
+  border: 0; border-radius: var(--r-control); background: var(--do-bg, var(--ink)); color: var(--do-fg, var(--bg)); font: 600 var(--t-label)/1 var(--sans);
+  white-space: nowrap; cursor: pointer;
+  transition: color var(--fast) var(--ease), background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.lk-do.lk-next { --do-bg: var(--nx-bg); --do-fg: var(--nx-fg); --do-away: var(--nx-away); }
+.lk-do:hover, .lk-do:focus-visible, .lk-do:active { background: color-mix(in oklab, var(--do-bg, var(--ink)) 88%, var(--do-away, var(--bg))); }
+.lk-do:active { transform: translateY(var(--press)); }
+.lk-do:focus-visible { outline-offset: var(--focus-off); }
+.lk-l.lk-acts .obtn:hover, .lk-l.lk-acts .obtn:focus-visible { background: var(--soft-2); }
+
+/* ---------- the beat: what is left, the finished one over the next one ---------- */
+.lk-line { display: flex; align-items: center; gap: 22px; min-height: var(--h-tap); min-width: 0; font: 500 var(--meta)/1 var(--sans); color: var(--ink); }
+.lk-line + .lk-line { margin-top: calc(16 * var(--k)); padding-top: calc(16 * var(--k)); border-top: var(--hair) solid var(--line); }
+.lk-was { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 var(--meta)/1.2 var(--display); letter-spacing: -.006em; color: var(--ink-2); }
+.lk-undo { margin-left: auto; font-size: var(--t-small); }
+.lk-seam-main .lk-name { margin-top: calc(20 * var(--k)); }
+
+/* ---------- the closing page: what was done, the time focused, Home ---------- */
+.lk-done-list { align-self: start; }
+.lk-done-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 22px; min-height: max(var(--h-tap), calc(60 * var(--k))); }
+.lk-done-row + .lk-done-row { border-top: var(--hair) solid var(--line); }
+.lk-done-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 var(--meta)/1.2 var(--display); letter-spacing: -.006em; color: var(--ink); }
+.lk-done-code { font: 500 var(--t-small)/1 var(--sans); color: var(--ink-2); white-space: nowrap; }
+.lk-close .lk-done-list { grid-row: 6 / 8; }
+.lk-spent { align-self: start; padding-left: calc(var(--pad) - .06em); font: 500 calc(var(--clock) * .5)/1 var(--sans); letter-spacing: -.02em; color: var(--ink); white-space: nowrap; }
+.lk-home { height: var(--h-control); padding: 0 30px; font-size: var(--t-label); }
+.lk-none .lk-lbl { grid-row: 4; }
+
+/* ---------- motion only at the seam: the beat comes in, opacity only ---------- */
+@keyframes lk-arrive { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: no-preference) {
+  .lk[data-mode="beat"] :is(.lk-seam > *, .lk-next) { animation: lk-arrive var(--med) var(--ease) both; }
+}
