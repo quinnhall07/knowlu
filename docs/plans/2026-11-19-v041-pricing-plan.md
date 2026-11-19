@@ -3,21 +3,22 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status:** r2, answering review r1 (`docs/reports/2026-11-19-v041-pricing-spec-review-r1.md`) together
-with the note. One re-review follows, then Quinn.
+**Status:** r3, final. r2 answered review r1. r3 applies review r2's fixes
+(`docs/reports/2026-11-19-v041-pricing-spec-review-r2.md`, PASS with changes). There is no further
+review round; what stays open is the note's §8 list, for Quinn.
 
 **Size:** Contract. It moves money; it moves `TOS_VERSION`, and with D12 `PRIVACY_VERSION`, in
 `app/src/account.rs`; it is a release; it changes the terms; and with D12 it changes the privacy page.
 
 **Spec:** `docs/specs/2026-11-19-v041-pricing-design.md` r2 ("the note"), cited by section (§n), by
-decision (D1-D12) and by Quinn item: **Qn is the note's Qn** (the plan's own §8 is the proof and
+decision (D1-D12) and by Quinn item: **Qn is item n of the note's §8 list** (the plan's own §8 is the proof and
 rollout). Where this plan and the note disagree, the note wins. §11
 lists where the note left room.
 
 **Goal.** Ship v0.4.1 with three things true:
 - **Billing charges the signed prices:** $12.99 every 4 weeks, or $84.37 once a year, with 14 days free
   once per account and a reminder before the first charge.
-- **The app's subscribe step states those prices** (P9; Q3).
+- **The app's subscribe step states those prices** (P9; Q5).
 - **The terms state them.**
 
 Managed Payments' per-session change is in if S1 passes. Every production step and the tag wait for
@@ -58,7 +59,7 @@ These facts are from `feat/v0.4.0-ui` on 2026-11-19. T0 re-checks them on `main`
   - the reminder goes only to the account's own address;
   - no telemetry is added.
 
-  VISION's price line is Quinn's to rewrite (Q12), and that gates the tag.
+  VISION's price line is Quinn's to rewrite (Q13), and that gates the tag.
 - **Rule 1, no single-user assumption.**
   - Price ids come from each project's environment.
   - No account id, address or person appears in code, tests, fixtures, docs or reports.
@@ -93,32 +94,41 @@ These facts are from `feat/v0.4.0-ui` on 2026-11-19. T0 re-checks them on `main`
 
 ## 3. Preconditions, and what T0 and T0r settle
 
-**Quinn's items Q1-Q12, by what they block** (the note's §8 has each recommendation):
+**Quinn's items Q1-Q13, by what they block** (the note's §8 has each recommendation):
 
 | Item | What | Blocks |
 |---|---|---|
-| 1 | Amendment 2026-11-10 on `main`, plus an amendment recording the 2026-11-17 rulings and items 2, 3 and 5 | T1 |
-| 2 | `academic_year` keeps its name and $69.99 | T2 |
-| 3 | The subscribe step shows P9's price lines | T4 |
-| 4 | The upgrade sheet sells both plans, Yearly first | T4 |
-| 5 | No gift paragraph in these terms | T5 |
-| 6 | The mailing address, or "email only" | T5 |
-| 7 | Comp grant, then cancel old-price subscriptions immediately | T5's old-subscriber paragraph; the act comes before §8 C step 7 |
-| 8 | The per-session Managed Payments change and the Link privacy page | T5's scope (checkpoint B) |
-| 9 | Stripe and KNOWLU LLC: defer, or which branch | §8 C step 9 |
-| 10 | The production parity push, if T0 finds it missing | §8 C step 10 |
-| 11 | The live reminder round trip | the tag |
-| 12 | VISION's and CLAUDE.md's price lines in Quinn's words | the tag |
+| Q1 | Amendment 2026-11-10 on `main`, plus an amendment recording the 2026-11-17 rulings and Q3, Q5, Q6, Q7 | T1 |
+| Q2 | The production parity push, only if the testers and comp-guard stamps are the whole gap | Q9's grant; §8 C step 10 |
+| Q3 | `academic_year` keeps its name and $69.99 | T2 |
+| Q4 | Stripe and KNOWLU LLC: the same account's details, or a new account (deferred) | P7, the test-mode checklist, and so S1 |
+| Q5 | The subscribe step shows P9's price lines | T4 |
+| Q6 | The upgrade sheet sells both plans, Yearly first | T4 |
+| Q7 | No gift paragraph in these terms | T5 |
+| Q8 | The mailing address, or "email only" | T5 |
+| Q9 | Per Quinn account that holds a subscription: comp grant, then cancel immediately | T5's old-subscriber paragraph; the act comes before §8 C step 7 |
+| Q10 | Managed Payments in effect (reading (i) with the change, or (ii)), so Link on the pages; or the fallback | T5's scope (checkpoint B) |
+| Q11 | The live reminder round trip | §8 C step 10b |
+| Q12 | 10b's leftover production records | §8 C step 10b |
+| Q13 | VISION's and CLAUDE.md's price lines in Quinn's words | the tag |
 
-**Also Quinn's:** the test-mode half of the note's §4 checklist, before S1 (P7 below).
+**Also Quinn's:** the test-mode half of the note's §4 checklist, before S1 (P7 below), after Q4.
 
 **T0's production read** (read-only, on Quinn's word; counts only in the ledger, never an id or an
 address):
 - `supabase migration list --project-ref <prod>` and `supabase functions list --project-ref <prod>`.
   - If `20261020000500_testers.sql` or `20261020000600_comp_guards.sql` is missing, the main session opens
-    precondition **"production parity for v0.4.1"** (Q10).
-  - The precondition is L9's steps (1)-(2) (`HANDOFF.md:598`) through those stamps: one ordered
-    `db push --include-all`, then L8's `entitlement` redeploy.
+    precondition **"production parity for v0.4.1"** (Q2).
+  - **Its scope.** The push runs from a **scratch copy of `cloud/supabase` whose `migrations/` ends at
+    `20261020000600_comp_guards.sql`**, never from the integration worktree. `db push --include-all`
+    pushes every pending local migration, and has no "through" option. L8's `entitlement` redeploy
+    follows.
+  - **If the list shows anything else missing below that stamp** that needs a secret, a Vault entry or a
+    function redeploy beyond `entitlement` and `billing-checkout` (for example email's migrations), the
+    precondition is L9 proper (`HANDOFF.md:598`). v0.4.1 waits for it, or Quinn rules.
+  - The main session shows Quinn the exact list of files the push will apply before the go.
+- **Whose accounts.** Quinn names which production accounts are Quinn's (`HANDOFF.md:58` records two). The
+  ledger records two counts: Quinn's accounts and other accounts.
 - The queries:
   - `select count(*) from public.accounts`;
   - `select plan, status, count(*) from public.entitlements group by 1, 2`;
@@ -150,7 +160,7 @@ answer a quote with its URL and the date read, or "not found"):
    - Whether a refund returns the tax and the fee.
    - Whether `tax_behavior: exclusive` is accepted.
 8. **Moving Stripe to an LLC.** Whether a sole-proprietor Stripe account can become an LLC's by changing
-   its business details, or needs a new account (Q9).
+   its business details, or needs a new account (Q4).
 
 ## 4. Tasks at a glance
 
@@ -163,12 +173,12 @@ Agents and efforts follow CLAUDE.md's table. Every `cloud-engineer`, `console-ui
 | T0 baseline and production read | §4 step 0 | the ledger, the worktree | main session | §2's docs merge; Q1 | — |
 | T0r Stripe facts | §3, D7 | `docs/reports/2026-11-19-v041-managed-payments-facts.md` | `researcher` (Opus, high), read-only, with web | — | checkpoint A |
 | T1 checkout | D3, D4, D5, D7, D8 | `cloud/supabase/functions/billing-checkout/{handler,index,handler_test}.ts` | `cloud-engineer` (Opus, high) | T0, checkpoint A | `reviewer`, with T2 and T3 |
-| T2 webhook and reminder | D2, D6 | `cloud/supabase/functions/stripe-webhook/{handler,index,handler_test}.ts` | `cloud-engineer`, same run | T0, checkpoint A, Q2 | as T1 |
+| T2 webhook and reminder | D2, D6 | `cloud/supabase/functions/stripe-webhook/{handler,index,handler_test}.ts` | `cloud-engineer`, same run | T0, checkpoint A, Q3 | as T1 |
 | T3 billing mails | D10 | `cloud/supabase/functions/billing-jobs/{handler,handler_test}.ts` | `cloud-engineer`, same run | T0 | as T1 |
-| S1 test-mode spike | D7 gate, D5, D6 | the ledger; `docs/reports/2026-11-2x-v041-s1-managed-payments.md` | main session, with Quinn at the test Dashboard | T1-T3 merged; P7 | checkpoint B |
-| T4 subscribe step and labels | D9 | `app/static/js/wizard.js`, `app/static/js/pages/settings.js`, `app/static/js/carried/account.js`, `app/tests/ui_wizard.rs`, `app/tests/ui_settings.rs`, `app/tests/ui_plans.rs` (new), `scripts/ui-fixture/checks/t21.py`, `scripts/ui-fixture/checks/t16.py` (one assertion), `scripts/ui-fixture/checks/t20.py` (one assertion; its `#up-subscribe` checks at `:94, 115` stay), `scripts/ui-fixture/envelopes/t16-settings-answers.json` (one value) | `console-ui` (Opus, high) | T1-T3 merged; Q3, Q4 | `reviewer` |
-| T5 legal commit | D11, D12, D3's floor | red: `engine/tests/site.rs`, `app/tests/bundle_config.rs`, and with D12 `app/tests/ui_account_privacy.rs`. Draft: `site/terms.html`, `site/subscribed.html`, and with D12 `site/privacy.html` and `app/static/js/carried/reconsent.js`. The commit: those, plus `app/src/account.rs` (two constants) and the `CHECKOUT_TERMS_VERSION` line in `billing-checkout/index.ts` | `test-writer` (red), then `console-ui` (drafts), then `contract-engineer` (Opus, xhigh), who makes the one commit | checkpoint B; T0's count; Q5-Q7 | `contract-reviewer`; `reviewer` (text); Quinn reads the pages |
-| T5b C1, only if T0 finds another account | D11 | the legal spec's C1: `account.rs`, `cloud/supabase/functions/account/{handler,handler_test}.ts`, `carried/reconsent.js` | `contract-engineer`, `cloud-engineer`, `console-ui` | T0 | `contract-reviewer`, `reviewer` |
+| S1 test-mode spike | D7 gate, D5, D6 | the ledger; `docs/reports/2026-11-2x-v041-s1-managed-payments.md` | main session, with Quinn at the test Dashboard | T1-T4 merged (S1 drives a T4 dev build); P7 | checkpoint B |
+| T4 subscribe step and labels | D9 | `app/static/js/wizard.js`, `app/static/js/pages/settings.js`, `app/static/js/carried/account.js`, `app/tests/ui_wizard.rs`, `app/tests/ui_settings.rs`, `app/tests/ui_plans.rs` (new), `scripts/ui-fixture/checks/t21.py`, `scripts/ui-fixture/checks/t16.py` (one assertion), `scripts/ui-fixture/checks/t20.py` (one assertion; its `#up-subscribe` checks at `:94, 115` stay), `scripts/ui-fixture/envelopes/t16-settings-answers.json` (one value) | `console-ui` (Opus, high) | T1-T3 merged; Q5, Q6 | `reviewer` |
+| T5 legal commit | D11, D12, D3's floor | red: `engine/tests/site.rs`, `app/tests/bundle_config.rs`, and with D12 `app/tests/ui_account_privacy.rs`. Draft: `site/terms.html`, `site/subscribed.html`, and with D12 `site/privacy.html` and `app/static/js/carried/reconsent.js`. The commit: those, plus `app/src/account.rs` (two constants) and the `CHECKOUT_TERMS_VERSION` line in `billing-checkout/index.ts` | `test-writer` (red), then `console-ui` (drafts), then `contract-engineer` (Opus, xhigh), who makes the one commit | checkpoint B; T0's count; Q7-Q9 | `contract-reviewer`; `reviewer` (text); Quinn reads the pages |
+| T5b C1, only if T0 finds an account that is not Quinn's | D11 | the legal spec's C1: `account.rs`, `cloud/supabase/functions/account/{handler,handler_test}.ts`, `carried/reconsent.js` | `contract-engineer`, `cloud-engineer`, `console-ui` | T0 | `contract-reviewer`, `reviewer` |
 | T6 docs | all | `HANDOFF.md`, `docs/reference/app.md`, `cloud/supabase/README.md`; marker lines in the legal spec and the v0.4.0 note | `docs-keeper` (Sonnet, medium) | T5 | `reviewer` |
 | T7 version 0.4.1 | — | `Cargo.toml:9`, `app/tauri.conf.json:4`, `Cargo.lock` | main session | T5 | T8 |
 | T8 whole-branch review | all | none | `reviewer` (Opus, high) | T4-T7 | — |
@@ -181,8 +191,13 @@ Agents and efforts follow CLAUDE.md's table. Every `cloud-engineer`, `console-ui
 - T6 beside T7.
 
 **What runs in order.**
+- T1-T4, then S1. S1 drives a T4 dev build, whose wizard can reach a checkout. The floor is still
+  2026-09-10 then, which that build sends.
 - `billing-checkout/index.ts`: T1, then T5's one line.
 - `account.rs`: T5, then T5b.
+- **`site/`:** the controller's site port (branch `site/port-live-1119`) merges to `main` before the v0.4.0
+  tag, so before T0. T5 composes its three pages on the ported `site/`. If the port has not landed when T5
+  starts, stop: the port and T5 both write `site/*.html`.
 
 ## 5. Tasks
 
@@ -218,9 +233,9 @@ Red first: commit the failing tests and record each failure reason.
       - the counts.
 
       The outcomes:
-      - **A migration missing** opens "production parity for v0.4.1" (Q10).
-      - **More than one account** adds T5b.
-      - **No old-price subscription after Q7** means T5 leaves out the old-subscriber paragraph.
+      - **A migration missing** opens "production parity for v0.4.1" (Q2), scoped as §3 says.
+      - **Any account that is not Quinn's** adds T5b. Quinn's own accounts (`HANDOFF.md:58`) never do.
+      - **No old-price subscription after Q9** means T5 leaves out the old-subscriber paragraph.
 
 ### T0r. Stripe facts (`researcher`)
 - [ ] §3's eight questions. The researcher writes only the report.
@@ -229,9 +244,10 @@ Red first: commit the failing tests and record each failure reason.
     `automatic_tax[enabled]`, `customer_update[address]`, `billing_address_collection` and
     `allow_promotion_codes` may be dropped, each on a quoted refusal.
   - **If a load-bearing key is refused** (note D7), stop and go to Quinn at once. That is a checkpoint B
-    failure brought forward (Q8). T1 builds the fallback form unless Quinn rules otherwise.
-  - **If reading (ii) holds**, T1 makes no per-session change, and only D12's question remains for
-    checkpoint B.
+    failure brought forward (Q10). T1 builds the fallback form unless Quinn rules otherwise.
+  - **If reading (ii) holds**, T1 makes no per-session change. Managed Payments is still in effect, so
+    T5 carries D11's Link line and D12. The only fallback left is Quinn turning the account setting off in
+    live mode before §8 C step 10 (Q10). Not recommended: that reverses R2 and U5.
   - **If the report contradicts the note**, amend the note within the open review round.
 
 ### T1. Checkout (`cloud-engineer`)
@@ -243,24 +259,37 @@ Red first: commit the failing tests and record each failure reason.
   After the session check, the fake records no call: no account read, no tester read, no customer, no
   consent row, no session.
 - `a_terms_version_below_the_floor_is_told_to_update`: "2026-09-09" answers 409 with the same sentence.
-- `a_malformed_or_future_terms_version_is_refused`: "zzz", "9999-99-99" and the day after tomorrow each
-  answer 400 with the account function's sentence.
+- `a_malformed_or_future_terms_version_is_refused`: each answers 400 with "a version must be a YYYY-MM-DD
+  date no later than tomorrow":
+  - "zzz" and "9999-99-99";
+  - the day after tomorrow;
+  - **"2026-11-19x"**, which sorts between the floor and tomorrow and is caught only by the pattern.
 - `an_unknown_plan_is_still_400`.
 - `the_trial_is_fourteen_days_on_a_first_subscription_only`:
   - no row gives "14";
   - a `canceled` row with a subscription id gives no trial key;
   - `payment_method_collection` is "always" in both cases.
-- `an_account_with_a_live_subscription_is_refused`: an `active` or `trialing` row with a subscription id
-  answers 409 with D5's sentence before any customer or consent row.
-- `the_price_is_checked_before_it_is_sold`: six cases (amount, currency, `month`, count 1, `active: false`,
-  `tax_behavior: "inclusive"`). Each answers 500, with no consent row or session.
-- `the_form_keeps_every_load_bearing_key`: D7's seven load-bearing keys are present. The dropped keys equal
-  checkpoint A's list exactly. If the fallback applies, today's tax keys are pinned instead.
+- `an_account_with_a_live_subscription_is_refused`: a row with a subscription id whose status is `active`,
+  `trialing`, `past_due` or `unpaid` answers 409 with D5's sentence before any customer or consent row.
+- `the_price_is_checked_before_it_is_sold`: one case per check, each answering 500 with no consent row or
+  session:
+  - a wrong amount;
+  - a wrong currency;
+  - `active: false`;
+  - `tax_behavior: "inclusive"`;
+  - the interval `month`;
+  - a count of 1 on the 4-week plan;
+  - **`four_weekly` pointing at a `year` × 1 price at 1299**, and `yearly` pointing at a `week` × 4 price
+    at 8437.
+- `the_form_keeps_every_load_bearing_key`: D7's load-bearing keys are present (the trial key only on a
+  first subscription, D5). The dropped keys equal checkpoint A's list exactly. If the fallback applies,
+  today's tax keys are pinned instead.
 - `stripes_page_states_the_renewal_terms`: D8's sentence, for each plan and trial combination.
 - The `index.ts` text-read (`handler_test.ts:331-343`) checks:
   - the names `STRIPE_PRICE_FOUR_WEEKLY` and `STRIPE_PRICE_YEARLY`;
   - `{ four_weekly: 1299, yearly: 8437 }`;
-  - `CHECKOUT_TERMS_VERSION = "2026-09-10"`, declared once;
+  - `CHECKOUT_TERMS_VERSION` declared once, as a quoted `YYYY-MM-DD` literal. It does not check the
+    value: `bundle_config` ties that to `TOS_VERSION`, so T5's commit changes no test file of T1's;
   - `isTester` unchanged.
 - Existing tests move to the new plans. The 18+ and tester assertions are unchanged.
 
@@ -270,6 +299,10 @@ Red first: commit the failing tests and record each failure reason.
   `getPrice(id)` (through `stripeGetFrom`) and `termsFloor`.
 - The order is: method, user, parse, D3's three checks, account, 18+, tester, D5, D4, customer, consent,
   session.
+- D3's shape check is the pattern `^\d{4}-\d{2}-\d{2}$` first, then the comparison with tomorrow (UTC).
+  The account function has only the comparison (`account/handler.ts:199-201`); it is not copied.
+- D4 compares the interval and the count to the plan's own pair: `four_weekly` is week × 4, `yearly` is
+  year × 1.
 - A different API version, if T0r requires one, goes on the session call only. `_shared/stripe.ts` is not
   edited.
 
@@ -323,9 +356,9 @@ Red first: commit the failing tests and record each failure reason.
 **Change.** `priceOf` gains two entries. "click the gear" is replaced in both mails. The pause branch is
 unchanged.
 
-### S1. Test-mode spike (main session; §8 B)
+### S1. Test-mode spike (main session; §8 B; after T1-T4)
 
-### T4. Subscribe step and labels (`console-ui`; built as Q3 and Q4 rule)
+### T4. Subscribe step and labels (`console-ui`; built as Q5 and Q6 rule)
 
 **Red:**
 - `ui_wizard::the_subscribe_buttons_send_the_signed_plans`:
@@ -339,15 +372,21 @@ unchanged.
     - "30-day money-back guarantee on each yearly charge.";
     - "$12.99 every 4 weeks.";
     - "Plus tax where it applies.".
-  - No "$" appears outside that panel's markup.
-  - Nowhere in `wizard.js`: "9.99", "69.99", "a month", "per month", "/mo", "trial", "14 days", "14-day",
-    "free first" or "Pell".
+  - The test keeps today's method (`ui_wizard.rs:585-597`): `string_literals` over **both** `js/wizard.js`
+    and `js/picker.js`. The status word `"trialing"` (`wizard.js:162`) is the one exception to the trial
+    ban. For every literal:
+    - "$" and "a year" appear only inside one of the four lines above;
+    - none of these appears: "trial", "7-day", "seven day", "14-day", "14 days", "fourteen", "per month",
+      "/month", "a month", "/mo", "per year", "9.99", "69.99", "free first" or "pell".
 - `ui_settings::membership_shows_no_price` gains "84.37", "6.49" and "14 days".
 - `ui_settings::plan_words_cover_every_plan_billing_can_write`: the four words.
 - New file `ui_plans.rs`:
   - `the_upgrade_sheet_sells_both_plans_yearly_first`: `carried/account.js` sends `{ plan: "yearly" }` and
     `{ plan: "four_weekly" }`, with the yearly button first, inside `#up-subscribe`.
   - `the_sheet_states_the_same_prices`: the sheet carries the same four lines as the wizard.
+  - `only_the_two_plan_buttons_start_checkout`: the sheet's click handler starts `subscribe` only from
+    `#up-sub-year` or `#up-sub-month`, never from `closest("#up-subscribe")`. Today's handler
+    (`carried/account.js:214`) would start a checkout with no plan on a click on the price lines.
   - `every_plan_the_app_sends_is_one_billing_sells`.
   - `every_plan_the_webhook_can_name_has_a_word`.
   - `the_shown_prices_are_the_charged_cents`: "$12.99" is 1299, "$84.37" is 8437 and "$6.49" is 8437 / 13,
@@ -364,19 +403,21 @@ unchanged.
   price".
 - `settings.js:32`: the word.
 - `carried/account.js:83, 137`: `#up-subscribe` becomes the wrapper that is hidden and shown, holding the
-  two buttons and the lines. Its id stays, so `ui_account_privacy.rs:66, 105, 333` and `t20.py:94, 115`
-  stay green unchanged. `subscribe()` takes the plan from the button pressed.
+  two buttons (`#up-sub-year`, `#up-sub-month`) and the lines. Its id stays, so
+  `ui_account_privacy.rs:66, 105, 333` and `t20.py:94, 115` stay green unchanged.
+- `carried/account.js:214`: the handler binds the two buttons. `subscribe(plan)` takes the plan from the
+  button pressed, and a click elsewhere in the wrapper does nothing.
 
 **Stop rule.** If any `ui_account_privacy.rs` pin must change, stop. That file is T5's, and the main session
 sequences the two.
 
-**If Q3 is "price-free":**
+**If Q5 is "price-free":**
 - no price lines are built;
 - the wizard test keeps r1's shape, banning "12.99", "84.37", "6.49", "14-day", "14 days", "fourteen" and
   "/mo";
 - `ui_plans` drops the figure checks.
 
-**If Q4 is "one plan":** the sheet keeps one button, sending `four_weekly`.
+**If Q6 is "one plan":** the sheet keeps one button, sending `four_weekly`.
 
 The DOM runs use `scripts/ui-fixture/run.py`, at both sizes and in both themes.
 
@@ -392,29 +433,37 @@ The DOM runs use `scripts/ui-fixture/run.py`, at both sizes and in both themes.
   "seven-day" or "gear".
 - `bundle_config::the_terms_version_constant_is_the_published_terms_date`: the privacy tie's shape, plus
   `CHECKOUT_TERMS_VERSION == TOS_VERSION`. This is green on arrival and is recorded as a guard.
-- **With D12:**
+- **If Managed Payments is in effect** (reading (ii), or reading (i) with the change; checkpoint B):
+  - the terms pin requires "Sold through Link";
   - `site::the_privacy_page_names_link`;
   - `ui_account_privacy::the_panels_changes_name_link`, replacing `…name_gmail_and_amazon` (or naming all
     three, if bump A has already merged).
+- **Otherwise:** the terms pin bans "Link".
 
 **Draft** (`console-ui`, handed over as files):
 - `site/terms.html`, composed by heading as note D11 lists. Markers are never published. `[MAILING
-  ADDRESS]` takes Q6's answer.
+  ADDRESS]` takes Q8's answer.
 - `site/subscribed.html`.
-- With D12, `site/privacy.html` and one `PRIVACY_CHANGES` key in `carried/reconsent.js`.
+- If Managed Payments is in effect: `site/privacy.html` and one `PRIVACY_CHANGES` key in
+  `carried/reconsent.js`.
+
+**The terms date** is the commit's own date (UTC). It must be no later than the day after the staging
+proof, because checkout's shape check (D3) and the production account function (`account/handler.ts:199-201`)
+both refuse a version later than tomorrow.
 
 **The commit** (`contract-engineer`, xhigh) moves, in one commit:
-- `TOS_VERSION`, and with D12 `PRIVACY_VERSION`;
+- `TOS_VERSION`, and `PRIVACY_VERSION` if Managed Payments is in effect;
 - `CHECKOUT_TERMS_VERSION`;
 - the pages and the key.
 
 Message: `t05: terms <date> state the signed prices[; privacy <date> names Link]`. After it merges, the
-main session redeploys `billing-checkout` to staging before the staging proof.
+main session redeploys `billing-checkout` to staging before the final staging proof (§8 B, part 2). The
+commit touches no T1 test: T1's text-read checks only the constant's shape.
 
 **Stop rule.** If bump A's PR is open, the main session decides which PR carries the privacy text, so that
 only one key ships.
 
-### T5b. Terms re-acceptance (only if T0 found another account)
+### T5b. Terms re-acceptance (only if T0 found an account that is not Quinn's)
 - The legal spec's C1, to its §7 item 10. It must land before the tag. Production's `account` is redeployed
   at §8 C step 10 with the others.
 
@@ -448,11 +497,11 @@ rests on S1, a proof, a review or Quinn.
 |---|---|---|---|
 | §1 | the student journey | T1-T5 | §8 B proof steps, and §8 C step 10b |
 | D1 | new keys; old keys never sold; no migration | T1, T2, T4 | `billing-checkout::the_signed_plans_reach_stripe_with_their_price`, `::an_older_build_is_told_to_update`; `ui_plans::every_plan_the_app_sends_is_one_billing_sells` |
-| D1 ⚑ | `academic_year` keeps its name and price | T2, T3, Quinn | `stripe-webhook::the_plan_comes_from_the_price_id`; the existing `billing-jobs` tests; Q2 |
+| D1 ⚑ | `academic_year` keeps its name and price | T2, T3, Quinn | `stripe-webhook::the_plan_comes_from_the_price_id`; the existing `billing-jobs` tests; Q3 |
 | D2 | plan from the price id; unknown gives `null`; values optional | T2 | `stripe-webhook::the_plan_comes_from_the_price_id`, `::a_missing_price_setting_matches_nothing`; the text-read; S1 (a) |
 | D3 | old names, old version and bad shape refused first; unknown is 400 | T1 | `billing-checkout::an_older_build_is_told_to_update`, `::a_terms_version_below_the_floor_is_told_to_update`, `::a_malformed_or_future_terms_version_is_refused`, `::an_unknown_plan_is_still_400`; §8 C step 10b (body) |
 | D3 | the floor moves with the terms | T1, T5 | `bundle_config::the_terms_version_constant_is_the_published_terms_date` |
-| D4 | six price checks before the consent row | T1 | `billing-checkout::the_price_is_checked_before_it_is_sold` |
+| D4 | six price checks before the consent row, with the interval and the count tied to the plan | T1 | `billing-checkout::the_price_is_checked_before_it_is_sold` (including a `four_weekly` id on a `year` × 1 price) |
 | D5 | the trial on a first subscription only; card always; one live subscription | T1 | `billing-checkout::the_trial_is_fourteen_days_on_a_first_subscription_only`, `::an_account_with_a_live_subscription_is_refused`; S1 (b) |
 | D6 | the reminder's conditions, wording, unknown price, retry, log, no entitlement write | T2 | the six `stripe-webhook` reminder pins; S1 (c) |
 | D6 ⚑ | the event fires, and the reminder arrives in live mode | T0r, T9 | T0r's quote; §8 C step 9 (events read back); step 10b (round trip, Q11) |
@@ -462,7 +511,7 @@ rests on S1, a proof, a review or Quinn.
 | D8 | the renewal sentence | T1 | `billing-checkout::stripes_page_states_the_renewal_terms`; S1 (a); step 10b |
 | D9 | the wizard's prices, order and values; no trial words | T4 | `ui_wizard::the_subscribe_buttons_send_the_signed_plans`, `::the_wizard_states_the_signed_prices_and_no_trial`; DOM t21 |
 | D9 | the shown figures are the charged cents | T4 | `ui_plans::the_shown_prices_are_the_charged_cents` |
-| D9 | the sheet sells both plans with the same lines | T4 | `ui_plans::the_upgrade_sheet_sells_both_plans_yearly_first`, `::the_sheet_states_the_same_prices`; DOM t20 |
+| D9 | the sheet sells both plans with the same lines; only the buttons start checkout | T4 | `ui_plans::the_upgrade_sheet_sells_both_plans_yearly_first`, `::the_sheet_states_the_same_prices`, `::only_the_two_plan_buttons_start_checkout`; DOM t20 |
 | D9 | Settings words, and no price | T4 | `ui_settings::plan_words_cover_every_plan_billing_can_write`, `::membership_shows_no_price`; `ui_plans::every_plan_the_webhook_can_name_has_a_word`; DOM t16 |
 | D9 ⚑ | the portal has no switching | Quinn | the checklist; S1 (d) |
 | D10 | `priceOf`; no pause for the new plans; the cancel path | T3 | the three new `billing-jobs` pins |
@@ -470,8 +519,9 @@ rests on S1, a proof, a review or Quinn.
 | D11 | the version tie; `subscribed.html` | T5 | `bundle_config::the_terms_version_constant_is_the_published_terms_date`; `site::the_subscribed_page_names_fourteen_days` |
 | D11 ⚑ | existing accounts | T0, T5b, T9 | the ledger's count; §8 C step 12, or T5b's tests |
 | D12 | Link on the privacy page; one key; the tie | T5 | `site::the_privacy_page_names_link`; `ui_account_privacy::the_panels_changes_name_link`, `::the_panels_line_one_names_privacy_version_and_the_table_has_one_key`; `bundle_config::the_privacy_version_constant_is_the_published_pages_date` |
-| §4 ⚑ | production parity before step 10 | T0, T9 | the ledger's migration list; Q10 done |
-| §4 ⚑ | rollout order; the deploy proven live by its body and deliveries | T9 | §8 C steps 7-13, each recorded |
+| §4 ⚑ | production parity before step 10 | T0, T9 | the ledger's migration list; Q2 done |
+| §4 ⚑ | rollout order; the deploy proven live by its body and deliveries; 10b's card always cancelled | T9 | §8 C steps 7-13, each recorded; 10b's `canceled` read-back |
+| §4 ⚑ | the tag publishes the ported site plus T5's pages | T9 | §8 D's `site/` line |
 | §5 | 18+, tester and gate unchanged | T1 | the existing tests, unchanged |
 | §5 | the webhook's guards | T2 | the existing tests, unchanged |
 | §5 | P10's pause for `monthly` alone | T3 | the existing pause tests; `billing-jobs::the_new_plans_are_never_paused` |
@@ -482,10 +532,10 @@ rests on S1, a proof, a review or Quinn.
 
 | Checkpoint | When | Who | Passes when |
 |---|---|---|---|
-| Note and plan re-review | now | `reviewer`, then Quinn's list | PASS, or note §8 settled by Quinn |
+| Note and plan review | done: r1 FAIL, r2 PASS with changes, r3 applies them | `reviewer`; the controller checks r3 against r2's list before T0; then Quinn | the note's §8 settled by Quinn |
 | **A** | after T0r | main session | every question answered; T1's brief written; a refused load-bearing key goes to Quinn |
 | Cloud review | T1-T3 green | `reviewer` | PASS, with red-first visible |
-| **B** | after S1 | main session; **Quinn** if a gate failed | the gates recorded; Q8 settled |
+| **B** | after S1 | main session; **Quinn** if a gate failed | the gates recorded; Q10 settled |
 | App review | T4 green | `reviewer` | PASS |
 | Legal review | T5 committed | `contract-reviewer`; `reviewer` (text, with T6) | PASS; **Quinn reads the pages** |
 | **C** | T4-T7 merged | `reviewer` (T8) | PASS |
@@ -502,29 +552,42 @@ rests on S1, a proof, a review or Quinn.
   repository is public).
 
 **A. Staging setup**
-- [ ] P7: Quinn's test-mode checklist (note §4).
+- [ ] Q4 settled. Then P7: Quinn's test-mode checklist (note §4).
 - [ ] Set `STRIPE_PRICE_FOUR_WEEKLY` and `STRIPE_PRICE_YEARLY` on staging.
-- [ ] Deploy the three functions from the integration branch (`--use-api`). Redeploy `billing-checkout`
-      after T5.
+- [ ] Deploy the three functions from the integration branch after T1-T4 (`--use-api`).
+- [ ] **B1.** Build the dev app from the integration branch after T4 (staging environment, a new scratch
+      profile). It sends `terms_version` 2026-09-10, which equals the floor until T5.
 
-**B. S1, then the staging proof**
-- [ ] **S1 (a) and (b), account A** (a fresh scratch account):
-  1. Open `yearly` and `four_weekly` checkouts. A headless read shows the price, "every 4 weeks" or the
-     yearly wording, "14 days", the tax line and D8's sentence (and "Sold through Link" under reading (i)
-     with the change).
+**B. Part 1: S1 and the staging proof, on the T4 build**
+- [ ] **S1 (a) and (b), account A** (a fresh scratch account, signed in through the T4 build):
+  1. Open `yearly` and `four_weekly` checkouts. A headless read shows:
+     - the price, and "every 4 weeks" or the yearly wording;
+     - "14 days", the tax line and D8's sentence;
+     - "Sold through Link" if Managed Payments is in effect.
   2. Quinn completes `four_weekly` with a test card.
   3. Then, read-only:
      - `four_weekly`, `trialing`, a period end about 14 days out;
-     - the consent row carries 1299 and the `terms_version` sent (the new version is checked after T5).
+     - the consent row carries 1299 and the `terms_version` sent.
+- [ ] **B4.** Account A in the T4 build: Settings reads "Active, Every 4 weeks". This comes before
+      S1 (d)'s cancel.
 - [ ] **S1 (c).** Quinn moves account A's trial end to two days out. The reminder arrives (through the
       connector) and its wording is recorded against D6.
 - [ ] **S1 (d).** In the app, Manage subscription cancels in one click, `entitlements` follows, and the
       portal has no switch. Then open a new checkout on account A: the page shows **no** trial.
-- [ ] **S1 (e), account B.**
-  1. Account B walks the wizard to Subscribe (proof B2 below).
-  2. It completes **`yearly`**. The webhook writes `yearly`, `trialing`.
-  3. It is deleted through Settings → Delete my data. The subscription is cancelled, and later events are
-     ignored.
+- [ ] **S1 (e), account B, with B2 and B3.**
+  1. **B2.** Account B walks the T4 build's wizard to Subscribe:
+     - Yearly comes before Every 4 weeks, with the four lines, and no "trial" or "14" in the panel;
+     - clicking each button opens Stripe's test page, and `PrintWindow` shots show figures matching the
+       panel.
+  2. Quinn completes **`yearly`** from that page. The webhook writes `yearly`, `trialing`.
+  3. **B3.** Finish the wizard to Home.
+  4. Delete account B through Settings → Delete my data. The subscription is **set to cancel at period end
+     with no invoice** (`account/handler.ts:88-94`), and later events are ignored (no such account).
+- [ ] **B5.** `POST /billing-checkout` with `monthly` and "2026-09-10" answers 409 with D3's exact body.
+      No consent row is added.
+- [ ] **B6.** The upgrade sheet on a signed-out scratch install:
+      - after sign-in, both plans appear with their lines;
+      - a click on the lines starts nothing.
 - [ ] **The S1 report** (`docs/reports/2026-11-2x-v041-s1-managed-payments.md`, under the rule above):
   - what Link sends, and when;
   - the receipt's sender;
@@ -532,31 +595,33 @@ rests on S1, a proof, a review or Quinn.
   - what the portal offers.
 
   Then checkpoint B.
-- [ ] **B1.** Build the dev app from the PR head, staging environment, on a new scratch profile.
-- [ ] **B2.** The wizard to Subscribe (account B):
-  - Yearly comes before Every 4 weeks, with the four lines, and no "trial" or "14" in the panel.
-  - Clicking each opens Stripe's test page. `PrintWindow` shots show the figures matching the panel's.
-  - Nothing is paid.
-- [ ] **B3.** Finish the wizard to Home.
-- [ ] **B4.** Account A, before its S1 (d) cancel: Settings reads "Active, Every 4 weeks".
-- [ ] **B5.** `POST /billing-checkout` with `monthly` and "2026-09-10" answers 409 with D3's exact body.
-      No consent row is added.
-- [ ] **B6.** The upgrade sheet on a signed-out scratch install: after sign-in, both plans with their
-      lines.
-- [ ] **B7 (D12 only).** The re-consent panel shows the Link lines, and acceptance records the new version.
+
+**B. Part 2: after T5, on the PR head**
+- [ ] Redeploy `billing-checkout`, so the floor is the new terms date. Build the dev app from the PR head.
+- [ ] **B8.** A fresh scratch account opens both checkouts. The consent row carries the new terms version.
+      B5 again: now "2026-09-10" is refused by the floor, with D3's sentence.
+- [ ] **B7 (only if Managed Payments is in effect).** The re-consent panel shows the Link lines, and
+      acceptance records the new version.
 - [ ] **Clean up** the scratch profiles, vaults, credentials, autostart entries and staging accounts.
 - [ ] **The PR body** says what was run and what was seen.
 
 **C. Production (note §4; each step on Quinn's word)**
-- [ ] **P-parity**, if T0 opened it (Q10): L9 steps (1)-(2) through `20261020000600`, then the
-      `entitlement` redeploy. Then re-read `migration list`.
-- [ ] **Q7**, if agreed:
-  1. `admin.comp_grant` for Quinn's account (an `ends_at` within a year), as one production write.
-  2. Quinn cancels the old-price subscriptions **immediately**, in both modes.
+- [ ] **P-parity**, if T0 opened it and Q2 says yes:
+  1. A scratch copy of `cloud/supabase`, with `migrations/` ending at `20261020000600_comp_guards.sql`.
+  2. Show Quinn the file list the push will apply.
+  3. `db push --include-all` from that copy.
+  4. The `entitlement` redeploy.
+  5. Re-read `migration list`.
+- [ ] **Q9**, if agreed, for **each of Quinn's accounts that holds a subscription**:
+  1. `admin.comp_grant` (an `ends_at` within a year), one production write per account.
+  2. Quinn cancels its old-price subscription **immediately**, in both modes.
   3. Read back the account's view row: `tester`.
-- [ ] **7.** Re-run T0's queries. The counts must equal T0's, except that no `active` or `trialing`
-      `monthly` or `academic_year` row remains, plus the grant. Anything else stops the rollout and goes to
-      Quinn.
+- [ ] **7.** Re-run T0's queries. The counts must equal T0's, except:
+      - no `active` or `trialing` `monthly` or `academic_year` row remains;
+      - Q9's grants are added.
+
+      Anything else stops the rollout and goes to Quinn. A new account that is not Quinn's makes T5b
+      required.
 - [ ] **8.** The PR merges. Record the SHA.
 - [ ] **9.** Quinn's live-mode checklist. Quinn reads back the live endpoint's enabled events, and the main
       session records whether `customer.subscription.trial_will_end` is present.
@@ -566,20 +631,34 @@ rests on S1, a proof, a review or Quinn.
       sign-in by emailed code; `POST /account/consent` with the 18+ attestation and the new versions):
   - The `monthly` and "2026-09-10" POST answers **409 with D3's exact sentence** in `error`. The tester
     sentence fails this step.
-  - `yearly` and `four_weekly` open live pages. A headless read shows the figures, "14 days", the tax
-    line, D8's sentence, and "Sold through Link" if D7's change shipped. Nothing is paid.
+  - `yearly` and `four_weekly` open live pages. A headless read shows:
+    - the figures, "14 days", the tax line and D8's sentence;
+    - "Sold through Link" if Managed Payments is in effect;
+    - **its absence** if Q10 took the switch-off fallback under reading (ii).
+
+    Nothing is paid.
   - **If Q11 is agreed**, the reminder round trip:
     1. Quinn completes `four_weekly` under the trial with their own card. There is no charge at checkout.
     2. `entitlements` shows `four_weekly`, `trialing`.
-    3. Quinn moves the trial end within 3 days.
-    4. The reminder arrives at the scratch address.
-    5. Quinn cancels immediately.
-  - **If not, or if the event does not fire on the move:** record the gap. Make one `mail-canary` send
-    through production's `EMAIL_*`, if that function is deployed there. Quinn accepts the gap at D.
-  - `DELETE /account`. Then read-only: the account's rows are gone.
+    3. Quinn moves the trial end to **no closer than 24 hours away**, and within 3 days.
+    4. Wait for the reminder at the scratch address, for **at most 30 minutes**.
+    5. **Quinn cancels immediately, whether or not the reminder came.** A reminder that did not arrive is
+       recorded as a failed gate, never waited out.
+    6. Read back `canceled` from Stripe and from `entitlements` before going on. If the read-back is not
+       `canceled`, stop: nothing else runs until it is.
+  - **If not, or if the event does not fire on the move:**
+    - record the gap;
+    - make one `mail-canary` send through production's `EMAIL_*`, if that function is deployed there;
+    - Quinn accepts the gap at D.
+  - `DELETE /account`, only after the `canceled` read-back. Then read-only: the account's rows are gone.
+  - **What stays** (Q12): the `auto_renew` consent rows and the account's consent row carry the new terms
+    version (and privacy version) before they are published. Deletion keeps them, with the account id
+    nulled and the hash kept (`account/index.ts:114`). The live Stripe customer stays, and Link may keep a
+    record. The ledger records these as counts.
 - [ ] **11.** §8 D, then tag `v0.4.1` on the merge SHA. Watch `release.yml` through the Pages deploy.
-- [ ] **12.** If T0 found only Quinn's account: Quinn's written acceptance, then the legal spec §4's insert
-      and update, as one production write. This step does not apply if T5b ran.
+- [ ] **12.** If every production account is Quinn's: Quinn's written acceptance, then the legal spec §4's
+      insert and update **on each of Quinn's accounts**, one production write per account. This step does
+      not apply if T5b ran.
 - [ ] **13.** knowlu.com/terms.html shows the new version, `subscribed.html` says 14 days, and the updater
       offers 0.4.1 to a v0.4.0 install.
 
@@ -589,28 +668,34 @@ rests on S1, a proof, a review or Quinn.
 - [ ] `pwsh scripts\release.ps1 -DryRun` passes on a clean checkout.
 - [ ] `pwsh scripts\ci\privacy-guard.ps1` passes.
 - [ ] Steps 9, 10 and 10b are recorded, or their gaps are accepted by Quinn.
-- [ ] Q12 is done.
+- [ ] **`site/` at the merge SHA equals the live site plus T5's pages.** The site port
+      (`site/port-live-1119`) merged before the v0.4.0 tag, so the tag's Pages deploy (`release.yml:294-297`
+      replaces the whole site) restores nothing old. Check it by comparing `site/` at the SHA with the live
+      pages, T5's three excepted.
+- [ ] Q13 is done.
 - [ ] Ask Quinn, with these records.
 
 ## 9. Risks and stop rules
 
 | Risk | Sign | What happens |
 |---|---|---|
-| Production lacks the testers or comp-guard migrations | T0's list | Q10's precondition. Step 10 does not run until it is done, because today's checkout reads `effective_entitlements`. |
-| The parity push brings more than this lane (every missing migration before the stamps) | T0's list | The push is L9's, with its own order and function redeploys (`HANDOFF.md:598`). The main session shows Quinn the list before the go. |
-| Managed Payments refuses a load-bearing key | T0r, or S1 | Quinn, at once (Q8). The fallback form ships, or the release holds. Never a silent drop. |
+| Production lacks the testers or comp-guard migrations | T0's list | Q2's precondition. Step 10 does not run until it is done, because today's checkout reads `effective_entitlements`. |
+| The parity push brings more than this lane | T0's list | The push runs only from a scratch copy ending at `20261020000600` (§3). It never runs from the integration worktree, which would also push `20261023000100`, `20261109000100` and `20261111000100`. If anything missing below the stamp needs a secret, a Vault entry or more redeploys, it is L9 proper, and v0.4.1 waits (Q2). |
+| Managed Payments refuses a load-bearing key | T0r, or S1 | Quinn, at once (Q10). The fallback form ships, or the release holds. Never a silent drop. |
 | Managed Payments needs `_shared/stripe.ts` changed | T1 | Stop. Seven functions would redeploy. |
 | `trial_will_end` is not delivered in test mode | S1 (c) | Checkpoint B. Recommend holding: a missing reminder makes the first charge refundable. |
 | The portal cannot cancel these subscriptions in one click | S1 (d) | Checkpoint B, then the fallback (D7). |
 | A Dashboard price is wrong | D4's 500, on staging or at step 10b | Quinn corrects it, and a new id is set. Nothing was sold. |
 | An unset price value on the webhook | the deliveries at step 10 | It cannot answer 500 (D2). An unknown id shows as `plan: null` and as a `billing-jobs` failure. |
-| Counts change between T0 and step 7 | step 7 | Stop and tell Quinn. A new account makes T5b required. |
+| Counts change between T0 and step 7 | step 7 | Stop and tell Quinn. A new account that is not Quinn's makes T5b required. |
+| The reminder does not arrive in 10b | 10b step 4 | Quinn cancels at 30 minutes anyway, and the `canceled` read-back comes before `DELETE`. The gate is recorded as failed, and Quinn decides at D whether to hold the tag. |
+| The site port has not landed | T5 start, or §8 D | Stop. The tag would replace the live site with an unported `site/`, and T5 and the port both write `site/*.html`. |
 | Bump A is open | T5 | T5's stop rule: one privacy key. |
 | A task needs another contract-list file | any | Stop, amend the plan, and `contract-engineer` makes the change. |
 | The window between step 10 and the tag | by design | Accepted. Sales are closed, and the only install is Quinn's. The tag follows the same day. |
 | `release.yml` fails after step 10 | the tag's run | Fix forward on a new tag. Quinn may roll the three functions back to the pre-merge SHA, because the old functions and the old published terms are a coherent pair. |
 | A Stripe fact proves false after use | any | Amend the note within the open round, never a third round. |
-| The Stripe account changes owner mid-lane | Q9 | The new-account branch adds new secrets, a new endpoint, product, prices and portal, cleared customer ids, and S1 again. Recommend deferring it. |
+| The Stripe account changes owner mid-lane | Q4 | The new-account branch adds new secrets, a new endpoint, product, prices and portal, cleared customer ids, and S1 again. Recommend deferring it. |
 
 **Two failed attempts** move one level up, effort before model. `max`, and Fable for a building role, are
 Quinn's call.
@@ -636,7 +721,7 @@ Quinn's call.
   - Reading the pages.
   - The live-mode checklist, about 20 minutes.
   - Step 10b, about 30 minutes with the round trip.
-  - About eight production words: T0's read, parity, Q7, step 7, the merge, step 10, step 10b and the tag.
+  - About eight production words: T0's read, parity, Q9, step 7, the merge, step 10, step 10b and the tag.
 - **Emailed codes on staging.** Three sign-ins (accounts A and B, and the sheet's scratch install). Plan
   across two hours. Production's step 10b needs one more.
 - **Disk.** At most four live builds. Delete `target/` after each merge.
@@ -644,15 +729,15 @@ Quinn's call.
 ## 11. Ambiguities, and how this plan reads them
 
 1. **"Existing `academic_year` rows map to the yearly plan."** The row keeps its name and $69.99 (D1). Quinn
-   confirms (Q2), and Q1's amendment records it.
+   confirms (Q3), and Q1's amendment records it.
 2. **When billing moves.** In v0.4.1 (Quinn, 2026-11-19), against v0.5.0 in the v0.4.0 note and the legal
    spec. The rest of the billing lane stays in v0.5.0 (note §7).
 3. **A2 against P9.** A2's wizard clause ends with this lane, so P9 governs, and the subscribe step shows the
-   prices (D9). Quinn confirms (Q3). If the app is to stay price-free, Q1's amendment narrows P9 in
+   prices (D9). Quinn confirms (Q5). If the app is to stay price-free, Q1's amendment narrows P9 in
    writing.
-4. **The upgrade sheet.** It shows both plans, Yearly first, replacing the 2026-09-14 one-plan ruling (Q4).
+4. **The upgrade sheet.** It shows both plans, Yearly first, replacing the 2026-09-14 one-plan ruling (Q6).
 5. **The gift year.** R3 says to keep it if the amendment has it, and it does. These terms still leave it out
-   until the gift lane ships (Q5).
+   until the gift lane ships (Q7).
 6. **Where the reminder lives.** The amendment's consequences list it under `billing-jobs`. That list is
    marked "not done by this amendment" and leaves mechanisms to the plan. The webhook sends it (D6), for
    the reasons D6 gives. P14's text is met either way.
@@ -665,4 +750,11 @@ Quinn's call.
 10. **"Plus tax where it applies."** This is P9's phrase, used in the app, the emails and `custom_text`. The
     terms keep the legal spec's "Sales tax is added at checkout where it applies".
 11. **Managed Payments "already on."** This is the live account setting of 2026-09-14. Whether it governs
-    sessions that do not ask for it is T0r's question 2 (D7's readings).
+    sessions that do not ask for it is T0r's question 2 (D7's readings). Under reading (ii), Link is
+    already the seller, so the Link texts ship (Q10). The only fallback is switching the setting off.
+12. **"Quinn's account."** Production has two accounts that are Quinn's (`HANDOFF.md:58`). Every rule that
+    names Quinn's account means each of them: the T5b trigger, Q9's grant and cancel, and step 12's
+    acceptance. Quinn names them, and the ledger records counts.
+13. **The terms floor equals `TOS_VERSION`.** So every later terms bump refuses every older build at
+    checkout, typo fixes included (note D3). This is intended: a build that shows terms must send the
+    version it shows, and the updater offers the new build.
