@@ -237,9 +237,10 @@
       if (ax > ay) { sn.x = sx; sn.y = 0; return ax - blob.rr; }
       sn.x = 0; sn.y = sy; return ay - blob.rr;
     }
-    /* a sign-up row that has already sent its link is done: the dots stop parting around it (the invite row still does) */
+    /* a sign-up row that has already sent its link is done: the dots stop parting around it (the invite row still does).
+       The pilot's short form parts the dots as one box, whichever of its fields is in use. */
     function rowOf(el) {
-      var row = el && el.closest ? el.closest('.wl-row, .nx-row') : null;
+      var row = el && el.closest ? el.closest('.wl-row, .nx-row, form.pk-form') : null;
       return row && row.classList.contains('wl-row') && row.closest('form.ok') ? null : row;
     }
 
@@ -582,7 +583,7 @@
     host.addEventListener('pointerdown', function (e) {
       ptr.cx = e.clientX; ptr.cy = e.clientY; ptr.on = true; ptr.touch = e.pointerType === 'touch';
       ptr.at = ptr.last = now();
-      if (!e.target.closest('form, a, button, input, label, summary, [role="table"], [data-hero-now]')) ptr.down = true;
+      if (!e.target.closest('form, a, button, input, label, summary, [role="table"], [data-hero-now], [data-hero-today]')) ptr.down = true;
       kick();
     });
     function release() {
@@ -614,7 +615,9 @@
       blob.focus = null; blob.hover = null;
       var from = e.detail && e.detail.form;
       if (wlForm && (!from || from === wlForm)) {
-        var hr = host.getBoundingClientRect(), fr = wlForm.getBoundingClientRect();
+        /* detail.at: what took the form's place (the pilot's thank-you), when the form itself has gone */
+        var at = e.detail && e.detail.at && host.contains(e.detail.at) ? e.detail.at : wlForm;
+        var hr = host.getBoundingClientRect(), fr = at.getBoundingClientRect();
         if (fr.width) ripple(fr.left - hr.left + fr.width / 2, fr.top - hr.top + Math.min(fr.height / 2, 40), 2.2);
         else ripple(W / 2, H / 2, 2.2);
       }
@@ -642,12 +645,13 @@
   var hero = document.querySelector('[data-hero]');
   var heroDots = hero && make(hero, {
     canvas: '[data-hero-fx]', dot: '--hero-dot', hot: '--hero-hot', shade: 0.42, seed: 0,
-    quiet: [['.lockup', '.hero-now', 'form.wl']],
-    plain: '.lockup .tag, .hero-now-i, form.wl .wl-msg, form.wl .wl-done > *',
+    quiet: [['.lockup', '.hero-today', '.hero-go']],
+    plain: '.lockup .tag, .ht-cap, form.wl .wl-msg, form.wl .wl-done > *, .hero-go-note',
     form: 'form.wl', wander: true,
-    /* reduced motion: one still swell, to the right of the words on a wide screen and under them on a phone */
+    /* reduced motion: one still swell under the words, never behind the list's sheet (which covers the dots) */
     rest: function (W, H, small, box) {
-      return small ? { x: 0.62 * W, y: Math.min(H - 12, Math.max(0.86 * H, box ? box.b + 36 : 0)) } : { x: 0.76 * W, y: 0.7 * H };
+      return small ? { x: 0.62 * W, y: Math.min(H - 12, Math.max(0.86 * H, box ? box.b + 36 : 0)) }
+        : { x: box ? box.l + 0.3 * (box.r - box.l) : 0.4 * W, y: Math.min(H - 24, box ? box.b + 90 : 0.8 * H) };
     }
   });
   if (heroDots) window.klDots = heroDots;
@@ -655,9 +659,10 @@
   Array.prototype.forEach.call(document.querySelectorAll('[data-dots]'), function (band, i) {
     make(band, {
       canvas: '[data-dots-fx]', dot: '--dot', hot: '--dot-hot', shade: 0.6, seed: 1.9 + i,
-      quiet: [['.pr-head'], ['form.wl']],
-      plain: '.pr-head > *, form.wl .wl-msg, form.wl .wl-done > *',
-      form: 'form.wl', wander: false, rest: null
+      quiet: [['.pr-head', '.pl-head'], ['.pl-steps'], ['form.wl', '.pf'], ['.pl-go']],
+      plain: '.pr-head > *, form.wl .wl-msg, form.wl .wl-done > *, .pl-sub, .pl-lead, .pl-step h3, .pl-step p, .pr-note, .pl-priv, ' +
+        '.pk-l, .pk-q, .pk-hint, .pk-o span, .pk-err, .pk-fail, .pk-thx, .pk-next',
+      form: 'form.wl, form.pk-form', wander: false, rest: null
     });
   });
 })();
