@@ -1,0 +1,114 @@
+/* Knowlu app: the class slot table, carried from the design source unchanged (cohesion plan B14).
+   One table for every page that draws a soft field or a lead fill from a class slot: a page reads --soft,
+   --soft-2, --ring, --do-bg, --nx-bg and the lead fill (--lead-bg, --lead-tone, --lead-fg) and never writes
+   its own mix. Generated from the tokens' colors (OKLab mixes, WCAG contrast), one row per slot and theme.
+   --n    how much of the class color the soft field takes; every field stands at least 8 (OKLab x 100) from the
+          ground on cream; 18% on the dark ground
+   --rk   how much of the class color the check ring keeps (the rest is ink): the ring holds 3:1 on its field
+   --dk   the same for Done's fill: it stands at least 1.6:1 off its field
+   --dg   the same for Start next's fill, which stands on the ground: at least 1.6:1 off the ground
+   --do-fg, --nx-fg      the label on each fill, whichever of the two text colors holds 4.5:1
+   --do-away, --nx-away  what a fill moves toward under the pointer: away from its label */
+
+.c1 { --n: 16%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--cream); --do-away: var(--shade-23); --nx-fg: var(--cream); --nx-away: var(--shade-23); }
+.c2 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--cream); --do-away: var(--shade-23); --nx-fg: var(--cream); --nx-away: var(--shade-23); }
+.c3 { --n: 32%; --rk: 68%; --dk: 99%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c4 { --n: 16%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--cream); --do-away: var(--shade-23); --nx-fg: var(--cream); --nx-away: var(--shade-23); }
+.c5 { --n: 30%; --rk: 78%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c6 { --n: 30%; --rk: 79%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c7 { --n: 16%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--cream); --do-away: var(--shade-23); --nx-fg: var(--cream); --nx-away: var(--shade-23); }
+.c8 { --n: 46%; --rk: 58%; --dk: 83%; --dg: 86%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c9 { --n: 36%; --rk: 64%; --dk: 93%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c10 { --n: 58%; --rk: 57%; --dk: 83%; --dg: 89%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c11 { --n: 30%; --rk: 80%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c12 { --n: 36%; --rk: 66%; --dk: 95%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c13 { --n: 16%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--cream); --do-away: var(--shade-23); --nx-fg: var(--cream); --nx-away: var(--shade-23); }
+.c14 { --n: 30%; --rk: 77%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+.c15 { --n: 16%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--cream); --do-away: var(--shade-23); --nx-fg: var(--cream); --nx-away: var(--shade-23); }
+.c16 { --n: 40%; --rk: 65%; --dk: 94%; --dg: 100%; --do-fg: var(--shade-23); --do-away: var(--cream); --nx-fg: var(--shade-23); --nx-away: var(--cream); }
+
+:root[data-theme="dark"] .c1 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c2 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c3 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c4 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c5 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c6 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c7 { --n: 18%; --rk: 94%; --dk: 100%; --dg: 100%; --do-fg: var(--cream-2); --do-away: var(--shade-21); --nx-fg: var(--cream-2); --nx-away: var(--shade-21); }
+:root[data-theme="dark"] .c8 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c9 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c10 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c11 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c12 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c13 { --n: 18%; --rk: 93%; --dk: 100%; --dg: 100%; --do-fg: var(--cream-2); --do-away: var(--shade-21); --nx-fg: var(--cream-2); --nx-away: var(--shade-21); }
+:root[data-theme="dark"] .c14 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+:root[data-theme="dark"] .c15 { --n: 18%; --rk: 92%; --dk: 100%; --dg: 100%; --do-fg: var(--cream-2); --do-away: var(--shade-21); --nx-fg: var(--cream-2); --nx-away: var(--shade-21); }
+:root[data-theme="dark"] .c16 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .c1 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c2 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c3 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c4 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c5 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c6 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c7 { --n: 18%; --rk: 94%; --dk: 100%; --dg: 100%; --do-fg: var(--cream-2); --do-away: var(--shade-21); --nx-fg: var(--cream-2); --nx-away: var(--shade-21); }
+  :root:not([data-theme="light"]) .c8 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c9 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c10 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c11 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c12 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c13 { --n: 18%; --rk: 93%; --dk: 100%; --dg: 100%; --do-fg: var(--cream-2); --do-away: var(--shade-21); --nx-fg: var(--cream-2); --nx-away: var(--shade-21); }
+  :root:not([data-theme="light"]) .c14 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+  :root:not([data-theme="light"]) .c15 { --n: 18%; --rk: 92%; --dk: 100%; --dg: 100%; --do-fg: var(--cream-2); --do-away: var(--shade-21); --nx-fg: var(--cream-2); --nx-away: var(--shade-21); }
+  :root:not([data-theme="light"]) .c16 { --n: 18%; --rk: 100%; --dk: 100%; --dg: 100%; --do-fg: var(--shade-21); --do-away: var(--cream-2); --nx-fg: var(--shade-21); --nx-away: var(--cream-2); }
+}
+
+:is(.c1, .c2, .c3, .c4, .c5, .c6, .c7, .c8, .c9, .c10, .c11, .c12, .c13, .c14, .c15, .c16) {
+  --soft: color-mix(in oklab, var(--cc) var(--n), var(--bg));
+  --soft-2: color-mix(in oklab, var(--cc) calc(var(--n) + 12%), var(--bg));
+  --ring: color-mix(in oklab, var(--cc) var(--rk), var(--ink));
+  --do-bg: color-mix(in oklab, var(--cc) var(--dk), var(--ink));
+  --nx-bg: color-mix(in oklab, var(--cc) var(--dg), var(--ink));
+}
+
+/* ---------- the lead fill (cohesion plan B14) ----------
+   The big color field that answers "what's next" (Home's lead card; any class field that is the one colored object on a
+   screen). In the dark theme it is the slot's pale color, as it always was. In the light theme the slot's saturated fill
+   made a banner, so the fill's chroma comes down to what the same slot has in the dark theme (OKLCH chroma x --lc, hue and
+   lightness kept; --lc is that ratio, 1 where the light color is already no stronger). The label on it is still --on-cc:
+   every slot holds 4.5:1 on its lead fill in both themes (check-slots.py asserts it). A page paints the field with
+   background: var(--lead-bg); color: var(--lead-fg); a patterned slot's second tone (the ::before layer) takes
+   var(--lead-tone), which is --cc-tone at the same lower chroma (slots 1 to 4 have no pattern: the tone is the fill). */
+.c1 { --lc: 0.67; }
+.c2 { --lc: 1; }
+.c3 { --lc: 0.93; }
+.c4 { --lc: 0.71; }
+.c5 { --lc: 1; }
+.c6 { --lc: 1; }
+.c7 { --lc: 0.78; }
+.c8 { --lc: 1; }
+.c9 { --lc: 1; }
+.c10 { --lc: 0.8; }
+.c11 { --lc: 0.9; }
+.c12 { --lc: 0.99; }
+.c13 { --lc: 1; }
+.c14 { --lc: 0.54; }
+.c15 { --lc: 0.96; }
+.c16 { --lc: 1; }
+/* 2026-11-17, cohesion plan C7: the chroma cut alone left a mid-blue banner under cream words. The light theme's lead now
+   takes the dark theme's weight as the dark theme draws it: a pale fill with dark words. The slot's color is mixed into
+   the ground (--lm), its pattern's tone the same way, and the words are the light theme's ink. --lc stays as the record
+   of the chroma ratio; check-slots.py asserts the words and the weight. */
+:is(.c1, .c2, .c3, .c4, .c5, .c6, .c7, .c8, .c9, .c10, .c11, .c12, .c13, .c14, .c15, .c16) {
+  --lm: 42%;
+  --lead-bg: color-mix(in oklab, var(--cc) var(--lm), var(--bg));
+  --lead-tone: color-mix(in oklab, var(--cc-tone) var(--lm), var(--bg));
+  --lead-fg: var(--shade-23);
+}
+:root[data-theme="dark"] :is(.c1, .c2, .c3, .c4, .c5, .c6, .c7, .c8, .c9, .c10, .c11, .c12, .c13, .c14, .c15, .c16) { --lead-fg: var(--on-cc); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :is(.c1, .c2, .c3, .c4, .c5, .c6, .c7, .c8, .c9, .c10, .c11, .c12, .c13, .c14, .c15, .c16) { --lead-fg: var(--on-cc); }
+}
+:root[data-theme="dark"] :is(.c1, .c2, .c3, .c4, .c5, .c6, .c7, .c8, .c9, .c10, .c11, .c12, .c13, .c14, .c15, .c16) { --lead-bg: var(--cc); --lead-tone: var(--cc-tone); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :is(.c1, .c2, .c3, .c4, .c5, .c6, .c7, .c8, .c9, .c10, .c11, .c12, .c13, .c14, .c15, .c16) { --lead-bg: var(--cc); --lead-tone: var(--cc-tone); }
+}

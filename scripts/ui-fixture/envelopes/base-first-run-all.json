@@ -1,0 +1,15 @@
+{
+ "ok": true,
+ "error": null,
+ "state": null,
+ "first_run": {
+  "running": true,
+  "current": "coursework",
+  "steps": [
+   [
+    "sync",
+    0
+   ]
+  ]
+ }
+}

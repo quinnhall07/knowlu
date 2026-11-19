@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowlu</title>
+<!-- prefs.js runs first and blocks: it sets the theme, the reading font, the text size and the rail on <html>
+     before the first stylesheet, so the first paint is already right (note D4). -->
+<script src="js/prefs.js"></script>
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/shell.css">
+<link rel="stylesheet" href="css/slots.css">
+<!-- one stylesheet per page or surface, each owned by its page task (plan §4) -->
+<link rel="stylesheet" href="css/home.css">
+<link rel="stylesheet" href="css/home_aside.css">
+<link rel="stylesheet" href="css/lockin.css">
+<link rel="stylesheet" href="css/tasks.css">
+<link rel="stylesheet" href="css/calendar.css">
+<link rel="stylesheet" href="css/classes.css">
+<link rel="stylesheet" href="css/details.css">
+<link rel="stylesheet" href="css/deck.css">
+<link rel="stylesheet" href="css/settings.css">
+<link rel="stylesheet" href="css/mail.css">
+<link rel="stylesheet" href="css/week.css">
+<link rel="stylesheet" href="css/status.css">
+<link rel="stylesheet" href="css/sheets.css">
+<link rel="stylesheet" href="css/wizard.css">
+<link rel="stylesheet" href="css/picker.css">
+<!-- the shell's scripts, then the pages, the carried surfaces, the wizard and the picker. Every module registers
+     itself, so the order past "shell first" does not matter; boot.js starts the page on DOMContentLoaded. -->
+<script src="js/fmt.js" defer></script>
+<script src="js/kit.js" defer></script>
+<script src="js/data.js" defer></script>
+<script src="js/router.js" defer></script>
+<script src="js/shell.js" defer></script>
+<script src="js/boot.js" defer></script>
+<script src="js/pages/home.js" defer></script>
+<script src="js/pages/home_aside.js" defer></script>
+<script src="js/pages/lockin.js" defer></script>
+<script src="js/pages/tasks.js" defer></script>
+<script src="js/pages/calendar_data.js" defer></script>
+<script src="js/pages/calendar.js" defer></script>
+<script src="js/pages/classes.js" defer></script>
+<script src="js/pages/class.js" defer></script>
+<script src="js/pages/settings.js" defer></script>
+<script src="js/carried/details.js" defer></script>
+<script src="js/carried/deck.js" defer></script>
+<script src="js/carried/sources.js" defer></script>
+<script src="js/carried/mail.js" defer></script>
+<script src="js/carried/week.js" defer></script>
+<script src="js/carried/weeksetup.js" defer></script>
+<script src="js/carried/status.js" defer></script>
+<script src="js/carried/update.js" defer></script>
+<script src="js/carried/account.js" defer></script>
+<script src="js/carried/reconsent.js" defer></script>
+<script src="js/carried/report.js" defer></script>
+<script src="js/wizard.js" defer></script>
+<script src="js/picker.js" defer></script>
+</head>
+<body>
+<button class="skip" id="skip" type="button">Skip to content</button>
+<div class="app">
+  <aside class="side" id="side" aria-label="Knowlu">
+    <div class="side-head" data-tauri-drag-region="deep">
+      <a class="wm" href="#home" aria-label="Knowlu, Home">Know<b>lu</b></a>
+      <button class="obtn rail-toggle" id="rail-toggle" type="button" aria-pressed="false" aria-label="Pin sidebar"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 3.5h15v13h-15zM7.5 3.5v13"/></svg></button>
+    </div>
+    <nav class="nav" aria-label="Main"><ul>
+      <li><a href="#home" data-route="home"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 9.2L10 3.8l6.5 5.4v7.3h-4.3v-4.6H7.8v4.6H3.5z"/></svg><span>Home</span></a></li>
+      <li><a href="#tasks" data-route="tasks"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.6 6l1.6 1.6 2.6-2.8M10.2 6.4h6.3M3.6 12.6l1.6 1.6 2.6-2.8M10.2 13h6.3"/></svg><span>Tasks</span></a></li>
+      <li><a href="#calendar" data-route="calendar"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13v11.5h-13zM3.5 8.6h13M7 3v3.6M13 3v3.6"/></svg><span>Calendar</span></a></li>
+      <li><div class="nav-row"><a href="#classes" data-route="classes"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 4.5h4.4a2.1 2.1 0 0 1 2.1 2.1v9.9a1.7 1.7 0 0 0-1.7-1.6H3.5zM16.5 4.5h-4.4a2.1 2.1 0 0 0-2.1 2.1v9.9a1.7 1.7 0 0 1 1.7-1.6h4.8z"/></svg><span>Classes</span></a><button class="tab" id="classes-toggle" type="button" aria-expanded="true" aria-controls="side-classes" aria-label="This semester&#8217;s classes"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+        <ul class="classes" id="side-classes"></ul></li>
+    </ul></nav>
+    <div class="sbar" id="sbar" role="region" aria-labelledby="sbar-h" tabindex="-1">
+      <h2 class="sbar-h" id="sbar-h">Status</h2>
+      <ul id="sbar-list"></ul>
+    </div>
+    <div class="side-foot">
+      <div class="foot-row"><a href="#settings" data-route="settings"><svg class="ni" viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 6.5h5.2M12.8 6.5h3.7M3.5 13.5h2.7M10.3 13.5h6.2M10.8 4.5v4M8.3 11.5v4"/></svg><span>Settings</span></a><button class="obtn status" id="status-toggle" type="button" aria-controls="sbar" aria-expanded="false" aria-label="Status"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10.5h3.6l2.1-5.6 4.2 10.4 2.3-4.8H18"/></svg><span>Status</span><i class="dot" id="status-dot" aria-hidden="true" hidden></i></button></div>
+    </div>
+  </aside>
+  <div class="main">
+    <div class="top" data-tauri-drag-region="deep">
+      <!-- #top-note: the update line's host (plan §3). The update surface (T19) writes one short line here; the shell
+           only keeps the place, left of the clock, and hides it while empty. -->
+      <p class="top-note" id="top-note" aria-live="polite"></p>
+      <p class="clock" id="clock" aria-hidden="true"></p>
+      <div class="wc" role="group" aria-label="Window">
+        <button class="wc-b" type="button" data-wc="minimize" aria-label="Minimize"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5.5h10"/></svg></button>
+        <button class="wc-b" type="button" data-wc="toggle" aria-label="Maximize"><svg class="i-max" viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 .5h9v9h-9z"/></svg><svg class="i-res" viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 2.5h7v7h-7zM2.5 2.5v-2h7v7h-2"/></svg></button>
+        <button class="wc-b" type="button" data-wc="close" aria-label="Close"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 .5l9 9M9.5 .5l-9 9"/></svg></button>
+      </div>
+    </div>
+    <main class="center" id="center" tabindex="-1"></main>
+    <div class="boot" id="boot" hidden></div>
+  </div>
+</div>
+<aside class="panel" id="panel" aria-labelledby="panel-h" inert>
+  <div class="panel-in">
+    <div class="panel-head"><span class="det-ck" id="panel-ck"></span><h2 id="panel-h"></h2><button class="qbtn" id="panel-close" type="button">Close</button></div>
+    <div class="panel-body" id="panel-body"></div>
+  </div>
+</aside>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" hidden></div>
+<div class="layer" id="layer" role="region" aria-label="Privacy update" hidden></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
