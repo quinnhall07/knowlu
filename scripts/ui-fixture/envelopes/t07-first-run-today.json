@@ -1,0 +1,23 @@
+{
+ "ok": true,
+ "error": null,
+ "state": null,
+ "first_run": {
+  "running": true,
+  "current": "ingest",
+  "steps": [
+   [
+    "sync",
+    0
+   ],
+   [
+    "entitlement (refresh failed: offline)",
+    0
+   ],
+   [
+    "coursework",
+    0
+   ]
+  ]
+ }
+}

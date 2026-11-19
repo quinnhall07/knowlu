@@ -1,0 +1,902 @@
+{
+ "ok": true,
+ "error": null,
+ "state": {
+  "ahead": {
+   "buckets": [
+    {
+     "date": "2026-08-28",
+     "hours": 2.0,
+     "items": 2,
+     "weekday": "Fri",
+     "weekend": false
+    },
+    {
+     "date": "2026-08-29",
+     "hours": 2.0,
+     "items": 1,
+     "weekday": "Sat",
+     "weekend": true
+    },
+    {
+     "date": "2026-08-30",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sun",
+     "weekend": true
+    },
+    {
+     "date": "2026-08-31",
+     "hours": 0.5,
+     "items": 1,
+     "weekday": "Mon",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-01",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Tue",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-02",
+     "hours": 1.8,
+     "items": 1,
+     "weekday": "Wed",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-03",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Thu",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-04",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Fri",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-05",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sat",
+     "weekend": true
+    },
+    {
+     "date": "2026-09-06",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sun",
+     "weekend": true
+    },
+    {
+     "date": "2026-09-07",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Mon",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-08",
+     "hours": 4.0,
+     "items": 1,
+     "weekday": "Tue",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-09",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Wed",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-10",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Thu",
+     "weekend": false
+    }
+   ],
+   "clear_days": [
+    "2026-08-30",
+    "2026-09-01",
+    "2026-09-03",
+    "2026-09-04",
+    "2026-09-05",
+    "2026-09-06",
+    "2026-09-07",
+    "2026-09-09",
+    "2026-09-10"
+   ],
+   "peak": {
+    "date": "2026-09-08",
+    "hours": 4.0,
+    "items": 1,
+    "weekday": "Tue",
+    "weekend": false
+   },
+   "takeaway": "Tue 8 Sep is the wall — 4.0h across 1 item, the heaviest day in a fortnight. 9 clear days.",
+   "undated_hours": 0.0
+  },
+  "closed_this_week": [],
+  "coming_up": [],
+  "courses": [
+   {
+    "codes": [
+     "ABC101"
+    ],
+    "name": "Introductory Studies",
+    "slot": "c1",
+    "slug": "abc-101",
+    "standing": "behind",
+    "status": null,
+    "title": "ABC 101"
+   },
+   {
+    "codes": [
+     "DEF210"
+    ],
+    "name": "Applied Methods",
+    "slot": "c2",
+    "slug": "def-210",
+    "standing": "tight",
+    "status": "active",
+    "title": "DEF 210"
+   },
+   {
+    "codes": [
+     "GHI150"
+    ],
+    "name": "Survey of Ideas",
+    "slot": "c3",
+    "slug": "ghi-150",
+    "standing": null,
+    "status": "dropped",
+    "title": "GHI 150"
+   },
+   {
+    "codes": [
+     "JKL120"
+    ],
+    "name": "Writing Workshop",
+    "slot": "c4",
+    "slug": "jkl-120",
+    "standing": "steady",
+    "status": null,
+    "title": "JKL 120"
+   },
+   {
+    "codes": [
+     "MNO130"
+    ],
+    "name": "Studio Practice",
+    "slot": "c5",
+    "slug": "mno-130",
+    "standing": "ahead",
+    "status": null,
+    "title": "MNO 130"
+   },
+   {
+    "codes": [
+     "PQR140"
+    ],
+    "name": "Field Notes",
+    "slot": "c6",
+    "slug": "pqr-140",
+    "standing": null,
+    "status": null,
+    "title": "PQR 140"
+   }
+  ],
+  "decisions": {
+   "awaiting_calendar": 0,
+   "budget_remaining": 14,
+   "budget_total": 15,
+   "budget_used": 1,
+   "cards": [
+    {
+     "age_days": 0,
+     "changes": {
+      "due": {
+       "from": "2026-08-29T17:00",
+       "to": "2026-08-31T17:00"
+      }
+     },
+     "expires": "2026-09-20",
+     "first_proposed_at": "2026-08-28",
+     "id": "appr_e7e7e7e702",
+     "kind": "amend",
+     "slug": "amend-def-210-lab-write-up",
+     "snooze_until": null,
+     "source_uid": null,
+     "target": "tasks/def-210-lab-write-up.md",
+     "title": "DEF 210 Lab write-up moved",
+     "urgency": "neutral",
+     "why": "Invented for the fixture harness."
+    }
+   ],
+   "deferred": 0,
+   "empty_text": null,
+   "events_in_digest": 0,
+   "hidden_amendments": 1,
+   "oldest_days": 0,
+   "pending": 1
+  },
+  "delta": {
+   "records": [],
+   "since": null,
+   "since_kind": "none",
+   "summary": "",
+   "truncated": false
+  },
+  "empty": {
+   "active": true,
+   "gauge": "no history yet — the gauge fills from the next run",
+   "must_do": null,
+   "recommended": null,
+   "the_day": null
+  },
+  "gauge": {
+   "direction": "no-history",
+   "points": []
+  },
+  "good_to_know": [],
+  "issues_panel": {
+   "empty_text": "No open issues.",
+   "open_count": 0,
+   "rows": []
+  },
+  "list": {
+   "count": 7,
+   "empty_text": null,
+   "horizon": "all",
+   "hours": 12.3,
+   "rows": [
+    {
+     "amend_badge": null,
+     "conflict_text": null,
+     "course": "abc-101",
+     "due": "2026-08-27T23:59",
+     "due_short": "8/27",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 1.5,
+     "id": "task_a1b2c3d401",
+     "importance": 3,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": true,
+     "oversized": false,
+     "progress_pct": 0,
+     "slack_days": -2.0,
+     "slug": "abc-101-problem-set-2",
+     "source_tag": "fixture",
+     "start_by": "8/26",
+     "status": "active",
+     "title": "ABC 101 Problem set 2",
+     "urgency": "od",
+     "why": "start by 8/26 — 1.5h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+    },
+    {
+     "amend_badge": null,
+     "conflict_text": null,
+     "course": "abc-101",
+     "due": "2026-08-28T23:59",
+     "due_short": "8/28",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 0.5,
+     "id": "task_a1b2c3d402",
+     "importance": 2,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": true,
+     "oversized": false,
+     "progress_pct": 0,
+     "slack_days": -1.0,
+     "slug": "abc-101-reading-quiz",
+     "source_tag": "fixture",
+     "start_by": "8/27",
+     "status": "active",
+     "title": "ABC 101 Reading quiz",
+     "urgency": "od",
+     "why": "start by 8/27 — 0.5h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+    },
+    {
+     "amend_badge": {
+      "age_days": 0,
+      "fields": [
+       "due"
+      ],
+      "proposal": "amend-def-210-lab-write-up",
+      "sentence": "a proposal would move due to 8/31",
+      "urgency": "neutral"
+     },
+     "conflict_text": null,
+     "course": "def-210",
+     "due": "2026-08-29T17:00",
+     "due_short": "8/29",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 2.0,
+     "id": "task_a1b2c3d403",
+     "importance": 3,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": false,
+     "oversized": false,
+     "progress_pct": 0,
+     "slack_days": 0.0,
+     "slug": "def-210-lab-write-up",
+     "source_tag": "fixture",
+     "start_by": "8/28",
+     "status": "active",
+     "title": "DEF 210 Lab write-up",
+     "urgency": "soon",
+     "why": "start by 8/28 — 2.0h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+    },
+    {
+     "amend_badge": null,
+     "conflict_text": null,
+     "course": null,
+     "due": "2026-08-31T23:59",
+     "due_short": "8/31",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 0.5,
+     "id": "task_a1b2c3d406",
+     "importance": 1,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": false,
+     "oversized": false,
+     "progress_pct": 0,
+     "slack_days": 2.0,
+     "slug": "renew-library-card",
+     "source_tag": "fixture",
+     "start_by": "8/30",
+     "status": "active",
+     "title": "Renew library card",
+     "urgency": "soon",
+     "why": "start by 8/30 — 0.5h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+    },
+    {
+     "amend_badge": null,
+     "conflict_text": null,
+     "course": "jkl-120",
+     "due": "2026-09-02T23:59",
+     "due_short": "9/2",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 1.8,
+     "id": "task_a1b2c3d404",
+     "importance": 4,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": false,
+     "oversized": false,
+     "progress_pct": 40,
+     "slack_days": 4.0,
+     "slug": "jkl-120-essay-draft",
+     "source_tag": "fixture",
+     "start_by": "9/1",
+     "status": "active",
+     "title": "JKL 120 Essay draft",
+     "urgency": "",
+     "why": "start by 9/1 — 1.8h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+    },
+    {
+     "amend_badge": null,
+     "conflict_text": null,
+     "course": "def-210",
+     "due": "2026-09-08T09:00",
+     "due_short": "9/8",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 4.0,
+     "id": "task_a1b2c3d405",
+     "importance": 5,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": false,
+     "oversized": false,
+     "progress_pct": 0,
+     "slack_days": 9.0,
+     "slug": "def-210-midterm-review",
+     "source_tag": "fixture",
+     "start_by": "9/6",
+     "status": "active",
+     "title": "DEF 210 Midterm review",
+     "urgency": "",
+     "why": "start by 9/6 — 4.0h of work needs 2 working days at your 2.0h session cap, minus a 1-day buffer"
+    },
+    {
+     "amend_badge": null,
+     "conflict_text": null,
+     "course": "mno-130",
+     "due": "2026-09-25T17:00",
+     "due_short": "9/25",
+     "effort_confidence": "low",
+     "effort_source": "inferred",
+     "flag_text": null,
+     "hours": 2.0,
+     "id": "task_e7e7e7e701",
+     "importance": 3,
+     "importance_reason": null,
+     "judged": false,
+     "merge_text": null,
+     "overdue_start": false,
+     "oversized": false,
+     "progress_pct": 0,
+     "slack_days": 27.0,
+     "slug": "mno-130-portfolio-review",
+     "source_tag": "fixture",
+     "start_by": "9/24",
+     "status": "active",
+     "title": "MNO 130 Portfolio review",
+     "urgency": "",
+     "why": "start by 9/24 — 2.0h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+    }
+   ],
+   "unreadable": []
+  },
+  "meter": {
+   "block_minutes": 30,
+   "capacity_text": "Capacity today: 9.17h",
+   "capped": 0,
+   "fit_blocks": 18,
+   "spill_blocks": 0,
+   "spill_hours": 0.0,
+   "spill_items": []
+  },
+  "must_do": {
+   "amendments": [],
+   "empty_text": null,
+   "groups": [
+    {
+     "count": 1,
+     "hours": 1.5,
+     "label": "Overdue",
+     "rows": [
+      {
+       "amend_badge": null,
+       "conflict_text": null,
+       "course": "abc-101",
+       "due": "2026-08-27T23:59",
+       "due_short": "8/27",
+       "effort_confidence": "low",
+       "effort_source": "inferred",
+       "flag_text": null,
+       "hours": 1.5,
+       "id": "task_a1b2c3d401",
+       "importance": 3,
+       "importance_reason": null,
+       "judged": false,
+       "merge_text": null,
+       "overdue_start": true,
+       "oversized": false,
+       "progress_pct": 0,
+       "slack_days": -2.0,
+       "slug": "abc-101-problem-set-2",
+       "source_tag": "fixture",
+       "start_by": "8/26",
+       "status": "active",
+       "title": "ABC 101 Problem set 2",
+       "urgency": "od",
+       "why": "start by 8/26 — 1.5h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+      }
+     ]
+    },
+    {
+     "count": 1,
+     "hours": 0.5,
+     "label": "Due today",
+     "rows": [
+      {
+       "amend_badge": null,
+       "conflict_text": null,
+       "course": "abc-101",
+       "due": "2026-08-28T23:59",
+       "due_short": "8/28",
+       "effort_confidence": "low",
+       "effort_source": "inferred",
+       "flag_text": null,
+       "hours": 0.5,
+       "id": "task_a1b2c3d402",
+       "importance": 2,
+       "importance_reason": null,
+       "judged": false,
+       "merge_text": null,
+       "overdue_start": true,
+       "oversized": false,
+       "progress_pct": 0,
+       "slack_days": -1.0,
+       "slug": "abc-101-reading-quiz",
+       "source_tag": "fixture",
+       "start_by": "8/27",
+       "status": "active",
+       "title": "ABC 101 Reading quiz",
+       "urgency": "od",
+       "why": "start by 8/27 — 0.5h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+      }
+     ]
+    },
+    {
+     "count": 1,
+     "hours": 2.0,
+     "label": "Due Sat",
+     "rows": [
+      {
+       "amend_badge": {
+        "age_days": 0,
+        "fields": [
+         "due"
+        ],
+        "proposal": "amend-def-210-lab-write-up",
+        "sentence": "a proposal would move due to 8/31",
+        "urgency": "neutral"
+       },
+       "conflict_text": null,
+       "course": "def-210",
+       "due": "2026-08-29T17:00",
+       "due_short": "8/29",
+       "effort_confidence": "low",
+       "effort_source": "inferred",
+       "flag_text": null,
+       "hours": 2.0,
+       "id": "task_a1b2c3d403",
+       "importance": 3,
+       "importance_reason": null,
+       "judged": false,
+       "merge_text": null,
+       "overdue_start": false,
+       "oversized": false,
+       "progress_pct": 0,
+       "slack_days": 0.0,
+       "slug": "def-210-lab-write-up",
+       "source_tag": "fixture",
+       "start_by": "8/28",
+       "status": "active",
+       "title": "DEF 210 Lab write-up",
+       "urgency": "soon",
+       "why": "start by 8/28 — 2.0h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+      }
+     ]
+    }
+   ],
+   "total_count": 3,
+   "total_hours": 4.0
+  },
+  "nav_counts": {
+   "all": {
+    "count": 7,
+    "hours": 12.3
+   },
+   "decisions": {
+    "count": 1,
+    "hours": 0.0
+   },
+   "good_to_know": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "issues": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "later": {
+    "count": 2,
+    "hours": 6.0
+   },
+   "overdue": {
+    "count": 1,
+    "hours": 1.5
+   },
+   "runs_warn": {
+    "count": 4,
+    "hours": 0.0
+   },
+   "today": {
+    "count": 3,
+    "hours": 4.0
+   },
+   "undated": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "week": {
+    "count": 4,
+    "hours": 4.8
+   }
+  },
+  "now": "2026-08-28T09:00",
+  "recommended": {
+   "commitments": [],
+   "empty_text": null,
+   "rows": [
+    {
+     "of_hours": 0.5,
+     "row": {
+      "amend_badge": null,
+      "conflict_text": null,
+      "course": null,
+      "due": "2026-08-31T23:59",
+      "due_short": "8/31",
+      "effort_confidence": "low",
+      "effort_source": "inferred",
+      "flag_text": null,
+      "hours": 0.5,
+      "id": "task_a1b2c3d406",
+      "importance": 1,
+      "importance_reason": null,
+      "judged": false,
+      "merge_text": null,
+      "overdue_start": false,
+      "oversized": false,
+      "progress_pct": 0,
+      "slack_days": 2.0,
+      "slug": "renew-library-card",
+      "source_tag": "fixture",
+      "start_by": "8/30",
+      "status": "active",
+      "title": "Renew library card",
+      "urgency": "soon",
+      "why": "start by 8/30 — 0.5h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+     },
+     "take_hours": 0.5,
+     "why": "0.5h in the second free block (had 5.17h; 4.67h left after) — capped by remaining"
+    },
+    {
+     "of_hours": 1.8,
+     "row": {
+      "amend_badge": null,
+      "conflict_text": null,
+      "course": "jkl-120",
+      "due": "2026-09-02T23:59",
+      "due_short": "9/2",
+      "effort_confidence": "low",
+      "effort_source": "inferred",
+      "flag_text": null,
+      "hours": 1.8,
+      "id": "task_a1b2c3d404",
+      "importance": 4,
+      "importance_reason": null,
+      "judged": false,
+      "merge_text": null,
+      "overdue_start": false,
+      "oversized": false,
+      "progress_pct": 40,
+      "slack_days": 4.0,
+      "slug": "jkl-120-essay-draft",
+      "source_tag": "fixture",
+      "start_by": "9/1",
+      "status": "active",
+      "title": "JKL 120 Essay draft",
+      "urgency": "",
+      "why": "start by 9/1 — 1.8h of work needs 1 working day at your 2.0h session cap, minus a 1-day buffer"
+     },
+     "take_hours": 1.8,
+     "why": "1.8h in the second free block (had 4.67h; 2.87h left after) — capped by remaining"
+    },
+    {
+     "of_hours": 4.0,
+     "row": {
+      "amend_badge": null,
+      "conflict_text": null,
+      "course": "def-210",
+      "due": "2026-09-08T09:00",
+      "due_short": "9/8",
+      "effort_confidence": "low",
+      "effort_source": "inferred",
+      "flag_text": null,
+      "hours": 4.0,
+      "id": "task_a1b2c3d405",
+      "importance": 5,
+      "importance_reason": null,
+      "judged": false,
+      "merge_text": null,
+      "overdue_start": false,
+      "oversized": false,
+      "progress_pct": 0,
+      "slack_days": 9.0,
+      "slug": "def-210-midterm-review",
+      "source_tag": "fixture",
+      "start_by": "9/6",
+      "status": "active",
+      "title": "DEF 210 Midterm review",
+      "urgency": "",
+      "why": "start by 9/6 — 4.0h of work needs 2 working days at your 2.0h session cap, minus a 1-day buffer"
+     },
+     "take_hours": 1.7,
+     "why": "1.7h in the second free block (had 2.87h; 1.17h left after) — capped by budget"
+    }
+   ],
+   "spare_hours": 5.2
+  },
+  "revision": "f9e1610b0727",
+  "runs_panel": {
+   "empty_text": "No run recorded in the last 24 hours.",
+   "expected": [
+    {
+     "due": "2026-08-27 15:00",
+     "runner": "cloud",
+     "status": "missing"
+    },
+    {
+     "due": "2026-08-28 08:00",
+     "runner": "cloud",
+     "status": "missing"
+    },
+    {
+     "due": "2026-08-27 12:00",
+     "runner": "local",
+     "status": "missing"
+    },
+    {
+     "due": "2026-08-27 18:00",
+     "runner": "local",
+     "status": "missing"
+    }
+   ],
+   "recent": [],
+   "warn_count": 4,
+   "warnings": []
+  },
+  "schema": 1,
+  "texts": {
+   "closed": "Nothing closed this week.",
+   "coming_up": "No events coming up.",
+   "info": "Nothing to know right now.",
+   "offline": "The engine did not answer — the page is as of the last state it returned."
+  },
+  "the_day": {
+   "all_day": [],
+   "blocks": [
+    {
+     "end": "10:10",
+     "hours": 2.1666666666666665,
+     "kind": "free",
+     "label": "open",
+     "start": "08:00",
+     "takes": []
+    },
+    {
+     "end": "11:00",
+     "hours": 0.83,
+     "kind": "class",
+     "label": "class",
+     "start": "10:10",
+     "takes": []
+    },
+    {
+     "end": "18:00",
+     "hours": 7.0,
+     "kind": "free",
+     "label": "open",
+     "start": "11:00",
+     "takes": [
+      {
+       "hours": 0.5,
+       "of_hours": 0.5,
+       "title": "Renew library card"
+      },
+      {
+       "hours": 1.8,
+       "of_hours": 1.8,
+       "title": "JKL 120 Essay draft"
+      },
+      {
+       "hours": 1.7,
+       "of_hours": 4.0,
+       "title": "DEF 210 Midterm review"
+      }
+     ]
+    }
+   ],
+   "commitments": [],
+   "commitments_hours": 0.0,
+   "empty_text": null,
+   "open_hours": 9.2
+  },
+  "today": "2026-08-28",
+  "topline": {
+   "active": 7,
+   "date": "Fri 28 Aug",
+   "engine_build": "pinned",
+   "generated_at": null,
+   "generated_by": null,
+   "runway_days": -2.0,
+   "status_word": "behind",
+   "console_build": null,
+   "seen_at": "2026-08-27T21:00:00Z",
+   "sync": {
+    "ok": true,
+    "at": "2026-08-28T13:00:00Z",
+    "lines": [],
+    "last_error": null,
+    "skipped": null
+   },
+   "backup": {
+    "last_ok": "2026-08-28",
+    "behind_days": 0,
+    "last_error": null,
+    "target_reachable": true
+   },
+   "startup_missed": false,
+   "last_slot": {
+    "started": "2026-08-28T07:00:00-05:00",
+    "ended": "2026-08-28T07:01:12-05:00",
+    "steps": [
+     [
+      "sync",
+      0
+     ],
+     [
+      "coursework",
+      0
+     ],
+     [
+      "ingest",
+      0
+     ],
+     [
+      "grades",
+      0
+     ],
+     [
+      "judge",
+      0
+     ],
+     [
+      "rank",
+      0
+     ]
+    ],
+    "ok": true,
+    "engine_ok": true,
+    "late": false,
+    "reason": null,
+    "attempt": 1
+   },
+   "scheduler": {
+    "mode": "app",
+    "paused": false,
+    "device_ok": true
+   }
+  },
+  "unreadable": [],
+  "verdict": {
+   "active": 7,
+   "calendar_hours": 0.0,
+   "capacity_hours": 9.17,
+   "capacity_text": "Capacity today: 9.17h",
+   "headline": "2 days behind, and today fits.",
+   "lede": "4.0h of must-do work against 9.17h of capacity.",
+   "must_hours": 4.0,
+   "overflow_sentence": null,
+   "runway_days": -2.0,
+   "template_hours": 9.17,
+   "word": "behind"
+  },
+  "view": "all",
+  "warnings": []
+ }
+}

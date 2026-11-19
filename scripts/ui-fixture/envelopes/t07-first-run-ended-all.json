@@ -1,0 +1,23 @@
+{
+ "ok": true,
+ "error": null,
+ "state": null,
+ "first_run": {
+  "running": false,
+  "current": null,
+  "steps": [
+   [
+    "sync",
+    0
+   ],
+   [
+    "coursework",
+    2
+   ],
+   [
+    "engine: not found",
+    -1
+   ]
+  ]
+ }
+}
