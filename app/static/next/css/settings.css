@@ -1,1 +1,78 @@
-/* T16 owns */
+/* Knowlu app, Settings (note §4 "Settings"; plan T16). One column of grouped sections at every size (D6): each is a
+   display-face title over hairline rows; a row is a label (with at most one quiet line under it) on the left and its
+   control on the right, and the control drops under the label when the column is narrow. Controls: the round radio
+   mark, the shell's switch and field, quiet and text buttons; the one red button is Delete my data's second press.
+   Roles and sizes only, from tokens.css and shell.css. The carried sections (Sources, Your week, Status, Updates,
+   Report) draw their own rows with these same classes inside the hosts this page leaves for them. */
+
+.st-page { max-width: calc(var(--measure) + 2 * var(--center-pad)); }
+.st { padding-bottom: 24px; }
+
+/* ---------- a section ---------- */
+.st-sec { margin-top: 40px; scroll-margin-top: 24px; }
+.st > .st-sec:first-child { margin-top: 32px; }
+.st-slot:empty { display: none; }
+.st-h { margin-bottom: 10px; font: 400 var(--t-title)/1.2 var(--display); letter-spacing: -.01em; color: var(--ink); outline: none; }
+.st-h:focus-visible { outline: var(--focus) solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+.st-sub { margin: 18px 0 6px; font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2); }
+
+/* ---------- rows ---------- */
+.st-rows { border-top: var(--hair) solid var(--line); }
+.st-rows:empty { display: none; }
+.st-rows + .st-rows, .st-slot:empty + .st-rows { border-top: 0; }
+.st-row {
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: 24px; row-gap: 4px; min-height: var(--row-h); padding: 10px 0;
+  border-bottom: var(--hair) solid var(--line);
+}
+.st-row[hidden] { display: none; }
+.st-l { flex: 1 1 240px; min-width: 0; }
+.st-n { display: block; font: 500 var(--t-label)/1.3 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
+.st-hint { margin-top: 2px; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
+.st-hint:empty { display: none; }
+.st-hint.st-bad { color: var(--error); }
+.st-hint.st-warn { color: var(--ink); }
+.st-path { font-variant-numeric: tabular-nums; }
+.st-c { flex: 0 1 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 10px; margin-left: auto; min-width: 0; }
+.st-c.st-wide { flex: 1 1 280px; flex-wrap: nowrap; }
+.st-c.st-wide .field { flex: 1 1 auto; min-width: 0; }
+.st-row .st-c > .obtn:last-child { margin-right: -14px; }   /* the quiet control's label ends on the column's edge */
+.st-c .switch { margin-right: -6px; }                       /* the track, not the target, ends on the column's edge */
+.st-danger { color: var(--error); text-decoration-color: color-mix(in srgb, var(--error) 45%, transparent); }
+.st-danger:hover, .st-danger:focus-visible { color: var(--error); text-decoration-color: var(--error); }
+
+/* ---------- radio choices: native inputs (the arrow keys move between them), drawn as the round mark: a ring, filled
+   when chosen. Each font choice's name is set in its own face. ---------- */
+.st .opts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 24px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.st .opts label { position: relative; display: inline-flex; align-items: center; gap: 10px; min-height: var(--h-tap); color: var(--ink-2); font: 400 var(--t-small)/1 var(--sans); cursor: pointer; transition: color var(--fast) var(--ease); }
+.st .opts input:checked ~ .nm { color: var(--ink); }
+.st .opts input { position: absolute; left: 0; top: 50%; width: 20px; height: 20px; margin: -10px 0 0; opacity: 0; cursor: pointer; }
+.st .opts .rd { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: var(--r-mark); box-shadow: inset 0 0 0 1.5px var(--field-line); transition: box-shadow var(--fast) var(--ease); }
+.st .opts .rd::after { content: ""; width: 10px; height: 10px; border-radius: var(--r-mark); background: var(--ink); transform: scale(0); transition: transform var(--fast) var(--ease); }
+.st .opts input:checked + .rd { box-shadow: inset 0 0 0 1.5px var(--ink); }
+.st .opts input:checked + .rd::after { transform: scale(1); }
+.st .opts input:focus-visible + .rd { outline: var(--focus) solid var(--accent); outline-offset: 3px; }
+.st .opts .nm-std { font-family: "Albert Sans", "Segoe UI", system-ui, sans-serif; }
+.st .opts .nm-dys { font-family: "OpenDyslexic", "Segoe UI", system-ui, sans-serif; }
+@media (hover: hover) { .st .opts label:hover { color: var(--ink); } }
+
+/* ---------- About you: the text boxes ---------- */
+.st-block { padding: 2px 0 14px; border-top: var(--hair) solid var(--line); }
+.st-block + .st-block { margin-top: 8px; }
+.st-field { display: grid; gap: 8px; }
+.st-ta {
+  display: block; width: 100%; min-height: 96px; padding: 12px 14px; border: 0; border-radius: var(--r-control); resize: vertical;
+  background: var(--line-2); color: var(--ink); font: 400 var(--t-small)/1.45 var(--sans); outline: none;
+  transition: background-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.st-ta:focus { box-shadow: inset 0 0 0 1.5px var(--ink); }
+.st-ta[readonly] { color: var(--ink-2); cursor: default; }
+.st-ta:disabled { opacity: .6; }
+@media (hover: hover) { .st-ta:not([readonly]):not(:focus):hover { background: var(--line); } }
+.st-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 18px; margin-top: 4px; }
+.st-int { display: grid; gap: 6px; min-width: 0; }
+.st-int .st-n { font-size: var(--t-small); }
+.st-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 22px; margin-top: 4px; }
+.st-count { margin-right: auto; font: 400 var(--t-small)/1 var(--sans); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.st-count.st-over { color: var(--error); }
+.st-conflict { padding: 12px 14px; border-radius: var(--r-control); background: var(--line-2); font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink); }
+.st-conflict .st-acts { justify-content: flex-start; }

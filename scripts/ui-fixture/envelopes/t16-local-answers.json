@@ -1,0 +1,53 @@
+{
+ "account_status": {
+  "account_id": null,
+  "checked_at": null,
+  "current_period_end": null,
+  "email": "",
+  "error": null,
+  "needs_account": true,
+  "ok": true,
+  "plan": null,
+  "status": null
+ },
+ "get_settings": {
+  "error": null,
+  "ok": true,
+  "settings": {
+   "autostart": false,
+   "backup_dir": null,
+   "profile_id": "profile_1111111111",
+   "quit_at": null
+  }
+ },
+ "mail_status": {
+  "error": null,
+  "keep_session": true,
+  "mailboxes": [],
+  "ok": true,
+  "profile_delete_pending": false
+ },
+ "profile": {
+  "error": null,
+  "ok": true,
+  "profile": {
+   "clubs": [],
+   "interests_editable": false,
+   "mild": [],
+   "never": [],
+   "preferences": "",
+   "strong": [
+    "Career fairs"
+   ],
+   "warnings": []
+  }
+ },
+ "settings_context": {
+  "error": null,
+  "ok": true,
+  "profile_name": "School",
+  "registry_error": null,
+  "vault": "D:\\Knowlu vault",
+  "version": "0.4.0"
+ }
+}

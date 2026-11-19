@@ -1,1 +1,73 @@
-/* T17 owns */
+/* Knowlu app: Settings > Sources and the mail sheet (note §4 "Settings" Sources row, §5; plan §5 T17). The Sources rows
+   reuse the Settings frame's row (settings.css: .st-row, .st-l, .st-n, .st-hint, .st-c) with a logo column in front;
+   a mailbox row sits under School email, indented to the name column. The mail sheet is the shell's .sheet-in.wide
+   with two views (progress, From your email), one shown at a time. No chips, pills or rings: states are words. */
+
+/* ---------- Sources ---------- */
+.st-src { flex-wrap: nowrap; align-items: flex-start; }
+.st-src > .st-c { align-self: center; }
+.st-logo { flex: none; display: flex; align-items: center; width: 104px; min-height: 22px; margin-top: 1px; }
+.st-logo img { display: block; height: 18px; max-width: 100%; }
+:root[data-theme="dark"] .st-logo img[src*="blackboard"] { filter: brightness(0) invert(.92); }
+.st-mail { width: 20px; height: 20px; fill: none; stroke: var(--ink-2); stroke-width: 1.5; stroke-linejoin: round; }
+@media (max-width: 900px) {
+  .st-src { flex-wrap: wrap; }
+}
+
+.em-boxes .st-row { padding-left: 128px; }
+.em-box .st-n { font-size: var(--t-small); }
+.em-addr { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; }
+.em-addr code, .mp-addr code { font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.st-hint.em-amber { position: relative; padding-left: 14px; color: var(--ink); }
+.st-hint.em-amber::before { content: ""; position: absolute; left: 0; top: .55em; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+.em-amber .owed, .em-amber .obtn { vertical-align: middle; }
+.st-hint.em-confirm { color: var(--ink); }
+
+/* ---------- the mail sheet ---------- */
+.mail-sheet { padding-top: 20px; }
+.mail-view[hidden] { display: none; }
+.mail-hd { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.mail-hd .obtn { margin-right: -14px; }
+.mail-h { font: 400 var(--t-title)/1.2 var(--display); letter-spacing: -.01em; color: var(--ink); outline: none; }
+.mail-lede { font: 400 var(--t-label)/1.45 var(--sans); color: var(--ink); }
+.mail-lede:empty { display: none; }
+.mail-meta { margin-top: 10px; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-2); overflow-wrap: anywhere; }
+.mail-meta:empty { display: none; }
+.mail-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 22px; margin-top: 14px; }
+
+/* progress: one row per step, the state in words at the right */
+.mp-rows { margin: 14px 0 0; padding: 0; list-style: none; border-top: var(--hair) solid var(--line); }
+.mp-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; align-items: baseline; padding: 7px 0; border-bottom: var(--hair) solid var(--line); }
+.mp-step { font: 500 var(--t-small)/1.35 var(--sans); color: var(--ink); }
+.mp-state { font: 400 var(--t-small)/1.35 var(--sans); color: var(--ink-2); white-space: nowrap; }
+.mp-why { grid-column: 1 / -1; margin-top: 2px; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-2); }
+.mp-waiting .mp-step, .mp-skipped .mp-step { color: var(--ink-3); }
+.mp-needs_you .mp-state { font-weight: 600; color: var(--ink); }
+.mp-failed .mp-state, .mp-failed .mp-why { color: var(--error); }
+.mp-ask:empty { display: none; }
+.mp-guide { margin-top: 14px; padding: 12px 14px; border-radius: var(--r-control); background: var(--line-2); font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink); }
+.mp-addr { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-bottom: 6px; }
+.mp-path { margin: 0; padding-left: 20px; }
+.mp-path li + li { margin-top: 2px; }
+.mp-q { margin-top: 14px; }
+.mp-q .mail-meta { display: block; margin: 0 0 6px; }
+.mp-line { display: flex; gap: 10px; align-items: center; }
+.mp-line .field { flex: 1 1 auto; min-width: 0; }
+
+/* From your email: by course, then the kind of change */
+.ma-body { margin-top: 4px; }
+.ma-course + .ma-course { margin-top: 20px; }
+.ma-ch { margin-top: 12px; font: 600 var(--t-label)/1.3 var(--sans); color: var(--ink); }
+.ma-sh { margin: 12px 0 4px; font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2); }
+.ma-rows { margin: 0; padding: 0; list-style: none; border-top: var(--hair) solid var(--line); }
+.ma-row { display: flex; align-items: center; gap: 4px 16px; padding: 8px 0; border-bottom: var(--hair) solid var(--line); }
+.ma-main { flex: 1 1 auto; min-width: 0; }
+.ma-t { font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink); overflow-wrap: anywhere; }
+.ma-what { margin-left: 10px; font-weight: 400; color: var(--ink-2); }
+.ma-from { margin-top: 1px; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-3); overflow-wrap: anywhere; }
+.ma-since { flex: none; font: 400 var(--t-small)/1.2 var(--sans); color: var(--ink-3); }
+.ma-row > .tbtn { flex: none; }
+.ma-arch { margin-top: 12px; }
+.ma-arch > summary { cursor: pointer; font: 600 var(--t-small)/1.2 var(--sans); color: var(--ink-2); min-height: var(--h-tap); display: flex; align-items: center; }
+.ma-arch > summary:focus-visible { outline: var(--focus) solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.ma-note { color: var(--error); }

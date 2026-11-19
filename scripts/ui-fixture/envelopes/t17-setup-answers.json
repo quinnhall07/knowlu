@@ -1,0 +1,217 @@
+{
+ "account_status": {
+  "account_id": "acct_f1x7ure01",
+  "checked_at": "2026-08-28T08:00:00Z",
+  "current_period_end": "2026-09-24T00:00:00Z",
+  "email": "student@example.edu",
+  "error": null,
+  "needs_account": false,
+  "ok": true,
+  "plan": "monthly",
+  "status": "active"
+ },
+ "close_info": {
+  "error": null,
+  "ok": true,
+  "state": null
+ },
+ "copy_text": {
+  "error": null,
+  "ok": true
+ },
+ "delete_note": {
+  "error": null,
+  "ok": true,
+  "state": null
+ },
+ "get_settings": {
+  "error": null,
+  "ok": true,
+  "settings": {
+   "autostart": true,
+   "backup_dir": "D:\\Knowlu backups",
+   "profile_id": "profile_1111111111",
+   "quit_at": null
+  }
+ },
+ "google_status": {
+  "calendar": true,
+  "email": "student@example.edu",
+  "error": null,
+  "gmail": true,
+  "ok": true,
+  "state": "active"
+ },
+ "grades_refresh": {
+  "error": null,
+  "ok": true
+ },
+ "grades_status": {
+  "available": true,
+  "connected": true,
+  "fetched_at": "2026-08-28T07:30",
+  "hidden": false,
+  "host": "lms.example.edu",
+  "ok": true,
+  "reason": null,
+  "signed_out": false
+ },
+ "mail_applied": {
+  "courses": [],
+  "since": null
+ },
+ "mail_keep_session": {
+  "error": null,
+  "ok": true,
+  "profiles_left": false
+ },
+ "mail_setup_answer": {
+  "error": null,
+  "ok": true
+ },
+ "mail_setup_progress": {
+  "active": true,
+  "ok": true,
+  "progress": {
+   "address_id": "adr_f1x7ure02",
+   "ask": null,
+   "backfill": null,
+   "blocked": false,
+   "done": [],
+   "ended": null,
+   "kept": false,
+   "left": [],
+   "line": null,
+   "not_brought_in_before": null,
+   "offers": [],
+   "provider": "google",
+   "rows": [
+    {
+     "guided": false,
+     "reason": null,
+     "state": "done",
+     "step": "sign_in"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "done",
+     "step": "step_aside"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "done",
+     "step": "forwarding"
+    },
+    {
+     "guided": true,
+     "reason": "guided",
+     "state": "needs_you",
+     "step": "add_address"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "waiting",
+     "step": "confirm_address"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "waiting",
+     "step": "turn_on"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "waiting",
+     "step": "canary"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "waiting",
+     "step": "backfill"
+    },
+    {
+     "guided": false,
+     "reason": null,
+     "state": "waiting",
+     "step": "finish"
+    }
+   ],
+   "sentence": "the site needs you",
+   "status": "running"
+  }
+ },
+ "mail_setup_start": {
+  "error": null,
+  "ok": true
+ },
+ "mail_status": {
+  "error": null,
+  "keep_session": true,
+  "mailboxes": [
+   {
+    "address": "fwd-f1x7ure02@in.example.net",
+    "address_id": "adr_f1x7ure02",
+    "open_backfill": false,
+    "provider": "google",
+    "saved_sign_in": true,
+    "state": "pending",
+    "suggest_rotate": false,
+    "turned_off": false,
+    "unbound_note": null,
+    "unbound_reason": null,
+    "unbound_since_live": null
+   }
+  ],
+  "offer_pending": true,
+  "ok": true,
+  "profile_delete_pending": false,
+  "setup_running": false
+ },
+ "privacy_status": {
+  "current": "2026-09-09",
+  "error": null,
+  "needs_accept": false,
+  "ok": true,
+  "recorded": "2026-09-09"
+ },
+ "profile": {
+  "error": null,
+  "ok": true,
+  "profile": {
+   "clubs": [
+    "Chess club"
+   ],
+   "interests_editable": true,
+   "mild": [
+    "Concerts"
+   ],
+   "never": [
+    "Sports"
+   ],
+   "preferences": "Short sessions in the morning; long reading after dinner.",
+   "strong": [
+    "Career fairs",
+    "Volunteer days"
+   ],
+   "warnings": []
+  }
+ },
+ "set_fields": {
+  "error": null,
+  "ok": true,
+  "state": null
+ },
+ "settings_context": {
+  "error": null,
+  "ok": true,
+  "profile_name": "School",
+  "registry_error": null,
+  "vault": "D:\\Knowlu vault",
+  "version": "0.4.0"
+ }
+}

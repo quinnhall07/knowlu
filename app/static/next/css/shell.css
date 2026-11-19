@@ -58,6 +58,10 @@
   --shadow-pop: 0 22px 44px -12px color-mix(in srgb, var(--black) 70%, transparent);
   --shadow-peek: 14px 0 36px -14px color-mix(in srgb, var(--black) 70%, transparent);
 }
+/* In the dark theme a floating surface (--pop) is the very shade of --line-2, the fill of a field, a chosen segment and
+   a hover tint, so on one those would vanish. There --line-2 is the page's ground instead: they read as wells in the
+   surface. One rule for every floating surface; no page patches its own. */
+:root[data-theme="dark"] :is(.sbar, .panel, .sheet-in, .layer-in, .kn-tip) { --line-2: var(--bg); }
 /* the reading font: one setting, three roles. The wordmark is the logo and keeps its own face. */
 html[data-font="dyslexic"] { --display: "OpenDyslexic", "Segoe UI", system-ui, sans-serif; --serif: var(--display); --sans: var(--display); }
 html[data-font="dyslexic"] .wm { font-family: "PT Serif Caption", Georgia, serif; letter-spacing: 0; word-spacing: 0; }

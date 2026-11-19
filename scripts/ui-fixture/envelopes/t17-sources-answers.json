@@ -1,0 +1,253 @@
+{
+ "account_status": {
+  "account_id": "acct_f1x7ure01",
+  "checked_at": "2026-08-28T08:00:00Z",
+  "current_period_end": "2026-09-24T00:00:00Z",
+  "email": "student@example.edu",
+  "error": null,
+  "needs_account": false,
+  "ok": true,
+  "plan": "monthly",
+  "status": "active"
+ },
+ "close_info": {
+  "error": null,
+  "ok": true,
+  "state": null
+ },
+ "copy_text": {
+  "error": null,
+  "ok": true
+ },
+ "delete_note": {
+  "error": null,
+  "ok": true,
+  "state": null
+ },
+ "get_settings": {
+  "error": null,
+  "ok": true,
+  "settings": {
+   "autostart": true,
+   "backup_dir": "D:\\Knowlu backups",
+   "profile_id": "profile_1111111111",
+   "quit_at": null
+  }
+ },
+ "google_status": {
+  "calendar": true,
+  "email": "student@example.edu",
+  "error": null,
+  "gmail": true,
+  "ok": true,
+  "state": "active"
+ },
+ "grades_refresh": {
+  "error": null,
+  "ok": true
+ },
+ "grades_status": {
+  "available": true,
+  "connected": true,
+  "fetched_at": "2026-08-28T07:30",
+  "hidden": false,
+  "host": "lms.example.edu",
+  "ok": true,
+  "reason": null,
+  "signed_out": false
+ },
+ "mail_applied": {
+  "courses": [
+   {
+    "archived": {
+     "count": 0,
+     "items": []
+    },
+    "changed": [],
+    "course": "abc-101",
+    "created": [
+     {
+      "changed_since": false,
+      "current": {
+       "due": "2026-09-04T23:59",
+       "status": "active",
+       "title": "ABC 101 Quiz 2"
+      },
+      "due": "2026-09-04T23:59",
+      "id": "task_d718317ed2",
+      "path": "tasks/abc-101-quiz-2.md",
+      "title": "ABC 101 Quiz 2",
+      "ts": "2026-11-19T07:22:26.523Z",
+      "uid": null
+     }
+    ],
+    "notices": []
+   },
+   {
+    "archived": {
+     "count": 1,
+     "items": [
+      {
+       "changed_since": false,
+       "current": {
+        "due": "2026-08-20T17:00",
+        "status": "done",
+        "title": "DEF 210 Lab 0 sign-off"
+       },
+       "due": "2026-08-20T17:00",
+       "id": "task_cd6e298649",
+       "path": "archive/def-210-lab-0-sign-off.md",
+       "title": "DEF 210 Lab 0 sign-off",
+       "ts": "2026-11-19T07:22:26.566Z",
+       "uid": null
+      }
+     ]
+    },
+    "changed": [
+     {
+      "changed_since": false,
+      "current": "2026-08-31T17:00",
+      "date": "2026-08-27",
+      "field": "due",
+      "id": "task_a1b2c3d403",
+      "new": "2026-08-31T17:00",
+      "old": "2026-08-29T17:00",
+      "path": "tasks/def-210-lab-write-up.md",
+      "sender": "Course Staff <staff@example.edu>",
+      "title": "DEF 210 Lab write-up",
+      "ts": "2026-11-19T07:22:26.593Z"
+     }
+    ],
+    "course": "def-210",
+    "created": [],
+    "notices": []
+   },
+   {
+    "archived": {
+     "count": 0,
+     "items": []
+    },
+    "changed": [
+     {
+      "changed_since": true,
+      "current": "2026-09-04T23:59",
+      "date": "2026-08-26",
+      "field": "due",
+      "id": "task_a1b2c3d404",
+      "new": "2026-09-03T23:59",
+      "old": "2026-09-02T23:59",
+      "path": "tasks/jkl-120-essay-draft.md",
+      "sender": "Course Staff <staff@example.edu>",
+      "title": "JKL 120 Essay draft",
+      "ts": "2026-11-19T07:22:26.644Z"
+     }
+    ],
+    "course": "jkl-120",
+    "created": [],
+    "notices": []
+   },
+   {
+    "archived": {
+     "count": 0,
+     "items": []
+    },
+    "changed": [],
+    "course": null,
+    "created": [],
+    "notices": [
+     {
+      "changed_since": false,
+      "id": "info_c931f4623b",
+      "kind": "notice",
+      "opened_at": "2026-11-19T07:22:26.748Z",
+      "path": "info/info_c931f4623b.md",
+      "title": "JKL 120 meets in Hall B this week",
+      "ts": "2026-11-19T07:22:26.759Z"
+     }
+    ]
+   }
+  ],
+  "since": "2026-11-19T07:22:26.523Z"
+ },
+ "mail_keep_session": {
+  "error": null,
+  "ok": true,
+  "profiles_left": false
+ },
+ "mail_setup_progress": {
+  "active": false,
+  "ok": true,
+  "progress": null
+ },
+ "mail_status": {
+  "error": null,
+  "keep_session": true,
+  "mailboxes": [
+   {
+    "address": "fwd-f1x7ure01@in.example.net",
+    "address_id": "adr_f1x7ure01",
+    "open_backfill": false,
+    "provider": "m365",
+    "saved_sign_in": true,
+    "state": "active",
+    "suggest_rotate": false,
+    "turned_off": false,
+    "unbound_note": null,
+    "unbound_reason": null,
+    "unbound_since_live": null
+   },
+   {
+    "address": "fwd-f1x7ure03@in.example.net",
+    "address_id": "adr_f1x7ure03",
+    "open_backfill": false,
+    "provider": "google",
+    "saved_sign_in": false,
+    "state": "quiet",
+    "suggest_rotate": true,
+    "turned_off": false,
+    "unbound_note": "Mail is arriving from an address this mailbox never forwarded from",
+    "unbound_reason": "unknown_sender",
+    "unbound_since_live": 3
+   }
+  ],
+  "offer_pending": false,
+  "ok": true,
+  "profile_delete_pending": false,
+  "setup_running": false
+ },
+ "profile": {
+  "error": null,
+  "ok": true,
+  "profile": {
+   "clubs": [
+    "Chess club"
+   ],
+   "interests_editable": true,
+   "mild": [
+    "Concerts"
+   ],
+   "never": [
+    "Sports"
+   ],
+   "preferences": "Short sessions in the morning; long reading after dinner.",
+   "strong": [
+    "Career fairs",
+    "Volunteer days"
+   ],
+   "warnings": []
+  }
+ },
+ "set_fields": {
+  "error": null,
+  "ok": true,
+  "state": null
+ },
+ "settings_context": {
+  "error": null,
+  "ok": true,
+  "profile_name": "School",
+  "registry_error": null,
+  "vault": "D:\\Knowlu vault",
+  "version": "0.4.0"
+ }
+}

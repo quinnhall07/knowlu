@@ -219,16 +219,21 @@
     }
     return best < 0 ? null : WAITING.splice(best, 1)[0];
   }
+  /* #sheet is the one dialog, so it takes the name the sheet's own surface gives (.sheet-in's aria-labelledby): a role-less
+     div's label names nothing. The last sheet's name goes first. */
   function showSheet(req) {
     OPEN_SHEET = req;
     var host = $("sheet");
     host.textContent = "";
+    host.removeAttribute("aria-labelledby");
     host.hidden = false;
     $("center").setAttribute("inert", "");
     $("side").setAttribute("inert", "");
     $("panel").setAttribute("inert", "");
     syncLayer();
     try { req.mod.render(host, { close: function () { closeSheet(req.name); } }); } catch (e) { window.console.error(e); }
+    var named = host.querySelector(".sheet-in[aria-labelledby]");
+    if (named) { host.setAttribute("aria-labelledby", named.getAttribute("aria-labelledby")); }
   }
   function pump() {
     if (OPEN_SHEET) { return; }

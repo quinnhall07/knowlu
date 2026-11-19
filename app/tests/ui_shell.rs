@@ -964,3 +964,36 @@ fn every_ev_kind_is_an_accepted_ui_event_action() {
     }
     assert!(seen.len() >= 5, "found the page's ev( calls: {seen:?}");
 }
+
+/// Review M9: `#sheet` is the one dialog, so it carries the sheet's name: `showSheet` copies the `aria-labelledby` the
+/// sheet's own surface (`.sheet-in`) names onto `#sheet` after it renders, and clears the last sheet's first.
+#[test]
+fn the_sheet_takes_its_name_from_the_sheet_it_shows() {
+    let shell = code_of("js/shell.js");
+    let show = fn_body(&shell, "function showSheet(");
+    let render = show.find("req.mod.render(").expect("showSheet renders the sheet");
+    let clear = show.find("host.removeAttribute(\"aria-labelledby\")").expect("the last sheet's name is cleared");
+    let copy = show.find("host.setAttribute(\"aria-labelledby\"").expect("the name is copied onto #sheet");
+    assert!(clear < render && render < copy, "cleared before the render, copied after it: {show}");
+    assert!(show.contains(".sheet-in[aria-labelledby]"), "from the sheet's own surface");
+}
+
+/// Review M1: in the dark theme a floating surface (--pop) was the very fill of a field, a chosen segment and a hover
+/// tint (--line-2), so on a sheet, the panel, Status or the layer those vanished. shell.css points --line-2 elsewhere
+/// on every floating surface, once; no page patches it locally.
+#[test]
+fn dark_floating_surfaces_keep_fields_and_segments_visible() {
+    let css = strip_css_comments(&read("css/shell.css"));
+    let at = css.find(":root[data-theme=\"dark\"] :is(").expect("one dark-theme rule for the floating surfaces");
+    let rule = &css[at..at + css[at..].find('}').unwrap()];
+    for surface in [".sbar", ".panel", ".sheet-in", ".layer-in", ".kn-tip"] {
+        assert!(rule.contains(surface), "the rule covers {surface}: {rule}");
+    }
+    assert!(rule.contains("--line-2:") && !rule.contains("--line-2: var(--pop)") && !rule.contains("--line-2: var(--shade-27)"), "--line-2 is not the surface's own fill: {rule}");
+    for (f, text) in styles() {
+        let code = strip_css_comments(&text);
+        for patch in [".ws .field", ".sh .field", ".ws .seg", ".sh .seg"] {
+            assert!(!code.contains(patch), "{f}: a local dark-theme patch ({patch})");
+        }
+    }
+}
