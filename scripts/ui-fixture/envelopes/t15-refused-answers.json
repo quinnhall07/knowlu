@@ -1,0 +1,7 @@
+{
+ "decide": {
+  "ok": false,
+  "error": "vault lock poisoned",
+  "state": null
+ }
+}

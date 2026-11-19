@@ -1,0 +1,442 @@
+{
+ "ok": true,
+ "error": null,
+ "state": {
+  "ahead": {
+   "buckets": [
+    {
+     "date": "2026-08-28",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Fri",
+     "weekend": false
+    },
+    {
+     "date": "2026-08-29",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sat",
+     "weekend": true
+    },
+    {
+     "date": "2026-08-30",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sun",
+     "weekend": true
+    },
+    {
+     "date": "2026-08-31",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Mon",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-01",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Tue",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-02",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Wed",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-03",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Thu",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-04",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Fri",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-05",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sat",
+     "weekend": true
+    },
+    {
+     "date": "2026-09-06",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Sun",
+     "weekend": true
+    },
+    {
+     "date": "2026-09-07",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Mon",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-08",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Tue",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-09",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Wed",
+     "weekend": false
+    },
+    {
+     "date": "2026-09-10",
+     "hours": 0.0,
+     "items": 0,
+     "weekday": "Thu",
+     "weekend": false
+    }
+   ],
+   "clear_days": [
+    "2026-08-28",
+    "2026-08-29",
+    "2026-08-30",
+    "2026-08-31",
+    "2026-09-01",
+    "2026-09-02",
+    "2026-09-03",
+    "2026-09-04",
+    "2026-09-05",
+    "2026-09-06",
+    "2026-09-07",
+    "2026-09-08",
+    "2026-09-09",
+    "2026-09-10"
+   ],
+   "peak": {
+    "date": "2026-08-28",
+    "hours": 0.0,
+    "items": 0,
+    "weekday": "Fri",
+    "weekend": false
+   },
+   "takeaway": "Nothing due in the next fortnight.",
+   "undated_hours": 0.0
+  },
+  "closed_this_week": [],
+  "coming_up": [],
+  "courses": [
+   {
+    "codes": [
+     "ABC101"
+    ],
+    "name": "Introductory Studies",
+    "slot": "c1",
+    "slug": "abc-101",
+    "standing": null,
+    "status": null,
+    "title": "ABC 101"
+   },
+   {
+    "codes": [
+     "DEF210"
+    ],
+    "name": "Applied Methods",
+    "slot": "c2",
+    "slug": "def-210",
+    "standing": null,
+    "status": "active",
+    "title": "DEF 210"
+   },
+   {
+    "codes": [
+     "GHI150"
+    ],
+    "name": "Survey of Ideas",
+    "slot": "c3",
+    "slug": "ghi-150",
+    "standing": null,
+    "status": "dropped",
+    "title": "GHI 150"
+   },
+   {
+    "codes": [
+     "JKL120"
+    ],
+    "name": "Writing Workshop",
+    "slot": "c4",
+    "slug": "jkl-120",
+    "standing": null,
+    "status": null,
+    "title": "JKL 120"
+   }
+  ],
+  "decisions": {
+   "awaiting_calendar": 0,
+   "budget_remaining": 15,
+   "budget_total": 15,
+   "budget_used": 0,
+   "cards": [],
+   "deferred": 0,
+   "empty_text": "Queue clear — nothing waiting on you.",
+   "events_in_digest": 0,
+   "hidden_amendments": 0,
+   "oldest_days": 0,
+   "pending": 0
+  },
+  "delta": {
+   "records": [],
+   "since": null,
+   "since_kind": "none",
+   "summary": "",
+   "truncated": false
+  },
+  "empty": {
+   "active": false,
+   "gauge": "no history yet — the gauge fills from the next run",
+   "must_do": "Nothing is at risk today.",
+   "recommended": "No spare capacity today.",
+   "the_day": null
+  },
+  "gauge": {
+   "direction": "no-history",
+   "points": []
+  },
+  "good_to_know": [],
+  "issues_panel": {
+   "empty_text": "No open issues.",
+   "open_count": 0,
+   "rows": []
+  },
+  "list": {
+   "count": 0,
+   "empty_text": "Nothing here.",
+   "horizon": "all",
+   "hours": -0.0,
+   "rows": [],
+   "unreadable": []
+  },
+  "meter": {
+   "block_minutes": 30,
+   "capacity_text": "Capacity today: 9.17h",
+   "capped": 0,
+   "fit_blocks": 18,
+   "spill_blocks": 0,
+   "spill_hours": 0.0,
+   "spill_items": []
+  },
+  "must_do": {
+   "amendments": [],
+   "empty_text": "Nothing is at risk today.",
+   "groups": [],
+   "total_count": 0,
+   "total_hours": 0.0
+  },
+  "nav_counts": {
+   "all": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "decisions": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "good_to_know": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "issues": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "later": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "overdue": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "runs_warn": {
+    "count": 4,
+    "hours": 0.0
+   },
+   "today": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "undated": {
+    "count": 0,
+    "hours": 0.0
+   },
+   "week": {
+    "count": 0,
+    "hours": 0.0
+   }
+  },
+  "now": "2026-08-28T09:00",
+  "recommended": {
+   "commitments": [],
+   "empty_text": "No spare capacity today.",
+   "rows": [],
+   "spare_hours": 9.2
+  },
+  "revision": "38b31aaf3b64",
+  "runs_panel": {
+   "empty_text": "No run recorded in the last 24 hours.",
+   "expected": [
+    {
+     "due": "2026-08-27 15:00",
+     "runner": "cloud",
+     "status": "missing"
+    },
+    {
+     "due": "2026-08-28 08:00",
+     "runner": "cloud",
+     "status": "missing"
+    },
+    {
+     "due": "2026-08-27 12:00",
+     "runner": "local",
+     "status": "missing"
+    },
+    {
+     "due": "2026-08-27 18:00",
+     "runner": "local",
+     "status": "missing"
+    }
+   ],
+   "recent": [],
+   "warn_count": 4,
+   "warnings": []
+  },
+  "schema": 1,
+  "texts": {
+   "closed": "Nothing closed this week.",
+   "coming_up": "No events coming up.",
+   "info": "Nothing to know right now.",
+   "offline": "The engine did not answer — the page is as of the last state it returned."
+  },
+  "the_day": {
+   "all_day": [],
+   "blocks": [
+    {
+     "end": "10:10",
+     "hours": 2.1666666666666665,
+     "kind": "free",
+     "label": "open",
+     "start": "08:00",
+     "takes": []
+    },
+    {
+     "end": "11:00",
+     "hours": 0.83,
+     "kind": "class",
+     "label": "class",
+     "start": "10:10",
+     "takes": []
+    },
+    {
+     "end": "18:00",
+     "hours": 7.0,
+     "kind": "free",
+     "label": "open",
+     "start": "11:00",
+     "takes": []
+    }
+   ],
+   "commitments": [],
+   "commitments_hours": 0.0,
+   "empty_text": null,
+   "open_hours": 9.2
+  },
+  "today": "2026-08-28",
+  "topline": {
+   "active": 0,
+   "date": "Fri 28 Aug",
+   "engine_build": "pinned",
+   "generated_at": null,
+   "generated_by": null,
+   "runway_days": 999.0,
+   "status_word": "ahead",
+   "console_build": null,
+   "seen_at": "2026-08-27T21:00:00Z",
+   "sync": {
+    "ok": true,
+    "at": "2026-08-28T13:00:00Z",
+    "lines": [],
+    "last_error": null,
+    "skipped": null
+   },
+   "backup": {
+    "last_ok": "2026-08-28",
+    "behind_days": 0,
+    "last_error": null,
+    "target_reachable": true
+   },
+   "startup_missed": false,
+   "last_slot": {
+    "started": "2026-08-28T07:00:00-05:00",
+    "ended": "2026-08-28T07:01:12-05:00",
+    "steps": [
+     [
+      "sync",
+      0
+     ],
+     [
+      "coursework",
+      0
+     ],
+     [
+      "ingest",
+      0
+     ],
+     [
+      "grades",
+      0
+     ],
+     [
+      "judge",
+      0
+     ],
+     [
+      "rank",
+      0
+     ]
+    ],
+    "ok": true,
+    "engine_ok": true,
+    "late": false,
+    "reason": null,
+    "attempt": 1
+   },
+   "scheduler": {
+    "mode": "app",
+    "paused": false,
+    "device_ok": true
+   }
+  },
+  "unreadable": [],
+  "verdict": {
+   "active": 0,
+   "calendar_hours": 0.0,
+   "capacity_hours": 9.17,
+   "capacity_text": "Capacity today: 9.17h",
+   "headline": "Nothing active.",
+   "lede": "0.0h of must-do work against 9.17h of capacity.",
+   "must_hours": 0.0,
+   "overflow_sentence": null,
+   "runway_days": 999.0,
+   "template_hours": 9.17,
+   "word": "ahead"
+  },
+  "view": "all",
+  "warnings": []
+ }
+}
