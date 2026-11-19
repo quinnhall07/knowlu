@@ -20,6 +20,7 @@ the same on any day. Every answer carries the app's CSP from app/tauri.conf.json
 import argparse
 import http.server
 import json
+import os
 import pathlib
 import threading
 import urllib.parse
@@ -161,19 +162,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_bytes(STUB.encode("utf-8"), "text/javascript; charset=utf-8")
         if path.startswith("/__fixture__/envelopes/"):
             name = path.rsplit("/", 1)[1]
-            target = ENVELOPES / name
-            if name.endswith(".json") and "/" not in name and "\\" not in name and target.is_file():
-                return self.send_bytes(target.read_bytes(), "application/json; charset=utf-8")
+            base = os.path.realpath(ENVELOPES)
+            # The cheap checks first, so a \\host name never reaches realpath; then realpath and a prefix
+            # check, the shape CodeQL's path-injection query reads as a guard.
+            safe = name.endswith(".json") and "\\" not in name and ":" not in name
+            target = os.path.realpath(os.path.join(base, name)) if safe else ""
+            if safe and target.startswith(base + os.sep) and os.path.isfile(target):
+                with open(target, "rb") as f:
+                    return self.send_bytes(f.read(), "application/json; charset=utf-8")
             if name.endswith("-answers.json"):
                 return self.send_bytes(b"{}", "application/json; charset=utf-8")  # a set with no staged answers
             return self.send_error(404)
         if path == "/favicon.ico":
             return self.send_bytes(b"", "image/x-icon")  # the browser's own probe; the app has no favicon
-        target = (ROOT / urllib.parse.unquote(path.lstrip("/"))).resolve()
-        if ROOT.resolve() not in target.parents or not target.is_file():
+        rel = urllib.parse.unquote(path.lstrip("/"))
+        # No backslash, drive colon or leading slash ever reaches realpath: on Windows a \\host path
+        # would open an SMB connection before the prefix check refused it (review 2026-11-19).
+        if "\\" in rel or ":" in rel or rel.startswith("/"):
             return self.send_error(404)
-        ctype = TYPES.get(target.suffix.lower(), "application/octet-stream")
-        return self.send_bytes(target.read_bytes(), ctype)
+        base = os.path.realpath(ROOT)
+        target = os.path.realpath(os.path.join(base, rel))
+        if not target.startswith(base + os.sep) or not os.path.isfile(target):
+            return self.send_error(404)
+        ctype = TYPES.get(os.path.splitext(target)[1].lower(), "application/octet-stream")
+        with open(target, "rb") as f:
+            return self.send_bytes(f.read(), ctype)
 
 
 class Server(http.server.ThreadingHTTPServer):
