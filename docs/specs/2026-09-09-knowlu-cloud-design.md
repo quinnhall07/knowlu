@@ -11,7 +11,7 @@
 | # | Decision | Consequence |
 |---|---|---|
 | D1 | **Build on the cloud, both meanings, CI first.** Releases are built and signed by CI; the backend is hosted. | Plan C0 (CI) is the first plan. The laptop leaves the release path; the updater keypair is regenerated and exists only in CI secrets. |
-| D2 | **No free tier. One edition. $9.99/month. An account is required.** *(amended 2026-11-10: $12.99 every 4 weeks, or $6.49 every 4 weeks billed $84.37 a year; Pell Grant recipients pay 50% less; see Amendment 2026-11-10 at the end)* | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
+| D2 | **No free tier. One edition. $9.99/month. An account is required.** *(amended 2026-11-10 and 2026-11-17: $12.99 every 4 weeks, or $6.49 every 4 weeks billed $84.37 once a year; sales tax is added at checkout where it applies; no Pell price for now; see Amendments 2026-11-10 and 2026-11-17 at the end)* | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
 | D3 | **All three judgments — enrichment, event verdicts, email triage — run in the cloud. No local runs.** Cheapest models that do the job. | Plan 3a's llama.cpp runtime, install UI and digest table are removed (C4). The judge *seam* stays; its tier 3 becomes an HTTP call to our service. |
 | D4 | **The deterministic, offline-capable core stays in the app; everything that depends on the internet moves to the cloud — as much as possible.** *(amended 2026-09-17 — see the amendment at the end)* | The app keeps: vault, ranking, capacity, rendering, journal, scheduler, the deterministic parsers' *input fetch* for credentialed portals (§4.3). The cloud gets: accounts, entitlement, judgment, email ingestion, event feeds, sync, analytics, updates. |
 | D5 | **Analytics:** (a) interaction events and (b) corrections to AI judgments, collected automatically under the ToS; (c) raw content only behind a separate opt-in; issue reports carry diagnostic context. | §6. Gmail-derived content is excluded from (c) by Google policy regardless of opt-in (§9). |
@@ -132,7 +132,7 @@ Git commit/push/rebase (`history.rs`); the model runtime; the free-tier/entitlem
 - **Identity:** Supabase Auth, email + password with email confirmation, plus magic-link sign-in. No social login at launch (one path to test, one path to support). Sessions are JWTs the app stores in Credential Manager under `knowlu/<profile_id>/session`; refresh is the SDK's; sign-out revokes.
 - **Account row:** `accounts(id, email, created_at, tos_version, tos_accepted_at, privacy_version, age_attested_at, stripe_customer_id, status)`. **No birthdate, ever** — the 18+ attestation is a boolean with a timestamp (§9 Q2).
 - **Entitlement:** `entitlements(account_id, plan, status, current_period_end, source)` written only by the Stripe webhook handler. The app calls `GET /entitlement` at launch and every 6 h; the answer is cached in `settings.json` with a **72-hour grace** so a dead hotel Wi-Fi never blanks today's page; past grace the page shows a banner and the slots keep ranking but the cloud steps are skipped as named steps (`judge (skipped: no entitlement)`), never a failed slot.
-- **Billing:** Stripe Checkout (hosted) for sign-up, Stripe Customer Portal for cancel/update card, Stripe Tax for Kentucky and any other registrations. A cancel link is in the settings panel and in every billing email (§9 Q8). Summer auto-pause (VISION) is *recommended* as a Stripe pause_collection on a June–August schedule; **confirm** (§11). *(amended 2026-11-10: new subscriptions have no summer pause; see Amendment 2026-11-10 at the end)*
+- **Billing:** Stripe Checkout (hosted) for sign-up, Stripe Customer Portal for cancel/update card, Stripe Tax for Kentucky and any other registrations. A cancel link is in the settings panel and in every billing email (§9 Q8). Summer auto-pause (VISION) is *recommended* as a Stripe pause_collection on a June–August schedule; **confirm** (§11). *(amended 2026-11-10 and 2026-11-17: no subscription has a summer pause; once Stripe Managed Payments is in effect for checkout, Knowlu is sold through Link; see Amendments 2026-11-10 and 2026-11-17 at the end)*
 - **Deletion right:** `DELETE /account` cascades: entitlement cancelled at period end via Stripe, judgments/corrections/events/issues rows deleted, storage objects deleted, a tombstone `(email_hash, deleted_at)` kept 90 days for abuse control, then gone.
 - **Anti-cracking, honestly:** the client is inspectable and always will be. What cannot be copied is server-side: the entitlement check every 6 h, the prompts and grammars (never shipped in the binary from C2 on), the parsers for credentialed portals (§4.3), the rule table, the sync. A patched client with no valid session gets no judgments, no ingestion, no sync — which is to say, it gets the deterministic ranking of an empty vault.
 
@@ -1231,7 +1231,7 @@ charge at 2.9%, and $6.29 at 7.1%.
   W7's test ("no 6.99, no founding under `site/`") stays as a standing guard, and the waitlist's prices
   row follows this amendment.
 
-## Amendment 2026-11-17 — the price as ruled 2026-11-17: sold through Link, tax added at checkout, no Pell price for now, the refunds defined, the old plans retired, a price that can change (Quinn's rulings of 2026-11-17 and 2026-11-20) — *draft for Quinn's signature*
+## Amendment 2026-11-17 — the price as ruled 2026-11-17: sold through Link, tax added at checkout, no Pell price for now, the refunds defined, the old plans retired, a price that can change (Quinn's rulings of 2026-11-17 and 2026-11-20) — **SIGNED by Quinn, 2026-11-20**
 
 Authority: Quinn's rulings in the legal-pages session of 2026-11-17, recorded as R1–R12 and U1–U12 in §0
 of the legal pages note (`docs/specs/2026-11-17-legal-pages-rewrite.md:96-180`, "the legal note"). This
@@ -1246,14 +1246,11 @@ quoted above (6). (7) is Quinn's words alone; what follows it under *Reading (7)
 reading of them, not Quinn's. The ruling settles item 3 of §8 of the v0.4.1 pricing note
 (`docs/specs/2026-11-19-v041-pricing-design.md`, "the pricing note"; it is in the v0.4.1 pricing lane's
 worktree, not yet on `main`, and is cited here by section because it is being revised). (8) to (10)
-answer the note's §8 items 5, 6 and 7. Each of those three is written as the note recommends, starts with
-`[PENDING QUINN, item N]`, where N is the pricing note's §8 item, and carries the text that replaces it
-if Quinn says no. Quinn approves them by signing. The markers are removed at signing either way. The
+answer the note's §8 items 5, 6 and 7 as the note recommended, and Quinn signed them with the rest. The
 legal note's C26 (`:852`) and the pricing note's §8 item 1 ask for this amendment.
 
-This is a draft. It gets one review and one re-review, and anything still open after them goes to Quinn
-as a short list (CLAUDE.md, Workflow). No marker elsewhere in this spec changes before Quinn signs;
-*The markers* below gives the text D2's marker takes at signing.
+Reviewed twice (`docs/reports/2026-11-20-price-amendment-1117-review-r1.md`, `-r2.md`) and signed by
+Quinn on 2026-11-20 ("sign"), taking every recommendation in O1–O5.
 
 In this amendment a bare (n) is one of its own rulings. "11-10's (n)" and P1–P14 are Amendment
 2026-11-10's; P15 is new here. A bare `:line` cite is to this spec, unless its sentence names another
@@ -1326,17 +1323,23 @@ document.
 - D2's "no free tier" and "one edition".
 
 **The markers.** One marker that Amendment 2026-11-10 set carries price wording this amendment changes:
-D2's, which names the Pell price. Applied at signing, and not before: D2's marker is replaced, not
-appended to (11-10's rule, `:1008-1009`), and becomes:
+D2's, which names the Pell price. Applied at signing (2026-11-20): D2's marker is replaced, not
+appended to (11-10's rule, `:1008-1009`), and now reads:
 
 > *(amended 2026-11-10 and 2026-11-17: $12.99 every 4 weeks, or $6.49 every 4 weeks billed $84.37 once a
 > year; sales tax is added at checkout where it applies; no Pell price for now; see Amendments 2026-11-10
 > and 2026-11-17 at the end)*
 
-R2's marker (the 14-day trial, `:341`), R3's (no academic-year price or term, and no summer pause for new
-subscriptions, `:342`) and §5.1's Billing marker (no summer pause for new subscriptions, `:135`) carry no
-wording this amendment changes, and stay as they are. Under (6) every subscription is a new one, so their
-words remain true. §5.1's seller sentence is O1 under *Open for Quinn*.
+§5.1's Billing marker (`:135`) carries no price wording, but (1) changes the seller its line names (O1).
+Applied at signing (2026-11-20), it is replaced the same way and now reads:
+
+> *(amended 2026-11-10 and 2026-11-17: no subscription has a summer pause; once Stripe Managed Payments
+> is in effect for checkout, Knowlu is sold through Link; see Amendments 2026-11-10 and 2026-11-17 at the
+> end)*
+
+R2's marker (the 14-day trial, `:341`) and R3's (no academic-year price or term, and no summer pause for
+new subscriptions, `:342`) carry no wording this amendment changes, and stay as they are. Under (6) every
+subscription is a new one, so their words remain true.
 
 > **The price and billing (Quinn's rulings of 2026-11-17, as the legal note's §0 records them).**
 > (1) **Knowlu is sold through Link.** Under Stripe Managed Payments, Link is the seller of record (R2:
@@ -1430,16 +1433,15 @@ disputes in the webhook (P8; the legal note's C12) do not (the pricing note's §
 refund under P12 or P15 (d) is made by hand, and the subscription is cancelled in the same step, at once
 rather than at period end, so that access ends the day of the refund and P8 holds. A refund under P15 (a)
 also cancels the subscription at once if it is still running, because the student had already ended it.
-A refund under (b) cancels nothing: it returns a second charge for a period that stays paid. (c) is O4.
+A refund under (b) cancels nothing: it returns a second charge for a period that stays paid. (c) follows
+O4.
 Whether Knowlu or Link issues the refund under Managed Payments is `unverified (Stripe)`.
 
 **Reading (1).** What Link does at checkout and for receipts, cancellation, refunds and disputes is
 `unverified (Stripe)` here, as in the legal note (`:69-73`). The legal note's C5 and the pricing note's
 T0r and S1 (its D7) record it before any page says it.
 
-> **The pricing note's §8 items 5, 6 and 7, as the note recommends (Quinn approves them by signing).**
->
-> [PENDING QUINN, item 5]
+> **The pricing note's §8 items 5, 6 and 7, as the note recommends (signed 2026-11-20).**
 >
 > (8) **The app's subscribe step shows P9's price lines.** A2's wizard clause ("until then the wizard
 > shows no price figure, trial length or plan price", `docs/specs/2026-11-17-v0.4.0-new-ui-design.md:26-27`)
@@ -1448,34 +1450,16 @@ T0r and S1 (its D7) record it before any page says it.
 > *Why:* A2 kept prices out of the wizard only until billing moved, and P9 asks for the prices before the
 > card is entered (the pricing note's D9).
 >
-> *If Quinn says no, (8) reads instead:* (8) **The app's subscribe step shows no price.** A2's wizard
-> clause stands after v0.4.1: the step shows no price figure, trial length or plan price, and Stripe's
-> checkout shows the price. A2 narrows P9: P9's lines are stated before the card on Stripe's page alone,
-> and the app's tests that keep figures off the step gain the new figures (the pricing note's D9).
->
-> [PENDING QUINN, item 6]
->
 > (9) **The upgrade sheet sells both plans, Yearly first, with the subscribe step's lines.** This replaces
 > the ruling of 2026-09-14 that "the in-app overlay sells monthly only" (`HANDOFF.md:80`, under "Step 6
 > decided 2026-09-14"). *Why:* the 4-week price "is the price that makes the year the obvious buy" (this
 > spec, `:1111-1112`), so a sheet that sells only the 4-week plan sends a returning student to the plan
 > the price steers away from (the pricing note's D9).
 >
-> *If Quinn says no, (9) reads instead:* (9) **The upgrade sheet sells one plan, the 4-week plan, with
-> the subscribe step's 4-week line (none if (8) is not signed).** It takes `monthly`'s place in the ruling
-> of 2026-09-14 that "the in-app overlay sells monthly only" (`HANDOFF.md:80`), which otherwise stands.
->
-> [PENDING QUINN, item 7]
->
 > (10) **The gift year stays signed (11-10's (9), P13), and the terms leave it out until the gift lane
 > ships.** R3's "Keep the gift year if the amendment has it" keeps the ruling. The terms' *A year for
 > someone else* paragraph publishes with the gift lane (the legal note's C24, `:849`). *Why:* the terms
 > must not promise a checkout that does not exist (the pricing note's D11).
->
-> *If Quinn says no, (10) reads instead:* (10) **The terms carry the gift year from v0.4.1.** R3's "Keep
-> the gift year if the amendment has it" is read as publishing it now: the terms' *A year for someone
-> else* paragraph (the legal note's §4) publishes with the v0.4.1 terms, before the gift lane builds its
-> checkout.
 
 **Consequences (not done by this amendment).**
 - **Where the work goes.** Quinn ruled on 2026-11-19 that pricing moves in v0.4.1, straight after the
@@ -1505,8 +1489,8 @@ T0r and S1 (its D7) record it before any page says it.
     paragraph and its §4 checklist's "Keep the old prices".
 - **The app.** The subscribe step shows no price and sends `academic_year` or `monthly`
   (`app/static/js/wizard.js:33-34`, `:642`). The upgrade sheet's one Subscribe button sends `monthly`
-  (`app/static/js/carried/account.js:83`, `:137`, `:214`). After v0.4.1 both send the new keys; what
-  each shows is (8)'s and (9)'s to settle. Settings' plan words (`app/static/js/pages/settings.js:32`)
+  (`app/static/js/carried/account.js:83`, `:137`, `:214`). After v0.4.1 both send the new keys and
+  show both plans with their price lines, Yearly first ((8), (9)). Settings' plan words (`app/static/js/pages/settings.js:32`)
   gain the 4-week plan, and the two old words have nothing left to label (6). `TOS_VERSION`
   (`app/src/account.rs:24`) moves with the new terms; it is on the contract list, so `contract-engineer`
   makes that commit and `contract-reviewer` reads it.
@@ -1514,7 +1498,7 @@ T0r and S1 (its D7) record it before any page says it.
   the old refund line (`site/terms.html:24`, `:28`, `:39`). Its new version, from the legal note's §4 as
   this amendment changes it, publishes with the billing move ((2); the pricing note's D11): P12 and P15,
   "Sold through Link" once Managed Payments is in effect for checkout, no Pell text (the legal note's
-  D14) and no old-subscriber paragraph (6); its gift paragraph is (10)'s to settle.
+  D14), no old-subscriber paragraph (6) and no gift paragraph until the gift lane ships (10).
   `site/subscribed.html:13` still says seven days. The privacy page names Link once Managed Payments is
   in effect (the pricing note's D12). knowlu.com's pricing stays "to be announced" (`site/index.html:408`,
   `:430`).
@@ -1525,39 +1509,36 @@ T0r and S1 (its D7) record it before any page says it.
 - **Documents.** `HANDOFF.md` §1's billing lines, which still place billing in v0.5.0 (`:24-26`), and the
   runbook of *Reading (7)*, by `docs-keeper` with the lane.
 
-**Not done by this amendment.** No code, page, VISION or CLAUDE.md line changes here, and no marker
-changes before signing. The Pell price is not built. When Quinn reapproaches it, a new amendment states
+**Not done by this amendment.** No code, page, VISION or CLAUDE.md line changes here; outside this
+amendment, only the two markers *The markers* records change. The Pell price is not built. When Quinn reapproaches it, a new amendment states
 it, and nothing superseded above comes back on its own. These stay unbuilt, or where 11-10 left them: the
 gift lane; plan switching (P5 went with the Pell price and no rule replaces it; v0.4.1 turns switching off
 in the Portal, the pricing note's D9); a 6-month plan; cancelling a yearly plan. Outside paid sign-ups
 still wait on Amendment 2026-10-16b's gate.
 
-**Open for Quinn (readings this draft takes, each with a recommendation).** These are labelled O1 to O5
-so that "item N" in this amendment means only the pricing note's §8 items.
+**Confirmed at signing (2026-11-20).** These are labelled O1 to O5 so that "item N" in this amendment
+means only the pricing note's §8 items.
 - **O1. §5.1's Billing line** names "Stripe Checkout (hosted) for sign-up, … Stripe Tax for Kentucky and
-  any other registrations" (`:135`). (1) changes who sells and who collects the tax. Its marker carries
-  no price wording, so this draft leaves it. *Recommend:* at signing, replace it with "*(amended
-  2026-11-10 and 2026-11-17: no subscription has a summer pause; once Stripe Managed Payments is in effect
-  for checkout, Knowlu is sold through Link; see Amendments 2026-11-10 and 2026-11-17 at the end)*". The
-  condition matches O2.
+  any other registrations" (`:135`). (1) changes who sells and who collects the tax. *Applied:* §5.1's
+  marker is replaced with the conditional text recorded under *The markers*. The condition matches O2.
 - **O2. (1) before Managed Payments is in effect for checkout.** The pricing note leaves open whether the
   account setting already makes every session Link's (its D7, readings (i) and (ii)), and it has a
-  fallback that ships v0.4.1 naming Stripe (its D7, the fallback). This draft reads (1) as the target: the
-  pages say "Sold through Link" once it is true, and not before. *Recommend:* confirm; the pricing note's
-  §8 item 10 settles the release.
+  fallback that ships v0.4.1 naming Stripe (its D7, the fallback). (1) is read as the target: the pages
+  say "Sold through Link" once it is true, and not before. *Confirmed:* the reading stands; the pricing
+  note's §8 item 10 settles the release.
 - **O3. U12's "every price sentence."** Read as the published pages, which carry "Sales tax is added at
   checkout where it applies."; the app and Stripe's page keep P9's shorter "plus tax where it applies".
-  *Recommend:* confirm.
+  *Confirmed:* the reading stands.
 - **O4. Access after a P15 (c) refund.** The approved terms say a refund "ends access the day it is
   made" (the legal note `:633`), and their refund cases name the end of access only for (d) (`:648`). P8
   says a refunded charge is not a paid period. Reading: a (c) refund with a cancel ends access that day
   (`:633`). A (c) refund without a cancel leaves the subscription running, and the refunded first period
-  is the one exception to P8, which the refund webhook (the legal note's C12) must carry. *Recommend:*
-  confirm; the free first period is the cost of a reminder Knowlu failed to send.
+  is the one exception to P8, which the refund webhook (the legal note's C12) must carry. *Confirmed:*
+  the reading stands; the free first period is the cost of a reminder Knowlu failed to send.
 - **O5. The grant application's Pell sentence.** Amendment 2026-10-16's ruling (5) put a Pell sentence,
-  without numbers, in a seed-grant application (`:777-778`). (5) drops the Pell price for now.
-  *Recommend:* Quinn checks the submitted text. If it promised a Pell price, the next word to the grant
-  says the price is being reapproached.
+  without numbers, in a seed-grant application (`:777-778`). (5) drops the Pell price for now. *Stays
+  Quinn's to do:* check the submitted text. If it promised a Pell price, the next word to the grant says
+  the price is being reapproached.
 
 **Open for Quinn, at the time of a change.** The amendment that makes each change decides these, above
 the promises every later price change keeps (above), never below them:
