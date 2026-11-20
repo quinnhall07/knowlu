@@ -1382,16 +1382,18 @@ words remain true. §5.1's seller sentence is O1 under *Open for Quinn*.
 - The premise is Quinn's statement, and the lane checks it before building on it. Its read-only look at
   production (the pricing note's §4, step 0) counts accounts, Quinn's and others, and entitlements by
   plan and status, and Quinn reads any old-price subscription in the live Dashboard. If it finds a paying
-  subscription that is not on Quinn's own accounts, the lane stops and asks Quinn before the switch. An old-price subscription on Quinn's own accounts is not a customer's; it is ended before the
-  switch, as the pricing note's §8 item 9 sets out.
+  subscription that is not on Quinn's own accounts, the lane stops and asks Quinn before the switch.
+  An old-price subscription on Quinn's own accounts is not a customer's; it is ended before the switch,
+  as the pricing note's §8 item 9 sets out.
 - The interim terms Quinn approved under U10 (the legal note's §4, "Interim terms with bump A") do not
   publish. They describe the old plans (the summer pause on `monthly`, the money-back on `academic_year`),
   and the v0.4.1 terms take their place (the pricing note's D11), so bump A carries privacy only.
 
 **Reading (7).** This amendment reads Quinn's words as:
 - a price change follows one written procedure;
-- each plan's amount lives in one place on the server, and every surface that states a price reads it
-  from there;
+- each plan's amount lives in one place on the server, and every surface the code builds (checkout, the
+  consent record, the billing emails, the app) reads it from there; the published terms state the price
+  in their own version, under the runbook;
 - whether a change also needs an app release or a terms release is the v0.4.1 pricing lane's design,
   written down in its runbook (`docs/reference/price-change.md`, not yet in the repository). This
   amendment does not decide it;
@@ -1459,9 +1461,9 @@ T0r and S1 (its D7) record it before any page says it.
 > spec, `:1111-1112`), so a sheet that sells only the 4-week plan sends a returning student to the plan
 > the price steers away from (the pricing note's D9).
 >
-> *If Quinn says no, (9) reads instead:* (9) **The upgrade sheet sells one plan, the 4-week plan.** It
-> takes `monthly`'s place in the ruling of 2026-09-14 that "the in-app overlay sells monthly only"
-> (`HANDOFF.md:80`), which otherwise stands.
+> *If Quinn says no, (9) reads instead:* (9) **The upgrade sheet sells one plan, the 4-week plan, with
+> the subscribe step's 4-week line (none if (8) is not signed).** It takes `monthly`'s place in the ruling
+> of 2026-09-14 that "the in-app overlay sells monthly only" (`HANDOFF.md:80`), which otherwise stands.
 >
 > [PENDING QUINN, item 7]
 >
@@ -1546,10 +1548,12 @@ so that "item N" in this amendment means only the pricing note's §8 items.
 - **O3. U12's "every price sentence."** Read as the published pages, which carry "Sales tax is added at
   checkout where it applies."; the app and Stripe's page keep P9's shorter "plus tax where it applies".
   *Recommend:* confirm.
-- **O4. Access after a P15 (c) refund.** The terms text Quinn approved ends access only after a (d)
-  refund (the legal note `:648`), while P8 says a refunded charge is not a paid period. Reading: after a
-  (c) refund the subscription goes on, and the refunded first period is not charged again. *Recommend:*
-  confirm; the refund is the cost of a reminder Knowlu failed to send.
+- **O4. Access after a P15 (c) refund.** The approved terms say a refund "ends access the day it is
+  made" (the legal note `:633`), and their refund cases name the end of access only for (d) (`:648`). P8
+  says a refunded charge is not a paid period. Reading: a (c) refund with a cancel ends access that day
+  (`:633`). A (c) refund without a cancel leaves the subscription running, and the refunded first period
+  is the one exception to P8, which the refund webhook (the legal note's C12) must carry. *Recommend:*
+  confirm; the free first period is the cost of a reminder Knowlu failed to send.
 - **O5. The grant application's Pell sentence.** Amendment 2026-10-16's ruling (5) put a Pell sentence,
   without numbers, in a seed-grant application (`:777-778`). (5) drops the Pell price for now.
   *Recommend:* Quinn checks the submitted text. If it promised a Pell price, the next word to the grant
@@ -1557,9 +1561,9 @@ so that "item N" in this amendment means only the pricing note's §8 items.
 
 **Open for Quinn, at the time of a change.** The amendment that makes each change decides these, above
 the promises every later price change keeps (above), never below them:
-- **A raise:** how far ahead, within or beyond the published 7 to 30 days, students already subscribed
-  are told, and when the new price reaches each plan. *Recommend:* at each student's next charge after
+- **A raise:** how far ahead, within the published 7 to 30 days, students already subscribed are told,
+  and when the new price reaches each plan. *Recommend:* at each student's next charge after
   the notice, so a yearly subscriber's raise waits for the renewal; never inside a paid period.
 - **A cut:** whether students already subscribed move to the lower price, and from when. *Recommend:*
-  everyone, at their next charge.
+  everyone, at their first charge at least 7 days after the notice.
 - **Either:** what the consent record keeps of the change, and the lawyer's read of the notice.
