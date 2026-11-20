@@ -1,11 +1,13 @@
 # v0.4.1 pricing: design note
 
-Planner, 2026-11-19. **Size: Contract**: it moves money, it moves `TOS_VERSION` in `app/src/account.rs`
-(contract list), it publishes new terms, and, if Managed Payments ships, it changes the privacy page.
-**Status: r3, final.** r2 answered review r1 (`docs/reports/2026-11-19-v041-pricing-spec-review-r1.md`).
-r3 applies review r2's fixes (`docs/reports/2026-11-19-v041-pricing-spec-review-r2.md`, PASS with
-changes). §9 maps each finding to its fix. There is no further review round; what stays open is §8's
-list, for Quinn. Plan: `docs/plans/2026-11-19-v041-pricing-plan.md`.
+Planner, 2026-11-19; revised 2026-11-20. **Size: Contract**: it moves money, it changes
+`app/src/account.rs` (contract list: `TOS_VERSION` and the checkout command), it publishes new terms, it
+adds a publishing workflow (T10), and, if Managed Payments ships, it changes the privacy page.
+**Status: r4.** r2 answered review r1 (`docs/reports/2026-11-19-v041-pricing-spec-review-r1.md`). r3
+applied review r2's fixes (`docs/reports/2026-11-19-v041-pricing-spec-review-r2.md`, PASS with changes);
+§9 maps each finding to its fix. **r4 revises r3 for Quinn's ruling of 2026-11-20** (zero customers; prices
+that can change later). §10 lists every decision and task r4 changed, so the next review can be a delta
+review of those alone. Plan: `docs/plans/2026-11-19-v041-pricing-plan.md`.
 
 **Authority.** Quinn's ruling of 2026-11-19: pricing is fixed in v0.4.1, straight after the v0.4.0 tag.
 The prices are the cloud design's Amendment 2026-11-10 (signed 2026-11-11), as Quinn's rulings of
@@ -21,6 +23,21 @@ The prices are the cloud design's Amendment 2026-11-10 (signed 2026-11-11), as Q
 - **P9:** "The app's subscribe step and Stripe Checkout state the every-4-weeks billing …, the billed amount
   …, on yearly the money-back terms …, all before the card is entered."
 
+**Quinn's ruling of 2026-11-20** (verbatim): "Again, we have zero customers right now. Just use the new
+prices. Make the changes that are necessary, and make sure that if we change prices in the future (lower
+or raise), we can make the proper adjustments". The draft Amendment 2026-11-17 records it as rulings (6)
+and (7) (cloud design on branch `docs/price-amendments`, `docs/specs/2026-09-09-knowlu-cloud-design.md:1360-1377`
+there; read in that worktree):
+- **(6) The old plans are retired.** No paying customer exists, so nothing is kept for an old subscription.
+  `monthly` ($9.99) and `academic_year` ($69.99) are not sold again and not carried forward.
+- **(7) A price can change later, up or down.** What this lane builds must meet three requirements: a price
+  change needs no app release and no hunt through the code; each plan's amount lives in one place on the
+  server; each later change is its own amendment, which says what happens to students already subscribed.
+
+The same day Quinn answered §8 item 1 yes, and the quote answers item 3. The amendment's (8) to (10) are
+§8 items 5, 6 and 7, drafted as this note recommends and pending Quinn's signature. Its open item 2
+(`:1481-1491` there) asks this lane to design how a terms bump reaches students without a release; D15 does.
+
 **When rule A2 ends.** The v0.4.0 note's A2 (`docs/specs/2026-11-17-v0.4.0-new-ui-design.md:24-27`) kept
 prices out of the wizard "until" billing moved to the signed prices in a later lane. This is that lane, so
 A2's wizard clause ends here and P9 governs the subscribe step. D9 shows P9's lines. Quinn confirms (§8,
@@ -32,9 +49,10 @@ so on *when* billing moves, this note wins.
 
 **Limits of what I checked.**
 - I had no shell and no web tools.
-- **The amendment is not on `main`.** Commit `5dac15c7` is only on `docs/waitlist-spec` (review r1). I read
-  the amendment from that worktree (`docs/specs/2026-09-09-knowlu-cloud-design.md:993-1232` there).
-  Precondition P1 (§8, item 1) puts it on `main` before T1.
+- **The amendments are not on `main` yet.** Amendment 2026-11-10 was read from the `docs/waitlist-spec`
+  worktree (`docs/specs/2026-09-09-knowlu-cloud-design.md:993-1232` there); Quinn ruled on 2026-11-20 that it
+  goes to `main` (§8 item 1). Amendment 2026-11-17 is a draft on `docs/price-amendments`. T1 waits until
+  both are on `main`, the second signed.
 - **I opened nothing on Stripe's site.** Every Stripe statement here is marked `unverified (Stripe)` and
   names its page. Plan task T0r confirms each one, and the test-mode spike S1 tests it.
 - **Production's state is not known from the repository.**
@@ -43,11 +61,13 @@ so on *when* billing moves, this note wins.
   - `HANDOFF.md:70` records sixteen functions deployed to production on 2026-11-10.
 
   T0 reads production's migration and function lists before anything depends on them (§4, step 0).
-- Code facts are cited `path:line` against this worktree, and I opened each one.
+- Code facts are cited `path:line` against this worktree, and I opened each one. r4's new citations were
+  read on 2026-11-20.
 
 ## 1. What changes for the student
 
-- **The wizard's Subscribe step** shows the two plans, Yearly first. Each plan is a button with its price:
+- **The wizard's Subscribe step** shows the two plans, Yearly first. Each plan is a button with its price,
+  as the server sends it (D9, D13). Today the server sends:
   - **Yearly:** "$6.49 every 4 weeks, billed $84.37 once a year. Renews yearly.", then "30-day money-back
     guarantee on each yearly charge."
   - **Every 4 weeks:** "$12.99 every 4 weeks."
@@ -55,6 +75,8 @@ so on *when* billing moves, this note wins.
 
   This is recommended pending Quinn's confirmation (D9). The step does not mention the trial, because only
   the server knows whether this account still has one (D5); Stripe's page states it.
+- **Without a connection** the step shows no price, the buttons wait, and "Try again" asks again. The app
+  never shows a price it did not just get from the server.
 - **The upgrade sheet** offers the same two plans, with the same lines (D9, pending Quinn).
 - **Stripe's checkout page** shows:
   - the plan's price;
@@ -67,82 +89,89 @@ so on *when* billing moves, this note wins.
 - **Settings → Membership** reads, for example, "Active, Yearly" or "Active, Every 4 weeks", with no price.
 - **knowlu.com** carries a new terms version that states these prices. The page after checkout says 14 days.
 - **A build older than v0.4.1** that tries to subscribe is told to update Knowlu.
+- **A later price change** reaches every build from v0.4.1 on with no update (D13, D15). A student already
+  subscribed either keeps their price or is emailed 7 to 30 days before it changes at their next renewal, as
+  that change's amendment rules (D14).
 - Nothing changes for a tester on a comp grant, and nothing changes in the engine.
 
 ## 2. Decisions, each with its reason
 
-**D1. Rename the plan keys.** New subscriptions get the keys `four_weekly` and `yearly`. The keys `monthly`
-and `academic_year` remain only as names for subscriptions started before the switch, and nothing sells
-them again.
-- **The pause job would catch a reused key.** `billing-jobs` pauses every `monthly` subscription in June to
-  August (`billing-jobs/handler.ts:126-137`). Ruling (1) says the 4-week plan has no pause.
-- **P10 and the amendment ask for it.** P10 keeps an old subscription "under its old plan name", and the
-  amendment's consequences say the 4-week plan "does not take the name `monthly`".
+**D1. Two plan keys, stable across every price change** (revised r4). Subscriptions are `four_weekly` or
+`yearly`. The old keys `monthly` and `academic_year` are retired (ruling 6): checkout never sells them
+(D3), the webhook never writes them (D2 maps no old price), and they leave `billing-jobs` (D10) and
+Settings (D9).
+- **A key outlives its price.** A price change is a new Stripe Price and a catalog entry under the same key
+  (D13), never a new key. The key fixes the cadence, so the app's plan words, Settings and the webhook's
+  output stay right across every change.
+- **Why not reuse `monthly`.** The amendment's consequences say the 4-week plan "does not take the name
+  `monthly`", and it is not billed monthly. (r3's other reason, the summer pause, is gone with the pause,
+  D10.)
 - **No migration is needed.** `entitlements.plan` is free text with no check
   (`20260910000100_accounts.sql:27`).
 - **Testers and the gate are unaffected.** `tester` comes from the view (`20261020000500_testers.sql:76-87`),
   and the gate reads status only (`_shared/entitlement.ts:22, 79-81`).
-- **Settings already knows `yearly`** (`app/static/js/pages/settings.js:32`).
 
-*A reading of signed text (Quinn confirms, §8 item 3).* The amendment's consequences say "existing
-`academic_year` rows map to the yearly plan". This note reads that line with P10 ("keeps its price and its
-terms … under its old plan name") and U10. An `academic_year` row keeps its name and its $69.99 price, and
-counts as yearly for the money-back guarantee. Renaming the row to `yearly` would make `priceOf` mail
-"$84.37" to a $69.99 subscriber. If Quinn takes the recommendation in §8 item 9, production may hold no
-such row at all.
+*Removed in r4 (zero customers):* r3's reading that an `academic_year` row keeps its name and $69.99 and
+counts as yearly for the money-back (U10), and §8 item 3 that asked Quinn to confirm it. Ruling (6)
+answers it: no such subscription is kept.
 
-**D2. The plan comes from the price id, not the interval.** The webhook looks up `items.data[0].price.id`
-in a table built from four environment values:
-- `STRIPE_PRICE_FOUR_WEEKLY` and `STRIPE_PRICE_YEARLY` (new);
-- `STRIPE_PRICE_MONTHLY` and `STRIPE_PRICE_YEAR` (existing, `billing-checkout/index.ts:16-19`).
-
-Any other id gives `plan: null`, which `billing-jobs` already counts as a failure without mailing a guessed
-price (`billing-jobs/handler.ts:69-75, 119-123`). **All four values are optional in the webhook.** A missing
-one matches nothing and is logged once per cold start, never answered 500, so one unset value cannot take
-down every event. Checkout requires the two new values (D4).
+**D2. The plan comes from the price id, through the catalog** (revised r4). The webhook looks up
+`items.data[0].price.id` among the catalog's selling and kept entries (D13) and writes that entry's key.
+- **At v0.4.1 it reads two values**, `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437`, whose
+  names the catalog derives (D13). It reads neither old value (`STRIPE_PRICE_MONTHLY`, `STRIPE_PRICE_YEAR`,
+  `billing-checkout/index.ts:16-19`): no customer pays those prices (ruling 6), and §4 ends Quinn's own
+  before the new webhook deploys. They are unset after the tag.
+- Any other id gives `plan: null`, which `billing-jobs` counts as a failure without mailing a guessed price
+  (`billing-jobs/handler.ts:69-75, 119-123`).
+- **Every value is optional in the webhook.** A missing one matches nothing and is logged once per cold
+  start, never answered 500, so one unset value cannot take down every event. Checkout requires its
+  selling values (D4).
 
 *Reasons:*
-- Both yearly prices bill by `year`, so the interval cannot tell them apart.
-- Today a `week` interval maps to `null` (`stripe-webhook/handler.ts:66-67`).
+- After a price change two prices share one key and one cadence (D14's `stay`), so only the id tells them
+  apart. The interval never could: today a `week` interval maps to `null` (`stripe-webhook/handler.ts:66-67`).
 - Price ids are public, set per project (`docs/plans/2026-09-09-c1-accounts-plan.md:2207-2209`).
 
-**D3. Older builds cannot buy the new prices.** `billing-checkout` sells two plans, `four_weekly` and
-`yearly`. Validation runs in this order:
+*Removed in r4:* the two old values, which existed only to name old-price subscriptions.
+
+**D3. Checkout sells only the offer the app showed** (revised r4). `billing-checkout` sells the catalog's
+selling plans (D13). A purchase request carries `plan`, `amount_cents` and `terms_version`, the last two
+copied from the offer the app rendered (D9). Validation runs in this order:
 
 1. **Old plan names.** A request for `monthly` or `academic_year` is refused with 409 and the sentence "This
    version of Knowlu can't subscribe any more. Update Knowlu, then try again."
-2. **The terms version's shape.** It must match `^\d{4}-\d{2}-\d{2}$` and sort no later than tomorrow
-   (UTC). Anything else is refused with 400: "a version must be a YYYY-MM-DD date no later than tomorrow".
-   The account function checks only the comparison with tomorrow (`account/handler.ts:199-201`). Here the
-   pattern comes first, so a value such as "2026-11-19x", which sorts between the floor and tomorrow, is
-   refused too.
-3. **The floor.** A terms version older than the terms that state these prices (a constant,
-   `CHECKOUT_TERMS_VERSION`) is refused with 409 and the same update sentence.
-4. **Unknown plan names** stay a 400.
+2. **Unknown plan names** stay a 400.
+3. **The offer.** `amount_cents` and `terms_version` are required (400 if either is absent) and must equal
+   the catalog's cents for that plan and its `TERMS_VERSION`. Anything else is refused with 409: "Knowlu's
+   prices or terms have changed. Look them over again, then subscribe." The app shows the sentence and asks
+   for the offer again (D9).
 
 These checks read only the request, so they come first: after the session check and the parse
-(`billing-checkout/handler.ts:92-93`), and before the account read, the 18+ check and the tester check
-(`:98-107`). The app shows the server's
-sentence as written (`app/src/account.rs:210-217`).
+(`billing-checkout/handler.ts:90-93`), and before the account read, the 18+ check and the tester check
+(`:98-107`). The app shows the server's sentence as written (`app/src/account.rs:210-217`). The consent row
+then records the catalog's cents and `TERMS_VERSION` (`handler.ts:120-127`), which equal what the app showed.
 
 *Reasons:*
-- **Consent integrity.** The consent row records the version the client sends (`handler.ts:120-127`), and
-  every earlier build sends 2026-09-10 (`account.rs:24, 1300`). If `monthly` were aliased to the new plan,
-  Knowlu would record consent to the $9.99 terms for a $12.99 charge.
-- **Early placement.** Refusing first means every old build gets the same answer whatever its account
-  state. It also means the deploy check in §4 step 10 can tell this refusal from the tester refusal by its
-  body.
-- **The shape check.** Values such as "9999-99-99" or "2026-11-19x" would otherwise pass the floor and be
-  written into `consents.version`.
-- **A consequence, intended.** The floor equals `TOS_VERSION` (D11's tie). So every later terms bump, a
-  typo fix included, refuses every older build at checkout. A build that shows terms must send the version
-  it shows, and the updater offers the new build.
-- **Who is affected.** Almost nobody: nobody but Quinn has the app (v0.4.0 note, A1), and the updater offers
-  0.4.1.
+- **Kept: the old names' 409, though it protects no sale.** The rename alone already stops an old build
+  buying: without this step `monthly` is an unknown name and gets 400. It stays for three reasons. It gives
+  a pre-v0.4.1 build a sentence a student can act on. Its exact body is how §4 step 10b tells the new
+  function from the tester refusal. And with stable keys (D1) the list never grows. Only Quinn's installs
+  meet it (v0.4.0 note, A1).
+- **Consent integrity, by match rather than floor.** Every earlier build sends 2026-09-10
+  (`account.rs:24, 1300`), and the old names are refused before anything else. From v0.4.1 the student
+  consents to the amount and terms version the server named and the app showed. If the price changed
+  between showing and clicking, the 409 shows the new one before Stripe's page (P9).
+- **Only the catalog's own version can be written to `consents.version`**, so a malformed or future value
+  never is, with no pattern and no date rule.
+- **No build is refused for its age**, so a terms bump needs no release (D15).
 
-**D4. Checkout checks the price before selling it.** `index.ts` maps each plan to its price id and its cents:
-`four_weekly` is 1299 and `yearly` is 8437 (today's map is `index.ts:16-20`). Before the consent row is
-written, the function reads the price from Stripe and requires six things:
+*Removed in r4:* r3's floor (`CHECKOUT_TERMS_VERSION`, tied to `TOS_VERSION`), its consequence that every
+later terms bump refused every older build, the shape check and its "2026-11-19x" case.
+
+**D4. Checkout checks the price before selling it** (r4: against the catalog). The catalog gives each selling
+plan its price variable, its cents and its cadence (D13): `four_weekly` is 1299, week × 4, and `yearly` is
+8437, year × 1. Today's map in `index.ts:16-20` goes. Before the consent row is written, the function reads
+the price from Stripe and requires six things:
 1. the price is `active`;
 2. the currency is `usd`;
 3. `unit_amount` equals the plan's cents;
@@ -155,9 +184,10 @@ yearly by mistake would pass under `four_weekly`.
 
 Any failure answers 500 "the function is not configured" and logs which field failed, by name only.
 
-*Reason:* `price_cents` comes from the map, not from Stripe. Without the check, a price entered wrongly in
-the Dashboard would be sold silently under terms that say something else. That covers a wrong interval,
-and an inclusive price under terms that say tax is added (U12). The check costs one Stripe GET.
+*Reason:* `price_cents` comes from the catalog, not from Stripe. Without the check, a price entered wrongly
+in the Dashboard would be sold silently under terms that say something else. That covers a wrong interval,
+an inclusive price under terms that say tax is added (U12), and, at a later price change, a variable set to
+the old price's id. A selling variable that is unset answers the same 500. The check costs one Stripe GET.
 
 **D5. 14 days free, once per account, and no second live subscription.** The checkout reads the account's
 `entitlements` row (`stripe_subscription_id`, `status`; `20260910000200_billing_jobs.sql:13`):
@@ -186,10 +216,12 @@ and an inclusive price under terms that say tax is added (U12). The check costs 
   has a `trial_end` still in the future. A retry that arrives after the trial ended sends nothing and is
   recorded.
 - **What it says.**
-  - The plan's words, when the price id is known.
-  - The amount, taken from the event's own price (`unit_amount`, `currency`, `recurring.interval`,
-    `recurring.interval_count`): "$84.37 once a year" or "$12.99 every 4 weeks". Any other interval is
-    written as "every N weeks", "every N months" or "every N years", with N = 1 written without a number.
+  - The plan's words and the amount, from the catalog entry the event's price id matches (D13), through the
+    catalog's one formatter: "$84.37 once a year" or "$12.99 every 4 weeks" (r4).
+  - For an id the catalog lacks: no plan words, and the amount formatted by the same formatter from the
+    event's own price (`unit_amount`, `currency`, `recurring.interval`, `recurring.interval_count`). Any
+    other interval is written as "every N weeks", "every N months" or "every N years", with N = 1 written
+    without a number.
   - "plus tax where it applies".
   - The date of the first charge, written in UTC−10. That is never later than the student's own date
     anywhere in the fifty states.
@@ -281,38 +313,81 @@ function of the plan and of whether a trial applies:
 
 *Reason:* P9 names Stripe Checkout as well as the app.
 
-**D9. The app's subscribe step and labels.**
-- **The wizard** (`app/static/js/wizard.js:32-36`).
+**D9. The app's subscribe step and labels: the app shows what the server sends** (revised r4).
+- **The offer, from the server.** `GET /billing-checkout`, with the session, answers the catalog's selling
+  plans in order (Yearly first), each with its key, its `amount_cents` and its P9 lines, plus the catalog's
+  `terms_version` and the line "Plus tax where it applies." It reads no account. A new command,
+  `checkout_offer`, in `app/src/account.rs` beside `open_checkout`, reads it with the pending session, as
+  `entitlement_now` does (`account.rs:1191-1206`), and hands the answer to the page unchanged. It joins
+  `account::open_checkout` in both `generate_handler!` lists (`app/src/main.rs:181, 270`).
+  - *Why `billing-checkout`'s GET:* the function that sells reads the same catalog in the same deploy, so
+    what is shown and what is charged come from one bundle; no new function is deployed or listed; it
+    checks the session itself, as every function here does (`cloud/supabase/config.toml:101-109`). Not the
+    entitlement reply: its four keys are the C2 contract the app caches (`account.rs:879-888`), and every
+    slot calls it.
+- **The purchase.** `open_checkout` takes the chosen plan's `amount_cents` and the offer's `terms_version`,
+  and `checkout_url_at` sends them with the plan (`account.rs:1292-1301`, which today sends `TOS_VERSION`).
+  The sign-up consent retry in front of it is unchanged (D15).
+- **The wizard** (`app/static/js/wizard.js:32-34`).
   - "Yearly" comes first, red (`ibtn`), and sends `yearly`. "Every 4 weeks" comes second (`wbtn`) and
-    sends `four_weekly` (`:642`).
-  - Each button carries §1's price lines, built from the same figures as the cents map. A test ties the
-    two (§6).
+    sends `four_weekly` (`:641-646`).
+  - On entering the step, after the entitlement check (`:384-393`) answers not entitled, it asks for the
+    offer. Each button's lines, and the line below both, are the offer's, set as text, never as markup.
   - The lede drops "and shows the price".
   - The element ids stay the same: no student sees them, and renaming them would churn the DOM checks.
   - *Reason:* P9 governs once A2's wizard clause ends. Ruling (2) gives the order and the yearly wording,
-    and P11 sets the figure ($6.49 × 13 = $84.37), with the billed amount beside it.
-- **The upgrade sheet** (`app/static/js/carried/account.js:83, 137`) gets the same two buttons and lines in
-  place of its one Subscribe button. *Reason:* the amendment prices the 4-week plan "to make the year the
-  obvious buy" (`:1111-1112` there). A sheet that sells only that plan sends a lapsed student to the one the
-  price steers away from. This replaces the 2026-09-14 one-plan ruling (`HANDOFF.md:80`), so Quinn confirms
-  (§8 item 6).
+    and P11 sets the figure ($6.49 × 13 = $84.37), with the billed amount beside it. The catalog writes
+    those lines (D13).
+- **No offer, no figure.** Until an offer has arrived the plan buttons are disabled and carry no figure. If
+  none can be had (no network, a refusal, or an answer that lacks either plan), the step says "Prices could
+  not be loaded. Check your connection, then try again." beside a Try again button. Nothing is cached: no
+  file, no storage, and each entry to the step asks again. A checkout refusal (D3, D5) shows the server's
+  sentence and asks for the offer again. *Reason:* never a stale or invented price, and a checkout needs
+  the network anyway.
+- **The upgrade sheet** (`app/static/js/carried/account.js:83, 129, 134-137`) gets the same two buttons and
+  lines in place of its one Subscribe button, and asks for the offer where today it shows that button
+  (`:129`). *Reason:* the amendment prices the 4-week plan "to make the year the obvious buy" (`:1111-1112`
+  there). A sheet that sells only that plan sends a lapsed student to the one the price steers away from.
+  This replaces the 2026-09-14 one-plan ruling (`HANDOFF.md:80`), so Quinn confirms (§8 item 6).
   - Only the two buttons start a checkout. Today's handler starts `subscribe()` from any click inside
     `#up-subscribe` (`carried/account.js:214`), so a click on the price lines would open a checkout with no
     plan.
-- **Settings** adds `four_weekly: "Every 4 weeks"` and keeps `monthly` and `academic_year` for old
-  subscriptions. It still shows no price.
+- **Settings** (`settings.js:32`) words `four_weekly` "Every 4 weeks" and `yearly` "Yearly". `monthly` and
+  `academic_year` go: no row will carry them (ruling 6), and a plan without a word reads as none
+  (`settings.js:184`). It still shows no price.
+- **The app holds no price.** No amount, figure or price line is written anywhere in `app/static/js`; it
+  holds the two plan keys and their words. So a price change reaches every build from v0.4.1 on with no
+  update (ruling 7).
 - **The Customer Portal** offers no plan switching, because the terms describe none.
-- **If Quinn keeps the app free of prices** (§8 item 5): the price lines are not built, and the A2 pins
-  gain the new figures instead. Item 1's amendment then records A2 as narrowing P9, so the signed text is
-  changed rather than read around.
+- **If Quinn keeps the app free of prices** (§8 item 5): the lines are not rendered; the app still asks for
+  the offer, for its amount and terms version. Item 1's amendment then records A2 as narrowing P9.
 
-**D10. The billing emails.**
-- `priceOf` gives "$12.99 every 4 weeks, plus tax where it applies" and "$84.37 once a year, plus tax
-  where it applies". The two old plans keep their text (P10).
-- The pause stays `monthly`-only (`billing-jobs/handler.ts:130`), and the annual reminder goes to every
-  plan.
-- "click the gear" (`:86`, `:101`) becomes "go to Settings, then Membership". "Manage subscription" stays
-  (`billing-jobs/handler_test.ts:153`, `app/tests/ui_settings.rs:132`).
+*Removed in r4:* the price lines built into the app from the cents map, and the test that tied the two.
+
+**D10. The billing emails, and the summer pause removed** (revised r4).
+- **The pause and its resume notice are removed** from `billing-jobs`: `shouldBePaused`, `pauseDecision`,
+  `resumeNotice` and the `monthly` branch (`billing-jobs/handler.ts:46-58, 92-105, 126-166`).
+  - *Reasons:* ruling (1) of 11-10 says no summer pause; under ruling (6) no subscription carries the one
+    key it ran on (`:130`); and it moves money (`pause_collection`, `:141-143`) with nothing left to act on.
+    The amendment leaves the removal to this lane (draft `:1439-1441`).
+  - The `paused` column and the webhook's `paused` field stay: dropping them needs a migration and buys
+    nothing.
+- **The annual reminder states the subscriber's own price.** It still goes a year after the last one
+  (`reminderDue`, `:63-67`, unchanged). For each subscriber it is due to, `billing-jobs` reads the
+  subscription from Stripe (`stripeGetFrom`, `_shared/stripe.ts:105-117`), looks its price id up in the
+  catalog, and writes the catalog's words: "Knowlu, $12.99 every 4 weeks, plus tax where it applies,
+  renewing automatically until you cancel."
+  - An id the catalog lacks is not mailed, is logged with the account id only, and is counted in `failed`,
+    as an unknown plan is today (`:119-123`).
+  - *Why the subscription, not the plan column:* after a `stay` change two amounts share one key (D14). The
+    cost is one Stripe GET per subscriber a year.
+- **D14's move step** runs in the same loop, under the same one-failure-never-stops rule (`:117-178`).
+- `priceOf` (`:69-75`) is gone; the catalog replaces it.
+- "click the gear" (`:86`) becomes "go to Settings, then Membership". "Manage subscription" stays
+  (`billing-jobs/handler_test.ts:328`, `app/tests/ui_settings.rs:132`). The second "gear" line (`:101-102`)
+  goes with the resume notice.
+
+*Removed in r4:* the old plans' texts (P10), and the pause kept for them.
 
 **D11. The terms publish with this lane, as one new version.**
 
@@ -320,7 +395,7 @@ function of the plan and of whether a trial applies:
 U10). Their *The subscription*, *How to cancel* and *Refunds* sections are replaced by §4's full text. These
 paragraphs are left out, because this release builds none of their code:
 - the confirmation email (C8);
-- the yearly renewal notice (C10);
+- the yearly renewal notice (C10's yearly half; D14 builds its price-change half);
 - "a disputed charge is not a paid period" (C12);
 - the "We" and shutdown paragraphs (C13);
 - *A year for someone else*. The amendment has the gift year (ruling 9), and R3 says to keep it if the
@@ -331,24 +406,34 @@ paragraphs are left out, because this release builds none of their code:
 - A new section, *Emails about your subscription*, naming the trial reminder (D6) and the annual reminder
   (D10).
 - "Sold through Link", only if Managed Payments is in effect (D7).
-- The old-subscriber paragraph, only if production still holds an old-price subscription at step 7.
+- **The price-change paragraph** (r4), as the legal spec words it (`:625`): "If we ever change a price, we
+  email you before the change takes effect, between 7 and 30 days ahead, with the new price, the date and
+  how to cancel. A price change never applies to a period you have already paid for." D14's notice now
+  backs it, and the catalog's test holds D14's window inside it.
+- *Removed in r4:* the old-subscriber paragraph (legal spec `:627`). Ruling (6) keeps no old subscription.
 
 *The terms date* is the commit's own date (UTC). It must be no later than the day after the staging proof,
-because checkout (D3) and the production account function both refuse a version later than tomorrow.
+because the production account function refuses a sign-up version later than tomorrow
+(`account/handler.ts:199-201`) and the proof's sign-ins send `TOS_VERSION`. Checkout no longer has a date
+rule (D3).
 
 **These terms replace bump A's interim terms**, so bump A carries privacy only. `TOS_VERSION`
-(`account.rs:21-24`), checkout's `CHECKOUT_TERMS_VERSION` and the page move in one commit. A new test ties
-the three, beside the privacy tie (`app/tests/bundle_config.rs:134-157`). Until that commit, the floor
-equals today's 2026-09-10. `site/subscribed.html:13` changes to say 14 days, a first subscription, and
-Settings → Membership.
+(`account.rs:21-24`), the catalog's `TERMS_VERSION` (D13) and the page move in one commit. A new test ties
+the three, beside the privacy tie (`app/tests/bundle_config.rs:134-157`). Until that commit the catalog's
+`TERMS_VERSION` is today's 2026-09-10, which the staging proof's checkouts record. `site/subscribed.html:13`
+changes to say 14 days, a first subscription, and Settings → Membership.
 
 *Existing accounts.* This holds whatever `account` function production runs:
-- **A paying student** accepts the new version at checkout, because the auto-renew row carries it (D3).
+- **Anyone who subscribes** accepts the new version at checkout, because the auto-renew row carries the
+  catalog's version (D3).
 - **For everyone else**, T0's read-only count decides, counting only **accounts that are not Quinn's**.
   Quinn has two production accounts (`HANDOFF.md:58`), and names them; the ledger records counts.
   - If every account is Quinn's, Quinn's acceptance is recorded by hand on each of them (legal spec §4).
   - If any account is not Quinn's, C1 (T5b) joins the lane and redeploys `account` before the terms
     publish.
+  - *Kept in r4, with zero customers.* This is about accounts accepting terms, not about paying: a tester
+    on a comp grant holds an account and accepted the old terms at sign-up ("these terms apply to you
+    except the parts about payment", legal spec `:599`). So a tester account counts as not Quinn's.
 
 **D12. The privacy page names Link (only if Managed Payments is in effect, D7).** Link receives the card, the billing
 address and the email address. The page's list of companies is closed ("Nobody else gets anything",
@@ -358,6 +443,147 @@ address and the email address. The page's list of companies is closed ("Nobody e
 - A build carries one privacy key (`app/tests/ui_account_privacy.rs:226-233, 257-258`). If bump A rides
   v0.4.1, these paragraphs join it. If not, this lane makes a Link-only bump.
 - Quinn reads the page.
+
+**D13. One price catalog on the server** (new in r4). `cloud/supabase/functions/_shared/price_catalog.ts`
+(new) is the only place under `cloud/supabase/functions/` where an amount, a price's cadence, the name of a
+price variable, or the terms version that states the prices is written. It holds:
+- **`TERMS_VERSION`**: the version of the terms page that states the selling prices.
+- **The cadence of each key**, fixed: `four_weekly` is week × 4, `yearly` is year × 1.
+- **`SELLING`**: one entry per key, a key and its cents, in display order, Yearly first (ruling 2).
+- **`KEPT`**: entries no longer sold that a subscriber may still pay, each a key, its cents and its rule
+  (`stay`, or `move` with its notice days; D14). Empty at v0.4.1: no subscriber pays anything else (ruling 6).
+- **The words**: one formatter that turns an entry into "$12.99 every 4 weeks" or "$84.37 once a year"; the
+  P9 lines the app shows (D9); "plus tax where it applies"; the money-back line. Every email, the offer and
+  the terms tie use it.
+- **The price variables.** Each entry's Stripe price id is read from an environment variable whose name the
+  catalog derives from the entry: `STRIPE_PRICE_` + the key in capitals + `_` + the cents. So v0.4.1's are
+  `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437`. The names are computed, never written.
+
+Every billing function reads it, through its `Deps` as a resolved catalog, so a test can hand it an
+invented one:
+- checkout: the offer (D9), the offer match (D3), the price check and the id it sells (D4);
+- the webhook: the plan lookup (D2) and the trial reminder (D6);
+- `billing-jobs`: the annual reminder (D10) and the move (D14).
+
+The catalog's own test holds these rules:
+- exactly the two selling keys; every entry's cadence is its key's; no key and amount twice;
+- the yearly amount is 13 times a whole-cent amount, so "$6.49 every 4 weeks" is exact (P11's
+  construction). A future yearly price keeps this, or its amendment changes the wording;
+- a `move` entry's notice window lies inside the terms' 7 to 30 days (D14);
+- every dollar figure in `site/terms.html` is an entry's, every selling figure is there, and the page's
+  version is `TERMS_VERSION` (`bundle_config` ties that to `TOS_VERSION`, D11).
+
+*Reasons:*
+- **Ruling (7): one place.** Today the amount is written three times: in Stripe, in the cents map
+  (`billing-checkout/index.ts:20`) and in `priceOf` (`billing-jobs/handler.ts:71-73`). r3 added two more,
+  the app's lines (D9) and a terms floor (D3).
+- **A derived variable name.** A variable then names one Stripe price forever. A price change adds a
+  variable and never re-points one, so a kept price's id cannot be overwritten. A catalog amount changed
+  without a new Stripe price leaves its variable unset, which checkout answers with 500 before anything
+  sells (D4).
+- **Code, not a table.** The amounts sit in the same reviewed commit as the terms page that states them,
+  and CI ties the two. A table could change without review and could not be tied to the page. The price ids
+  stay in each project's environment (rule 1; test and live mode differ).
+- **A fixed cadence** keeps plan words and Settings right across changes, and lets D14 change a
+  subscription's price without moving its billing date.
+
+**D14. Students already subscribed when a price changes: two rules, chosen per change** (new in r4). Each
+later change is its own amendment (ruling 7), which picks one rule for each old price. The catalog records
+it on that price's `KEPT` entry. v0.4.1 builds both rules and uses neither.
+- **`stay`.** The subscriber keeps the old price until they cancel, and nothing is sent. The webhook still
+  maps the old id to the key (D2), and every email that states their amount states the old one (D6, D10).
+  Quinn archives the old Stripe price so nothing sells it again; a subscription on an archived price keeps
+  renewing (`unverified (Stripe)`, T0r).
+- **`move`, with N notice days.** Once a day, `billing-jobs` takes each subscriber on that old price whose
+  renewal (`billing_subscribers.current_period_end`, `20260910000200_billing_jobs.sql:28-30`) is between N
+  and N + 6 days away, and is not set to cancel at period end. For each one, in this order:
+  1. it emails the notice: the plan, the old and the new amount from the catalog, the renewal date (written
+     in UTC−10, as D6), "plus tax where it applies", and how to cancel;
+  2. then it marks the subscription as noticed for that renewal, in the subscription's Stripe metadata;
+  3. then it changes the subscription to the key's selling price with no proration, so the period already
+     paid stays at the old price and the renewal bills the new one (`unverified (Stripe)`, T0r).
+
+  A failed notice changes nothing and is tried again the next day. A noticed subscription whose change
+  failed is tried again without a second notice. A subscriber the job has not finished by the renewal keeps
+  the old price for that renewal, and is noticed again for the next one. One subscriber's failure never
+  stops the run and is counted in `failed`. N is 7 to 24, so N to N + 6 lies inside the terms' 7 to 30 days.
+
+*Reasons:*
+- **Ruling (7) sets no policy** for existing subscribers (the amendment's *Open for Quinn, at the time of a
+  change*, `:1505-1511` there). The code allows either rule without a lane; the amendment chooses.
+- **Tell before acting**, as the resume notice did (`billing-jobs/handler.ts:147-160`). The change happens
+  only after a notice was sent, and never touches a period already paid.
+- **A week-wide window** absorbs a missed daily run.
+- **The mark lives on the subscription**, not in `billing_reminders` (`20260910000200_billing_jobs.sql:2-5`):
+  that row is shared with the annual reminder, which could then suppress a price notice. No migration.
+- **The renewal date is already in the view**, so only subscribers inside the window cost a Stripe call.
+
+**D15. A new terms version reaches students without an app release** (new in r4; the amendment's open
+item 2). It has three parts.
+- **What checkout records.** The version the server names: the offer carries `TERMS_VERSION`, the app sends
+  it back unchanged, and checkout requires it to equal the catalog's (D3). A terms bump on the server is
+  what every build from v0.4.1 on records at checkout, and no build is refused for its age.
+- **What sign-up records.** Unchanged: `TOS_VERSION`, compiled into the app (`account.rs:24`) and sent at
+  sign-in (`account.rs:623, 1264-1267, 1297, 1599`). It still moves with the page in the same commit
+  (`bundle_config`, D11), and reaches installed apps with the next ordinary release. Until then a sign-up on
+  an older build records the older version; that account records the current one at checkout, before any
+  charge. A server-named sign-up version belongs to the legal spec's C1 (re-acceptance), not this lane.
+  Quinn confirms (§8 item 14).
+- **Publishing the page.** `site/` reaches knowlu.com only through `release.yml`'s Pages step, which
+  replaces the whole site (`release.yml:294-298`). That step first restores `site/releases/` (the versioned
+  installer, `Knowlu-setup.exe` and `latest.json`) from the build's artifact (`:249-262, 288-293`;
+  `scripts/release.ps1:293-297, 326`). In git, `site/releases/` holds only `.gitkeep`. **So a hand
+  `wrangler pages deploy site` from a checkout takes the installer and the updater's manifest off
+  knowlu.com.** T10 adds `.github/workflows/site.yml`:
+  - started by hand (`workflow_dispatch`) and only from `main`;
+  - before deploying, it puts the latest GitHub Release's installer, and its `latest.json` when that release
+    carries one (`release.yml:310`), into `site/releases/`, and copies the installer to `Knowlu-setup.exe`
+    as `release.ps1:297` does; a missing installer stops it;
+  - it refuses when `site/privacy.html` differs from the latest `v*` tag's, because the privacy version and
+    its panel key are compiled into the app (the legal spec's C25 reason, `:850`);
+  - then it runs the same `pages deploy site` command (`release.yml:298`).
+
+  This narrows the legal spec's C25 ("legal pages deploy only on a release tag") to the privacy page: a
+  payer's terms version no longer comes from the build. If the waitlist lane's site-only deploy (W-D3) has
+  merged first, T10 instead narrows its guard and adds the restore if it lacks one. T10 does not gate the
+  v0.4.1 tag, which publishes v0.4.1's own pages. It must merge before the first price change, and the
+  runbook's first step checks that it has.
+
+*Reasons:* ruling (7) asks for no app release; the terms state the prices (amendment open item 2), so the
+terms must reach students the same way the prices do. The restore step is there because the release
+artifact, not git, is the only copy of the installer the site serves.
+
+**D16. The price-change runbook** (new in r4). T11 writes `docs/reference/price-change.md`. It is the step
+list for raising or lowering a price, in test mode on staging first, then live, every live step on Quinn's
+word. A raise and a cut follow the same steps; only the amendment's rule differs.
+0. **Before anything:** `site.yml` exists (T10). The amendment states the new amount and, for the old price,
+   `stay` or `move` with N (D14). Quinn signs it. A new yearly amount is 13 times a whole-cent amount (D13).
+1. **Stripe, test mode:** Quinn creates a new Price on the product: the new amount, the key's cadence, tax
+   behaviour exclusive. The main session sets `STRIPE_PRICE_<KEY>_<CENTS>` on staging.
+2. **One Contract PR:**
+   - the catalog: the new `SELLING` entry; the old one moved to `KEPT` with its rule; `TERMS_VERSION`;
+   - `site/terms.html`: the figures and the version, and anything the amendment adds for kept subscribers;
+   - `TOS_VERSION` in `account.rs`, by `contract-engineer`;
+   - the one test that names the selling amounts (the catalog's first pin), so the change is seen in a test
+     diff too. Handler tests build their own catalogs and do not change.
+
+   CI ties the catalog, the page and `TOS_VERSION`, and finds any amount left outside the catalog.
+3. **Staging:** deploy the three billing functions from the PR head. With an unchanged installed build,
+   the offer, both buttons and Stripe's test page show the new figure, and an offer from before the change
+   is refused with D3's sentence. For `move`, rehearse one notice and one change on a test subscription
+   (as S2 did).
+4. **Live mode:** Quinn creates the live Price; the main session sets the production variable.
+5. **Merge, then go live back to back:** publish the page with `site.yml`, then deploy the three billing
+   functions from the merge SHA. Page first: in the minutes between, a checkout records the old version with
+   the old price, a matched pair, and never a version that is not yet published.
+6. **Check:** knowlu.com/terms.html's version equals the catalog's; the live offer shows the new figures;
+   the live endpoint's deliveries since the deploy are all 2xx; one live checkout page opens (nothing paid).
+7. **Afterwards:** Quinn archives the old live Price. Under `move`, once no subscription uses the old price,
+   a later PR removes its `KEPT` entry and the old variable is unset.
+8. **No app release.** `TOS_VERSION` reaches installed apps with the next ordinary release (D15).
+
+*Reason:* ruling (7)'s "no hunt through the code": every place a change touches is named here, and CI fails
+if one is missed.
 
 ## 3. What Managed Payments changes (each row confirmed by T0r, and in test mode by S1)
 
@@ -390,9 +616,12 @@ address and the email address. The page's list of companies is closed ("Nobody e
   - `entitlements` by plan and status;
   - open comp grants, if `public.comp_grants` exists;
   - Quinn reads any old-price subscription in the live Dashboard.
+- **The ruling's premise** (r4). Ruling (6) rests on "zero customers". Kept in r4 as the check that the
+  premise holds, at the cost of reading counts already taken: if any `active`, `trialing`, `past_due` or
+  `unpaid` subscription belongs to an account that is not Quinn's, the lane stops and goes to Quinn.
 - **The parity gate.** If production lacks `20261020000500_testers.sql` or `20261020000600_comp_guards.sql`,
   a named precondition is set: **"production parity for v0.4.1"**, on Quinn's go (§8 item 2). It is needed
-  before item 9's grant and before step 10.
+  before the comp grants for Quinn's own accounts (below) and before step 10.
   - **Its scope.** `db push --include-all` pushes every pending local migration and has no "through"
     option. So the push runs from a **scratch copy of `cloud/supabase` whose `migrations/` ends at
     `20261020000600_comp_guards.sql`**, as L9 does (`HANDOFF.md:598`). L8's `entitlement` redeploy
@@ -402,42 +631,58 @@ address and the email address. The page's list of companies is closed ("Nobody e
     function redeploy beyond `entitlement` and `billing-checkout` (for example email's migrations, whose
     cron needs Vault entries first), the precondition is L9 proper, and v0.4.1 waits for it.
 - *Why it gates step 10.* Today's checkout reads `effective_entitlements` (`billing-checkout/index.ts:35-42`),
-  which the testers migration defines (`:76`). Without it every production checkout answers 5xx, and item
-  9's comp grant has no table to go in.
+  which the testers migration defines (`:76`). Without it every production checkout answers 5xx, and the
+  comp grants below have no table to go in.
 
 **Staging, in test mode.**
 1. Item 4 is settled, then Quinn takes the test-mode steps of the checklist.
-2. The main session sets the two price ids on staging.
-3. After T1-T4, the main session deploys `billing-checkout`, `stripe-webhook` and `billing-jobs` from the
+2. The main session sets `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437` on staging.
+3. After T1a-T4a, the main session deploys `billing-checkout`, `stripe-webhook` and `billing-jobs` from the
    lane branch, and builds a T4 dev app.
 4. **S1**, on that build. Quinn is at the test-mode Dashboard. Test cards only; no money moves.
+4b. **S2, the price-change rehearsal** (r4), on the same build, unchanged. The main session deploys the three
+   functions from a scratch branch whose only change is the catalog: a test-mode price at another amount
+   becomes the 4-week selling price, and 1299 moves to `KEPT`, first with `stay`, then with `move`. It
+   shows, with no app rebuild: the new figure in the offer, the wizard and Stripe's page; an old offer
+   refused (D3); under `stay`, a test subscription at 1299 still mapped and left alone; then under `move`,
+   one notice and one price change with no proration on that subscription (D14). Then the functions go back
+   to the lane branch. The scratch branch is never merged.
 5. **Checkpoint B.** Quinn rules on D7 if a gate failed.
 6. After T5, the final staging proof on the PR head (plan §8 B, part 2).
 
 **Production, in live mode, each step on Quinn's word.**
 
 - **P-parity.** Done, if step 0 set it.
-- **Item 9, if Quinn agrees**, for each of Quinn's accounts that holds a subscription:
+- **Quinn's own subscriptions** (ruling 6; this was §8 item 9, now ruled). Quinn's accounts and testers on
+  comp grants are not customers. A tester holds no Stripe subscription, so nothing changes for one. For
+  each of Quinn's accounts that holds an old-price subscription:
   1. A comp grant through `admin.comp_grant`. It lasts at most a year
      (`20261020000600_comp_guards.sql:8-12`) and is extended with `admin.comp_extend`.
   2. Then Quinn cancels its old-price subscription **immediately**, not at period end, in both modes.
 
   The grant comes first, so the account is never without access. The view matches a grant only when the
-  Stripe status is not `active` or `trialing` (`20261020000500_testers.sql:76-87`).
+  Stripe status is not `active` or `trialing` (`20261020000500_testers.sql:76-87`). *Why it still has to
+  end, with zero customers:* after step 10 its events map to no plan (D2), `billing-jobs` would count it as
+  failed every day, and its renewal would charge an old price that no published terms state. It moves money
+  in production, so it waits for Quinn's word, account by account.
 7. **Read-only checks again.** Each must equal step 0's, except:
    - no `active` or `trialing` row on `monthly` or `academic_year`;
-   - item 9's comp grants.
+   - the comp grants above.
 
    A new account that is not Quinn's stops the rollout and makes T5b required.
 8. **The PR merges**, with CI green and every review passed.
 9. Quinn takes the live-mode steps of the checklist, and reads back the live endpoint's enabled events.
-10. The main session sets production's two price ids and deploys the three functions from the merge SHA.
-    Then Quinn reads the live endpoint's recent deliveries: every one answered 2xx since the deploy.
+10. The main session sets `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437` on production and
+    deploys the three functions from the merge SHA. Then Quinn reads the live endpoint's recent deliveries:
+    every one answered 2xx since the deploy.
 10b. **The pre-tag live proof**, on a fresh production scratch account. It is created by emailed code at an
     address Quinn supplies, never written in the repository, and it counts as a founder test account.
     - **The old-build refusal.** `POST /billing-checkout` with `{"plan":"monthly","terms_version":"2026-09-10"}`
       answers 409 with D3's exact sentence in `error`. That body proves the new function is live, apart
       from the tester refusal.
+    - **The offer** (r4). `GET /billing-checkout` answers the two plans, Yearly first, with the catalog's
+      lines and the new terms version. A `four_weekly` POST whose `amount_cents` is one cent off answers 409
+      with D3's "changed" sentence.
     - **The live pages.** `yearly` and `four_weekly` checkouts each open a live page. A headless read shows:
       - $84.37, then $12.99 every 4 weeks;
       - 14 days free, the tax line and D8's sentence;
@@ -470,10 +715,15 @@ address and the email address. The page's list of companies is closed ("Nobody e
 12. If every account is Quinn's, Quinn's acceptance of the new terms is recorded by hand on each of Quinn's
     accounts.
 13. **After the tag.** The main session confirms that knowlu.com/terms.html carries the new version and
-    `subscribed.html` says 14 days. The updater offers 0.4.1.
+    `subscribed.html` says 14 days. The updater offers 0.4.1. Then it unsets `STRIPE_PRICE_MONTHLY` and
+    `STRIPE_PRICE_YEAR` on both projects (r4): nothing reads them.
+14. **T10's first run** (r4; not before the tag, and on Quinn's word, because it replaces the live site):
+    `site.yml` deploys `site/` unchanged. Then knowlu.com serves the same pages, the installer, and
+    `latest.json`, and the updater still offers 0.4.1. It must pass before any price change.
 
 *Why the functions go before the tag.* The other order lets old builds buy at $9.99 while the published
-terms say $12.99, and v0.4.1 builds would get 400s. Between steps 10 and 11 no build can subscribe at all.
+terms say $12.99, and v0.4.1 builds would get no offer (today's function answers only POST,
+`billing-checkout/handler.ts:91`). Between steps 10 and 11 no build can subscribe at all.
 That is acceptable, because outside sales are closed (Amendment 2026-10-16b) and the only install is
 Quinn's. Step 11 follows on the same day.
 
@@ -484,10 +734,11 @@ path is then proven on staging only. Quinn accepts that gap at checkpoint D.
 
 **Quinn's checklist.** Do each step in test mode, then in live mode at step 9.
 - [ ] On the existing product, create a price of **USD 12.99, recurring every 4 weeks** (week × 4), **tax
-      behaviour exclusive**. Send the id; it is public.
+      behaviour exclusive**. Send the id; it is public. It is set as `STRIPE_PRICE_FOUR_WEEKLY_1299`.
 - [ ] On the same product, create a price of **USD 84.37, recurring yearly**, tax behaviour exclusive. Send
-      the id.
-- [ ] Keep the old prices while any subscription uses them (P10).
+      the id. It is set as `STRIPE_PRICE_YEARLY_8437`.
+- [ ] **Archive the old prices** ($9.99 monthly, $69.99 yearly) once your own subscriptions on them have
+      ended (r4, ruling 6). Nothing sells or renews on them after that. (r3 kept them for P10.)
 - [ ] **Confirm that Managed Payments is on** in live mode (recorded 2026-09-14). Turn it on in test mode if
       it is off. Check the product's tax code. Read the 2026-09-24 payment's seller, which settles D7's
       reading.
@@ -496,8 +747,9 @@ path is then proven on staging only. Quinn accepts that gap at checkpoint D.
       200 "ignored" (`stripe-webhook/handler.ts:118-125`). In live mode, read back the enabled events.
 - [ ] **Customer Portal:** cancellation on, no survey, **plan switching off**.
 - [ ] Note whether Stripe's own trial-reminder email is on. Turn it off if Link sends one.
-- [ ] **Deactivate the live 100% promotion code** once item 9's comp grants exist (P10: comp grants are the
-      comp mechanism). Otherwise it works on the new prices too.
+- [ ] **Deactivate the live 100% promotion code** once the comp grants on your accounts exist (P10's first
+      sentence, which stands: comp grants are the comp mechanism). Kept in r4: with zero customers the code
+      is still a live way to take the new prices for nothing.
 - [ ] Check that the **terms URL** in the public business details is knowlu.com/terms.html.
 - [ ] No new secrets on the same Stripe account. The new-account case is §8 item 4.
 
@@ -521,61 +773,91 @@ path is then proven on staging only. Quinn accepts that gap at checkpoint D.
   - It stays the only writer of `entitlements`.
   - No unset price value can make it answer 500.
   - The API pin stays (`_shared/stripe.ts:82`).
-- **P10.** Old subscriptions keep their price, name and pause. The pause runs for them alone.
+- **One source for every price** (r4, D13).
+  - No amount, cadence or price-variable name is written under `cloud/supabase/functions/` outside the
+    catalog.
+  - The app holds no price and caches none. It shows only the offer the server sent for this step, and
+    sends that offer's amount and terms version back (D3, D9).
+- **Prices that change** (r4, D14). A key never changes with its price, and no price variable is ever
+  re-pointed. A `move` notices first, 7 to 30 days ahead, and never touches a period already paid.
 - **`billing-jobs`.** One failure never stops the run, and no guessed price is mailed
-  (`billing-jobs/handler.ts:14-16, 69-75`). Logs name the account id only.
+  (`billing-jobs/handler.ts:14-16, 69-75`): an email states only the catalog's amount for the subscriber's
+  own price. Logs name the account id only.
 - **The app.**
-  - The subscribe step's figures equal the cents checkout charges.
   - Settings shows no price.
   - No trial word or trial length appears anywhere in the app.
   - "Manage subscription" keeps its exact words.
 - **The wording rule.** Every price Knowlu writes says "every 4 weeks" or "once a year". None says "a month",
   "/mo" or "monthly" beside a price.
 - **The legal pages.**
-  - The version ties hold: privacy, and the new terms-floor tie.
-  - A build carries one privacy key.
+  - The version ties hold: privacy, and the new terms tie (`TOS_VERSION`, the catalog's `TERMS_VERSION` and
+    the page are one date).
+  - A build carries one privacy key, and the privacy page publishes only with a release tag (C25, narrowed
+    to it, D15).
   - The existing `engine/tests/site.rs` pins pass.
-- **Releases.** Releases are CI-only. Production steps and the tag wait for Quinn's word.
+- **Releases.** Releases are CI-only. Production steps and the tag wait for Quinn's word. No deploy of
+  `site/` ever takes the installer or `latest.json` off knowlu.com (D15).
 
 ## 6. Tests that prove it (each written first, and failing)
 
 **Cloud, `deno test`** (run as `ci.yml:153-172` runs it; no test reads a `STRIPE_*` or `EMAIL_*` value from
 the environment).
 
+**`_shared/price_catalog_test.ts` (new, r4):**
+- The rules of D13: the two selling keys in order, Yearly first; every entry's cadence is its key's; no key
+  and amount twice; the yearly amount is 13 times a whole-cent amount; a `move` entry's N is 7 to 24.
+- The derived variable names: `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437`; a resolved
+  catalog with one variable unset still resolves the others, and that entry matches no id.
+- The formatter: "$12.99 every 4 weeks", "$84.37 once a year", the P9 lines, and, for an invented entry at
+  1399, "$13.99 every 4 weeks". Generic cadences ("every 2 months", "every year") for D6's unknown ids.
+- **`the_terms_state_the_catalogs_prices`**: every dollar figure in `site/terms.html` is an entry's, every
+  selling figure is there, the page's version is `TERMS_VERSION`, and its price-change paragraph says
+  "between 7 and 30 days ahead". Written with the terms (plan T5), because it is red until they change.
+- Only the first rule names the selling amounts. Handler tests build their own catalogs, so a price change
+  edits one test (D16 step 2).
+
+**`_shared/price_single_source_test.ts` (new, r4; its own file so its task's files stay disjoint):**
+- **`no_amount_is_written_outside_the_catalog`**: reads every non-test `.ts` file under `billing-checkout/`,
+  `stripe-webhook/`, `billing-jobs/` and `billing-portal/`, and fails on a dollar figure, a decimal money
+  figure, any catalog entry's cents as a number, a `STRIPE_PRICE_` name, "per month" or "a month".
+
 **`billing-checkout/handler_test.ts`:**
-- The two plans reach Stripe with their price id and cents.
+- The two plans reach Stripe with their price id and the catalog's cents.
+- **The offer** (r4): `GET` with a session answers the selling plans in the catalog's order, each with its
+  key, cents and lines, plus `terms_version` and the tax line, and reads no account; without a session it
+  is 401; a method other than GET or POST is 405. With an invented catalog at 1399, the offer says
+  "$13.99", which proves the answer is the catalog's.
 - D3:
   - the old names answer 409 with the exact sentence, with only the session check before it (no account,
     tester or Stripe call);
-  - a version below the floor answers 409;
-  - a malformed version or one later than tomorrow answers 400, including **"2026-11-19x"**, which sorts in
-    range and is caught only by the pattern;
-  - an unknown plan answers 400.
+  - an unknown plan answers 400;
+  - a missing `amount_cents` or `terms_version` answers 400;
+  - an `amount_cents` one cent off, or a `terms_version` other than the catalog's, answers 409 with the
+    "changed" sentence, before any account read;
+  - the consent row records the catalog's cents and `TERMS_VERSION`.
 - D5:
   - "14" on a first subscription;
   - absent after a canceled one;
   - 409 when the row is `active`, `trialing`, `past_due` or `unpaid`.
 - D4: one case per check: amount, currency, `active`, `tax_behavior`, interval and count. That includes
-  **`four_weekly` pointing at a `year` × 1 price at 1299**, and the reverse for `yearly`. Each answers 500
-  before the consent row.
+  **`four_weekly` pointing at a `year` × 1 price at 1299**, and the reverse for `yearly`. An unset selling
+  variable is the seventh case. Each answers 500 before the consent row.
 - D7: every load-bearing key is present (the trial key on a first subscription only, D5), and the dropped
   keys are exactly those checkpoint A allowed.
 - D8: `custom_text` for each plan and trial combination.
-- The 18+ and tester tests are unchanged.
-- A text-read of `index.ts` (`handler_test.ts:331-343`) checks:
-  - the environment names;
-  - the cents;
-  - that `CHECKOUT_TERMS_VERSION` is declared once, as a quoted `YYYY-MM-DD` literal.
-
-  Its value is `bundle_config`'s to tie, so T5's commit changes no checkout test.
+- The 18+ and tester tests are unchanged (their request bodies gain the offer's two fields).
+- A text-read of `index.ts` (`handler_test.ts:331-343`) checks that it hands the handler the catalog
+  resolved from the environment, and that `isTester` is unchanged.
 
 **`stripe-webhook/handler_test.ts`:**
-- The plan comes from the price id for all four ids; an unknown id gives `null`; a missing environment value
-  matches nothing and does not answer 500.
+- The plan comes from the price id, through an injected catalog: both selling ids, a `KEPT` id (the
+  `stay` case: same key, other cents), an unknown id gives `null`, and a missing variable matches nothing
+  and does not answer 500.
 - `trial_will_end`:
-  - one email, naming the plan words, the amount taken from the event's price, "plus tax where it
-    applies", the UTC−10 date and "Manage subscription", and never "in 3 days";
-  - an unknown price id still gets the email, without plan words;
+  - one email, naming the plan words and the amount from the catalog entry the id matches, "plus tax where
+    it applies", the UTC−10 date and "Manage subscription", and never "in 3 days"; with an invented entry at
+    1399 the email says "$13.99";
+  - an unknown price id still gets the email, without plan words, its amount from the event's price;
   - nothing is sent if the subscription will cancel at period end, is not `trialing`, or has a `trial_end`
     already past;
   - a failed email gives 502, nothing is recorded, and the log names the account id only;
@@ -583,32 +865,58 @@ the environment).
   - no entitlement is written.
 
 **`billing-jobs/handler_test.ts`:**
-- The new plans are never paused, get the annual reminder in the new wording, and never say "per month".
-- The old plans' mails are unchanged (the "$9.99" pin at `:149`).
-- "Manage subscription" stays, and "gear" is gone.
+- The pause and resume tests go with the code (D10). No subscriber is ever sent a `pause_collection` call.
+- **The annual reminder comes from the catalog** (r4): the subscription is read, its price id is looked up,
+  and with an invented catalog at 1399 the mail says "$13.99 every 4 weeks, plus tax where it applies" and
+  never "per month". A `KEPT` `stay` id gets its own (old) amount. An id the catalog lacks is not mailed and
+  counts in `failed`. A failed subscription read counts in `failed`, and the run goes on.
+- "Manage subscription" stays (`:328`), and "gear" is gone.
+- **The move (D14)**, with an injected catalog whose `KEPT` entry is `move` with N:
+  - a subscriber on that price renewing in N to N + 6 days gets one notice naming the old and the new
+    amount and the date, then one metadata write, then one price change to the selling price with no
+    proration, in that order;
+  - outside the window, on another price, or set to cancel at period end: nothing;
+  - a failed notice: no metadata write and no price change; the next run tries again;
+  - noticed but not changed: the next run changes it and sends no second notice;
+  - a `stay` entry: never noticed, never changed;
+  - one subscriber's failure does not stop the next.
 
 **App, `cargo test`.**
 - **`ui_wizard`**
-  - `the_subscribe_buttons_send_the_signed_plans`: order, classes and values, and billing's list of plans.
-  - `the_wizard_states_the_signed_prices_and_no_trial` (replacing `the_wizard_states_no_price_or_trial`):
-    - the subscribe panel carries ruling (2)'s exact line, "$12.99 every 4 weeks.", the money-back line and
-      "Plus tax where it applies.";
+  - `the_subscribe_buttons_send_the_signed_plans`: order, classes and values; `open_checkout` gets the
+    plan, the offer's `amount_cents` and its `terms_version`; billing's list of plans.
+  - `the_wizard_holds_no_price_and_renders_the_offer` (r4; replacing `the_wizard_states_no_price_or_trial`):
     - it reads every string literal in `wizard.js` **and `picker.js`**, as today's test does, with the
       status word `"trialing"` as the one exception;
-    - "$" and "a year" appear only inside those four lines;
-    - no literal contains "9.99", "69.99", "a month", "per month", "/mo", "trial", "14 days", "14-day",
-      "free first" or "Pell".
+    - no literal contains "$", a decimal money figure, "a year", "every 4 weeks" beside a figure, "9.99",
+      "12.99", "84.37", "6.49", "a month", "per month", "/mo", "trial", "14 days", "14-day", "free first" or
+      "Pell";
+    - the step asks `checkout_offer` and writes its lines with `textContent`, never `innerHTML`;
+    - the panel's markup carries no price line.
+  - `without_an_offer_the_plan_buttons_wait`: until an offer arrives the buttons are disabled; on a
+    failure the step shows the retry sentence and a Try again button.
 - **`ui_settings`**
-  - The table carries the four plan words.
+  - The table carries the two plan words, and no `monthly` or `academic_year`.
   - `membership_shows_no_price` gains "84.37", "6.49" and "14 days".
 - **`ui_plans` (new)**
-  - The sheet sends both plans, Yearly first, and only its two buttons start a checkout.
-  - Every plan the app sends is one billing sells.
-  - Every name the webhook can write has a word in Settings.
-  - **The figures in `wizard.js` and `carried/account.js` equal `index.ts`'s cents**: "$12.99" for 1299,
-    "$84.37" for 8437, and "$6.49" for 8437 / 13.
-- **`bundle_config`:** `the_terms_version_constant_is_the_published_terms_date`, which also requires
-  `CHECKOUT_TERMS_VERSION` to equal `TOS_VERSION`.
+  - The sheet sends both plans, Yearly first, with the offer's two fields, and only its two buttons start a
+    checkout.
+  - `carried/account.js` holds no price literal, by the wizard test's rule.
+  - Every plan the app sends is one the catalog sells; every key the catalog can name has a word in
+    Settings.
+- **`account` (`app/tests/account.rs`, loopback, r4)**
+  - `checkout_offer_at` sends `GET /billing-checkout` with the bearer and returns the body unchanged; a
+    non-2xx gives the server's sentence.
+  - `checkout_url_at` posts `plan`, `amount_cents` and `terms_version` as given, and not `TOS_VERSION`.
+- **`bundle_config`:** `the_terms_version_constant_is_the_published_terms_date`, which also requires the
+  catalog's `TERMS_VERSION` to equal `TOS_VERSION`.
+- **`engine/tests/workflows.rs`** (r4, T10): `site.yml` is dispatch-only, runs only on `main`, pins every
+  action by SHA, restores the installer (and `latest.json` when present) before deploying, refuses a
+  changed `site/privacy.html`, and never runs self-hosted (today's self-hosted pin names only `release.yml`,
+  `workflows.rs:216-217`).
+- **DOM checks** (`scripts/ui-fixture`): with a `checkout_offer` envelope carrying an invented price
+  ("$1.23 every 4 weeks."), the wizard and the sheet show exactly that line, which proves the app draws
+  what it is sent; with a failing envelope, the buttons are disabled and the retry sentence shows.
 - **`engine/tests/site.rs`**
   - The terms contain the signed figures and clauses.
   - The terms contain no "a month", "per month", "/mo", "$9.99", "$69.99", "Pell", "Alabama" or gift
@@ -617,30 +925,30 @@ the environment).
   - If Managed Payments is in effect, the terms say "Sold through Link" and the privacy page names Link.
     Otherwise neither names Link.
 
-*If Quinn keeps the app price-free (§8 item 5):* the wizard test keeps r1's shape, banning the new figures,
-and `ui_plans` drops the figure check.
+*If Quinn keeps the app price-free (§8 item 5):* the DOM checks expect no lines, and the rest stands.
 
-**S1, the staging proof and the pre-tag live proof** (the main session; plan §8). These show what no unit
-test can:
+**S1, S2, the staging proof and the pre-tag live proof** (the main session; plan §8). These show what no
+unit test can:
 - the real pages;
 - both plans written by the webhook;
 - the reminder delivered, in test mode and, if Quinn agrees, in live mode;
 - the trial on a first subscription only;
 - cancelling and deletion;
 - the wizard's prices against Stripe's;
-- the old-build refusal by its body.
+- the old-build refusal by its body;
+- (S2) a catalog change reaching an unchanged build, and one real notice and price change in test mode.
 
 ## 7. Not in this lane
 
 These stay in the v0.5.0 billing lane or later:
-- **C1**, terms re-acceptance, unless T0's count brings it in as T5b.
+- **C1**, terms re-acceptance, unless T0's count brings it in as T5b. That includes a sign-up version named
+  by the server rather than compiled in (D15).
 - **C2**, emailing every account on a material policy change.
 - **C7's record**: the consent record keeping the plan and the text shown. `price_cents` already tells the
   two plans apart.
 - **C8**, the confirmation email.
-- **C10**, the yearly renewal notice. It must land before the first yearly renewal, which comes no sooner
-  than a year and 14 days after the first yearly checkout.
-- **C11**, the earlier pause-resume notice.
+- **C10's yearly half**, the yearly renewal notice. It must land before the first yearly renewal, which
+  comes no sooner than a year and 14 days after the first yearly checkout. (Its price-change half is D14.)
 - **C12**, refunds and disputes in the webhook.
 - **C13**, closing an account, and the shutdown.
 - **C15** and **C16**.
@@ -648,34 +956,40 @@ These stay in the v0.5.0 billing lane or later:
 - **The trial in the app's text.**
 - **Any price on the homepage.** A2's homepage clause stands: "to be announced".
 
+*Moot in r4:* C11, the earlier pause-resume notice. There is no pause left to resume (D10).
+
 Outside paid sign-ups still wait on Amendment 2026-10-16b's gate. v0.4.1 makes billing correct. It does not
 open sales.
 
 ## 8. Only Quinn can answer (in the order they block)
 
-1. **Put Amendment 2026-11-10 on `main`, with an amendment recording the 2026-11-17 rulings and items 3, 5,
-   6 and 7.** Blocks T1. *Recommend:* yes.
+Item numbers are r3's, so the plan's Q-numbers still hold. r4 marks three items answered and adds item 14.
+
+1. **Answered 2026-11-20: yes.** Amendment 2026-11-10 goes to `main`, with Amendment 2026-11-17 (drafted on
+   `docs/price-amendments`) recording the 2026-11-17 rulings and rulings (6) to (10). T1 still waits until
+   both are on `main`, the second signed.
 2. **The production parity push, if T0 finds the testers or comp-guard migration missing** (§4 step 0).
-   Blocks item 9's grants and step 10. *Recommend:* yes, if those two stamps are the whole gap, pushed from a
-   scratch copy ending at `20261020000600`. Otherwise it is L9 proper, and v0.4.1 waits for it.
-3. **Keep `academic_year` rows under their own name at $69.99, rather than mapping them to `yearly`** (D1).
-   Blocks T2. *Recommend:* keep them, recorded in item 1's amendment.
+   Blocks the comp grants on Quinn's accounts and step 10. *Recommend:* yes, if those two stamps are the
+   whole gap, pushed from a scratch copy ending at `20261020000600`. Otherwise it is L9 proper, and v0.4.1
+   waits for it.
+3. **Answered 2026-11-20 by ruling (6).** No `academic_year` subscription is kept, under any name (D1).
 4. **Moving Stripe to KNOWLU LLC.** Blocks the test-mode checklist, and so S1. *Recommend:* defer a new
    account until after v0.4.1, but before 10-16b's gate opens sales; after that it means recreating every
    paying subscription. A new account costs new secrets, a new endpoint, product, prices, portal and
    Managed Payments setting, every stored customer id cleared, and S1 again. If the move is only the same
    account's business details, do it before step 9, so the charge's merchant name matches the pages.
 5. **Show P9's price lines on the subscribe step, since A2's wizard clause ends with this lane** (D9).
-   Blocks T4. *Recommend:* show them.
+   Blocks T4. *Recommend:* show them. Drafted as the amendment's ruling (8); signing settles it. Under r4
+   the lines come from the server, so the app holds no figure either way.
 6. **The upgrade sheet sells both plans, Yearly first, replacing the 2026-09-14 one-plan ruling** (D9).
-   Blocks T4. *Recommend:* yes.
+   Blocks T4. *Recommend:* yes. Drafted as the amendment's ruling (9).
 7. **Leave the gift year out of these terms until the gift lane ships** (D11; the R3 reading). Blocks T5.
-   *Recommend:* leave it out.
+   *Recommend:* leave it out. Drafted as the amendment's ruling (10).
 8. **A mailing address for the terms' Notices clause.** Blocks T5. *Recommend:* give it before T5, or rule
    email-only (it then goes on the lawyer's list).
-9. **On each of your accounts that holds a subscription: a comp grant, then cancel the old-price
-   subscription immediately, in both modes** (§4). Blocks T5's old-subscriber paragraph, and is done before
-   step 7. *Recommend:* yes.
+9. **Answered 2026-11-20 by ruling (6).** Each of your accounts that holds an old-price subscription gets a
+   comp grant, then that subscription is cancelled immediately, in both modes (§4). It is no longer a
+   question, but each act is a production write and still waits for your word at the time.
 10. **Managed Payments in effect, so Link on the terms and the privacy page** (D7, D12; at checkpoint B).
     Blocks T5's scope. *Recommend:*
     - under reading (i): the per-session change and Link if S1 passes; otherwise ship without either;
@@ -689,6 +1003,18 @@ open sales.
     *Recommend:* accept them.
 13. **VISION's "One edition" line and CLAUDE.md's Direction line, in your words.** Blocks the tag.
     *Recommend:* yes.
+14. **The price-change design (new in r4; the amendment's open item 2 asks you to confirm it before T5).**
+    Three parts, one answer:
+    - checkout records the terms version the server names, so a terms bump refuses no build (D3, D15);
+    - sign-up keeps recording the version compiled into the app. After a terms bump published without a
+      release, a sign-up on an older build records the older version until that student updates; anyone
+      who subscribes records the current one first. The alternative is a server-named sign-up version now,
+      which reaches into C1's re-acceptance design;
+    - the terms page publishes with a new site-only workflow (T10). That narrows the legal spec's C25 rule
+      ("legal pages deploy only on a release tag") to the privacy page.
+
+    Blocks T5 and T10. *Recommend:* yes to all three. Price changes are rare, and the lag in the second
+    part never touches a charge.
 
 *Settled outside this lane, and not on this list:* the tag replaces the whole live site with `site/`
 (`release.yml:294-297`). The controller ports the live site into `site/` (branch `site/port-live-1119`)
@@ -697,7 +1023,7 @@ pages.
 
 ## 9. Answers to the reviews
 
-Item numbers below are r3's §8 list.
+Item numbers below are r3's §8 list. Some rows describe r3 text that r4 later replaced; §10 says which.
 
 **Review r2 (PASS with changes):**
 
@@ -740,3 +1066,51 @@ Item numbers below are r3's §8 list.
 | M3 | D3's shape check. |
 | M4 | D5's already-subscribed 409. |
 | M5-M10 | Plan §3, §8 and §2: the S1 additions, the optional webhook values (D2), P1's split, the promotion code (checklist), the public S1 report, and the docs merge. |
+
+## 10. Revision 2026-11-20 (Quinn's ruling)
+
+r4 applies Quinn's ruling of 2026-11-20 (quoted under *Authority*), the coordinator's two additions (the
+terms version and the site deploy) and the draft Amendment 2026-11-17's rulings (6) and (7). A delta review
+reads only the rows below. Decisions not listed (D5, D7, D8, D12, §3) are unchanged from r3.
+
+**Removed because no customer exists (ruling 6):**
+
+| Where | What went | Why it could go |
+|---|---|---|
+| D1, §8 item 3 | `academic_year` keeps its name and $69.99, and counts as yearly for the money-back (U10) | No such subscription is kept |
+| D2 | The two old price values in the webhook | They named only old-price subscriptions |
+| D10 | The old plans' email texts; the summer pause and its resume notice | No subscription carries `monthly`; ruling (1) of 11-10 says no pause |
+| D11 | The old-subscriber paragraph in the terms | Nothing to describe |
+| D9, Settings | The words for `monthly` and `academic_year` | No row will carry them |
+| §4 checklist | "Keep the old prices while any subscription uses them" | Replaced by "archive them" |
+| §5 | P10's "old subscriptions keep their price, name and pause" | Moot |
+| §7 | C11, the pause-resume notice | No pause |
+
+**Kept, with zero customers, and why:**
+
+| What | Why it stays |
+|---|---|
+| D3's 409 for `monthly` and `academic_year` | It sells nothing either way (an unknown name is 400), but it gives an old build an actionable sentence, its body proves the new function is live at step 10b, and the list never grows |
+| §4 step 0's counts | They now check the ruling's premise: a paying subscription that is not Quinn's stops the lane |
+| Ending Quinn's own old-price subscriptions (was item 9), on Quinn's word | After step 10 they map to no plan, fail `billing-jobs` daily and would renew at a price no terms state |
+| D11's count of accounts that are not Quinn's, and T5b | It is about accepting terms, not paying; a tester holds an account |
+| Deactivating the 100% promotion code | It would still take the new prices for nothing |
+
+**Changed decisions:** D1 (keys stable across price changes), D2 (lookup through the catalog; derived
+names), D3 (the offer match replaces the floor and the shape check), D4 (checks against the catalog; an
+unset variable is a case), D6 (amount from the catalog), D9 (the app renders the server's offer; no price
+in the app; offline behaviour; `checkout_offer`), D10 (pause removed; reminder from the subscriber's own
+price), D11 (the price-change paragraph added; the terms tie is `TOS_VERSION` = `TERMS_VERSION` = page).
+
+**New decisions:** D13 (the price catalog), D14 (`stay` and `move` for existing subscribers), D15 (terms
+without an app release: server-named checkout version, `site.yml`), D16 (the runbook).
+
+**Other sections:** Authority (the ruling and the draft amendment), §1, §4 (step 0's premise check, S2,
+Quinn's own subscriptions, steps 10, 10b, 13, 14, the checklist), §5, §6 (new catalog tests, the offer,
+the move, the app's no-literal and render tests, `account.rs` and `workflows.rs` tests), §7, §8 (items 1, 3
+and 9 answered; 5 to 7 drafted; item 14 new).
+
+**Plan tasks changed or added** (`docs/plans/2026-11-19-v041-pricing-plan.md`): T0 (premise check), T0r
+(three questions), T1a (new: the catalog), T1, T2, T3, T4, T4a (new: `account.rs`'s command and body), T5,
+T6, S2 (new: the rehearsal), T10 (new: `site.yml`), T11 (new: the runbook), the ledger, §8's steps, the
+risks and the budget.
