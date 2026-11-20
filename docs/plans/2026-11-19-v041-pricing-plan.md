@@ -717,7 +717,8 @@ only one key ships.
 - **`docs/reference/app.md`'s release section:** `site.yml` (T10), and the warning that a hand
   `wrangler pages deploy site` takes the installer and `latest.json` off knowlu.com (note D15). (r5: I6)
   The recovery it names is `site.yml`, or a hand restore from the latest Release's assets into a `main`
-  checkout's `site/releases/` followed by the same deploy, on Quinn's word; **never a re-run of a tag's
+  checkout's `site/releases/`, with `site/privacy.html` taken from that Release's tag (or the restore stops
+  if `main`'s copy differs; r5 round 2: N2), followed by the same deploy, on Quinn's word; **never a re-run of a tag's
   `publish` job**, which puts that tag's `site/` (old terms, after a price change) back live, and whose
   artifact lasts 7 days (`release.yml:262`).
 - **Marker lines** in the legal spec (§5's "Terms + Privacy B" row and the interim block; C25 narrowed to
@@ -735,7 +736,13 @@ Note D15. It does not gate the v0.4.1 tag; it must merge before the first price 
   `gh release view --json tagName`), and the restore and the privacy comparison both use that value; the
   file never names "latest" a second way (no `git describe`, no second `gh release` lookup).
 - `site_yml_refuses_a_newer_tag_or_a_running_release` (r5: I5): it stops when any `v*` tag sorts after the
-  Release's tag, and when a `release.yml` run is queued or in progress.
+  Release's tag, and when a `release.yml` run is queued or in progress. (r5 round 2: N1) The pin also
+  requires that the tags come from the remote (`git ls-remote --tags origin`, or a checkout with
+  `fetch-depth: 0`; the default `fetch-depth: 1`, as at `release.yml:287`, fetches none) and that they are
+  compared as versions (`--sort=v:refname`, so v0.10.0 follows v0.9.0).
+- `site_yml_permissions_are_exactly_read_only` (r5 round 2: N3): the job's permissions are exactly
+  `contents: read` and `actions: read`, with no `id-token`, because `environment: release` is the signing
+  credential's OIDC subject (`release.yml:144-156`).
 - `site_yml_has_a_concurrency_group_and_the_release_environment` (r5: I5): a `concurrency:` group of its
   own, and its one job declares `environment: release`, as `release.yml`'s publish job does (`:281`;
   pinned beside `workflows.rs:190`).
@@ -769,7 +776,8 @@ stop; the main session sequences the two.
   `site.yml` dispatch, and each check. Each live step says "on Quinn's word". (r5) It carries D16's
   preconditions (privacy page equal to the latest Release's; Q15 ruled under `move`), the reuse rule for
   an amount the key has had before, the every-status check before a `KEPT` entry goes, the documents list,
-  "a plan change needs a release", and D15's recovery rule (never a tag re-run).
+  "a plan change needs a release", and D15's recovery rule (never a tag re-run; the hand restore takes
+  `site/privacy.html` from the Release's tag, or stops; r5 round 2: N2).
 - Add the S2 lessons the main session records.
 - A pointer from `cloud/supabase/README.md`'s Billing section (T6).
 - `reviewer` checks it against D16 row by row; no step may be missing or reordered.
@@ -827,7 +835,7 @@ rests on S1, a proof, a review or Quinn.
 | D14 ⚑ | a no-proration change leaves a **paid** period alone, in Stripe's test mode (r5: I2) | T0r, S2 | T0r's answer 9; S2 (e): the paid invoice unchanged, no proration line, the upcoming invoice at the new amount |
 | D14 ⚑ | under a raise, a trialing subscription is left alone in test mode (pending Q15) | S2 | S2 (d) |
 | D15 | checkout records the server's terms version; no build refused for its age | T1, T4a | `billing-checkout::a_changed_offer_is_refused`; `account::checkout_url_at_sends_the_offer_it_was_given` |
-| D15 | `site.yml`: by hand, `main` only, one tag, no newer tag or running release, its own concurrency, the `release` environment, restore first, privacy refused, never self-hosted (r5: I5) | T10 | the nine `workflows` pins |
+| D15 | `site.yml`: by hand, `main` only, one tag, no newer tag or running release, its own concurrency, the `release` environment, restore first, privacy refused, never self-hosted (r5: I5); tags from the remote, compared as versions, and read-only permissions (r5 round 2: N1, N3) | T10 | the ten `workflows` pins |
 | D15 ⚑ | recovery is `site.yml` or a hand restore from the Release, never a tag re-run (r5: I6) | T6, T11 | `reviewer` reads `app.md` and the runbook against D15 |
 | D15 ⚑ | a site-only run keeps the installer and `latest.json` live | T10, T9 | T10's preview run; §8 C step 14 |
 | D15 ⚑ | a catalog change reaches an unchanged build | S2 | S2 (b) |
@@ -1082,7 +1090,7 @@ rests on S1, a proof, a review or Quinn.
 | A move's mark fails after its notice was sent (r4) | `failed` in the job's reply; a second notice the next day | Accepted: the student gets the same notice twice, never a change without one. The run log names the account id only. |
 | The offer cannot be read (r4) | B0; `checkout_offer` errors | The plan buttons wait and say why (D9); nothing sells on a stale figure. A staging outage blocks S1 until fixed. |
 | S2's scratch functions left deployed (r4) | checkpoint B | S2 (f) redeploys the lane's; checkpoint B reads each function's offer, and an invented figure stops it. |
-| Someone runs `wrangler pages deploy site` by hand (r4) | knowlu.com's `/releases/Knowlu-setup.exe` or `latest.json` 404 | (r5: I6) A `site.yml` run once T10 has merged; before that, or if it cannot run, a hand restore from the latest Release's assets into a `main` checkout's `site/releases/`, then the same deploy, on Quinn's word. **Never re-run a tag's `publish` job**: after a price change it puts the old terms back live while checkout records the new version, and its artifact lasts 7 days (`release.yml:262`). T6 writes this into `docs/reference/app.md`. |
+| Someone runs `wrangler pages deploy site` by hand (r4) | knowlu.com's `/releases/Knowlu-setup.exe` or `latest.json` 404 | (r5: I6) A `site.yml` run once T10 has merged; before that, or if it cannot run, a hand restore from the latest Release's assets into a `main` checkout's `site/releases/`, with `site/privacy.html` taken from that Release's tag or the restore stopped if `main`'s copy differs (r5 round 2: N2), then the same deploy, on Quinn's word. **Never re-run a tag's `publish` job**: after a price change it puts the old terms back live while checkout records the new version, and its artifact lasts 7 days (`release.yml:262`). T6 writes this into `docs/reference/app.md`. |
 | `site.yml` drops the installer on its first run (r4) | §8 C step 14's check | The hand restore above, on Quinn's word, and stop using `site.yml` until fixed (r5: I6). Its preview run comes first so this is caught off the live site. |
 | `site.yml` would publish something the tag did not (r5: m9) | `git diff v0.4.1 main -- site/` is not empty before step 14 | Step 14 waits until the difference is meant to go live (a price change's PR, by D16) or is gone. |
 | `site.yml` runs during a release, or after a failed one (r5: I5) | a `v*` tag newer than the latest Release, or a running `release.yml` | It refuses (T10's pins). Finish or fix the release first. |
@@ -1236,6 +1244,16 @@ reads these rows and that table only.
 | m9 | §8 C step 14 records an empty `git diff v0.4.1 main -- site/` first; §9 row; T11 carries D16 step 0's privacy precondition. |
 | m10 | T3: cancelling at period end is "no mail and no write". |
 | m11 | §11 item 16; T11 carries "a plan change needs a release". |
+
+**r5 round 2** (`docs/reports/2026-11-20-v041-pricing-r5-review.md`, PASS with changes; the last round):
+
+| Finding | Plan change |
+|---|---|
+| N1 | T10's `site_yml_refuses_a_newer_tag_or_a_running_release` also pins tags read from the remote and compared as versions (`--sort=v:refname`). |
+| N2 | T6's `app.md` text, §9's hand-deploy row and T11: the hand restore takes `site/privacy.html` from the Release's tag, or stops when `main`'s copy differs. |
+| N3 | T10's new pin `site_yml_permissions_are_exactly_read_only` (`contents: read`, `actions: read`, no `id-token`); ledger D15 now ten pins. |
+| N4 | None in the plan: the note's D14 and §8 item 15 carry it; T3's `a_cut_moves_a_trial` keeps N = 10, which is shorter than the trial. |
+| N5 | None in the plan: T3's scan wording already excludes bare cents; the note's D16 step 2 is narrowed to match. |
 
 **Open for Quinn after r5:** Q2, Q4, Q8, Q10, Q11, Q12, Q13, Q14 and Q15 (the note's §8 items of the same
 numbers).

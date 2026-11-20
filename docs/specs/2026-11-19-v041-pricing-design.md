@@ -540,8 +540,11 @@ it on that price's `KEPT` entry. v0.4.1 builds both rules and uses neither.
     for the key are higher than the old entry's), `move` skips a `trialing` subscription for the charge that
     ends its trial, so the first charge is the amount the student's consent row records (D3). It is moved,
     with its own notice, before a later renewal, once it is `active`. On a **cut**, a `trialing`
-    subscription is moved like any other: the student pays less than they agreed to. The rule follows from
-    comparing the two entries' cents and needs no new catalog field.
+    subscription is moved like any other: the student pays less than they agreed to. That happens only when
+    the notice is shorter than the trial, because a trial is in the window only while its end is at least
+    N × 24h away; with today's 14-day trial and N of 15 or more, no trial is ever in the window, and the
+    first charge is the old price, which is what the consent row records (r5 round 2: N4). The rule follows
+    from comparing the two entries' cents and needs no new catalog field.
   - **A yearly subscriber** is reached the same way, through the window before their yearly renewal, so a
     raise on the yearly plan waits for that renewal (the amendment's recommendation, `:1545-1547`).
 
@@ -598,12 +601,18 @@ it on that price's `KEPT` entry. v0.4.1 builds both rules and uses neither.
   - **one tag** (r5: I5): it reads the latest GitHub Release's `tagName` once and uses that tag for both the
     restore and the privacy comparison. It refuses when any `v*` tag is newer than that tag, because a
     release is then in flight or has failed (`release.yml` creates the Release only after its own Pages
-    deploy, `:294-311`);
+    deploy, `:294-311`). It reads the tags **from the remote** (`git ls-remote --tags origin`, or a checkout
+    with `fetch-depth: 0`): the default `fetch-depth: 1`, which `release.yml`'s publish job uses (`:287`),
+    fetches no tags, and the check would then pass on nothing. It compares them **as versions**
+    (`--sort=v:refname`), so v0.10.0 sorts after v0.9.0 (r5 round 2: N1);
   - **never beside a release** (r5: I5): it refuses while a `release.yml` run is queued or in progress, and
     it has a `concurrency` group of its own, so two site runs never overlap;
   - its one job declares `environment: release`, as `release.yml`'s publish job does (`:277-281`), so a
     required reviewer added to that environment gates site publishing too, and the `CLOUDFLARE_*` secrets
-    resolve whether or not they are scoped to it;
+    resolve whether or not they are scoped to it. That environment is also the subject of the signing
+    credential's OIDC trust (`release.yml:144-156`), so `site.yml`'s permissions are exactly `contents: read`
+    and `actions: read`, never `id-token: write`, and a test pins that. A deployment rule on the `release`
+    environment that admits only tags would refuse `site.yml`, which runs from `main` (r5 round 2: N3);
   - before deploying, it puts that Release's installer, and its `latest.json` when the Release carries one
     (`release.yml:310`), into `site/releases/`, and copies the installer to `Knowlu-setup.exe` as
     `release.ps1:297` does; a missing installer stops it;
@@ -613,8 +622,10 @@ it on that price's `KEPT` entry. v0.4.1 builds both rules and uses neither.
 
   **Recovery, once `site.yml` exists** (r5: I6): if knowlu.com loses its installer or `latest.json` (a hand
   deploy, a failed run), the fix is another `site.yml` run, or, if that cannot run, a hand restore that does
-  what it does: that Release's assets into `site/releases/` of a `main` checkout, then the same deploy, on
-  Quinn's word. **Never re-run a tag's `publish` job**: it deploys the tag's `site/`, which after a price
+  what it does: that Release's assets into `site/releases/` of a `main` checkout, and `site/privacy.html`
+  taken from that Release's tag (or the restore stops if `main`'s copy differs), then the same deploy, on
+  Quinn's word. Without that, a privacy bump merged and waiting for its release would go live before any
+  build carries it (r5 round 2: N2). **Never re-run a tag's `publish` job**: it deploys the tag's `site/`, which after a price
   change holds the old terms, while checkout keeps recording the new `TERMS_VERSION`; and its artifact is
   kept 7 days only (`release.yml:262`).
 
@@ -656,8 +667,10 @@ buttons are per key, and a build whose offer lacks one of its keys can sell noth
    - the one test that names the selling amounts (the catalog's first pin), so the change is seen in a test
      diff too. Handler tests build their own catalogs and do not change.
 
-   CI ties the catalog, the page and `TOS_VERSION`, and finds any amount left in the billing code outside
-   the catalog. CI does not read documents, so the same PR checks by hand (r5: m2): VISION's One edition
+   CI ties the catalog, the page and `TOS_VERSION`, and finds any `$` figure, decimal money figure or
+   `STRIPE_PRICE_` name left in the billing code outside the catalog. It does not scan bare cents such as
+   `1299` (m3); a hard-coded amount shows in behaviour instead, because the handler tests run on invented
+   catalogs (1399) (r5 round 2: N5). CI does not read documents, so the same PR checks by hand (r5: m2): VISION's One edition
    line, CLAUDE.md's Direction line, `HANDOFF.md`'s billing lines, `docs/reference/app.md`'s price line,
    the cloud README's Billing section, `site/index.html`'s pricing, and the `$9.99` yardstick comments in
    `_shared/judge_caps.ts:45, 97`. Each is changed, or named in the PR as left alone with a reason.
@@ -1039,9 +1052,10 @@ the environment).
   action by SHA, restores the installer (and `latest.json` when present) before deploying, refuses a
   changed `site/privacy.html`, and never runs self-hosted (today's self-hosted pin names only `release.yml`,
   `workflows.rs:216-217`). (r5: I5) It reads one tag, the latest Release's `tagName`, for both the restore
-  and the privacy comparison; refuses when a newer `v*` tag exists or a `release.yml` run is queued or in
-  progress; has a `concurrency` group; and its job declares `environment: release`, pinned beside
-  `workflows.rs:190`.
+  and the privacy comparison; refuses when a newer `v*` tag exists, read from the remote and compared as
+  versions (N1), or a `release.yml` run is queued or in progress; has a `concurrency` group; its job
+  declares `environment: release`, pinned beside `workflows.rs:190`; and its permissions are exactly
+  `contents: read` and `actions: read` (N3).
 - **DOM checks** (`scripts/ui-fixture`): with a `checkout_offer` envelope carrying an invented price
   ("$1.23 every 4 weeks."), the wizard and the sheet show exactly that line, which proves the app draws
   what it is sent; with an unreachable envelope, the buttons are disabled and the connection sentence
@@ -1155,7 +1169,9 @@ Item numbers are r3's, so the plan's Q-numbers still hold. r4 marked three items
     recommendation and may merge with this open, because `KEPT` is empty at v0.4.1. *Recommend:* on
     a raise, `move` skips a `trialing` subscription for the charge that ends the trial, so that charge is
     the amount they agreed to, and the price changes at a later renewal with its own notice; on a cut, it
-    moves a trial like any other. D14 is written this way, marked pending. The other answer is to treat a
+    moves a trial like any other. A cut reaches a trial only when the notice is shorter than the trial: with
+    the 14-day trial and N of 15 or more, no trial is in the window, so the first charge stays the old price,
+    as the consent row records (N4). D14 is written this way, marked pending. The other answer is to treat a
     trial like any period and move it either way.
 
 *Settled outside this lane, and not on this list:* the tag replaces the whole live site with `site/`
@@ -1282,3 +1298,13 @@ r5 applies `docs/reports/2026-11-20-v041-pricing-r4-review.md` (PASS with change
 | m9, `site.yml` preconditions | §4 step 14 requires `git diff v0.4.1 main -- site/` to be empty first; D16 step 0: a privacy bump merged before its release blocks a price change. |
 | m10, a test's wording | §6 and plan T3: cancelling at period end means "no mail and no write". |
 | m11, plan changes | D16: adding or dropping a plan key needs an app release and its own lane. |
+
+**r5 round 2** (`docs/reports/2026-11-20-v041-pricing-r5-review.md`, PASS with changes; the last round):
+
+| Finding | What changed |
+|---|---|
+| N1, tags `site.yml` cannot see | D15 and §6: the tags are read from the remote (`git ls-remote --tags origin`, or `fetch-depth: 0`) and compared as versions (`--sort=v:refname`); plan T10 pins both. |
+| N2, the hand restore's privacy page | D15's recovery: the hand restore takes `site/privacy.html` from the Release's tag, or stops when `main`'s copy differs; plan T6, §9 and T11 say the same. |
+| N3, the release environment's OIDC subject | D15: `site.yml`'s permissions are exactly `contents: read` and `actions: read`, never `id-token: write`; a tag-only deployment rule on `release` would refuse it. Plan T10 pins the permissions. |
+| N4, a cut and a trial | D14 and §8 item 15: a cut moves a trial only when the notice is shorter than the trial; with N of 15 or more, no trial is in the window. |
+| N5, what CI finds | D16 step 2: CI finds `$` figures, decimal figures and `STRIPE_PRICE_` names, not bare cents; the handler tests' invented catalogs catch a hard-coded amount by behaviour. |
