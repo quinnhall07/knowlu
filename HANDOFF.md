@@ -3,7 +3,8 @@
 **Rewritten 2026-09-09 (evening) by the session that signed the spec, ran cut day and executed C0
 Tasks 1–3. Facts refreshed 2026-10-18 for session 5 (the friends-MVP push): the lane table in §2,
 the counts, §3's Integrate items and the Pilot measure; the session-5 plan is
-`.superpowers/handoffs/2026-10-18-START-HERE-session-5-mvp.md`.** Read this whole file, then `CLAUDE.md`, then `docs/specs/2026-09-09-knowlu-cloud-design.md`
+`.superpowers/handoffs/2026-10-18-START-HERE-session-5-mvp.md`. §1's top block
+refreshed 2026-11-20 for the v0.4.0 release.** Read this whole file, then `CLAUDE.md`, then `docs/specs/2026-09-09-knowlu-cloud-design.md`
 (signed; §11a holds the rulings made after signing), then the plan you are executing. Everything
 older under `docs/` is history or design authority from the previous repository (`PROVENANCE.md`).
 
@@ -11,29 +12,47 @@ older under `docs/` is history or design authority from the previous repository 
 
 ## 1. State, in facts
 
-▶ **2026-11-17 session, built (branch `feat/v0.4.0-ui`, not merged to `main`).**
-- **v0.4.0** (the new UI on today's engine; the calendar read-only, Ask hidden, a frameless window) is
-  **built and merged on `feat/v0.4.0-ui`**, awaiting the whole-branch review, the live proof and Quinn's tag.
-  Design and plan: `docs/specs/2026-11-17-v0.4.0-new-ui-design.md` and
-  `docs/plans/2026-11-17-v0.4.0-new-ui-plan.md`. Every page, the swap (T23) and the version bump (T24, 0.4.0 in
-  `Cargo.toml` and `tauri.conf.json`) are in. The reference for what shipped is `docs/reference/app.md` (the
-  window, `ui-ready`, the static layout, the fixture harness) and `docs/surface/anatomy.md` §3.17 (the engine's
-  new `courses` region). From the squash bodies at T23: 19 `ui_*` test files (301 tests), the workspace
-  3377 passed / 0 failed / 3 ignored with `.rsrc` the only warning, and `scripts/ui-fixture/run.py --checks`
-  315/315; the whole-branch gate has not run yet.
-- **v0.5.0** is the full product with the new onboarding and billing. The billing lane:
-  - Stripe Managed Payments, with Link as seller of record. Sales tax is added at checkout.
-  - The 30-day money-back covers the yearly plan only.
-- **v0.6.0** is Ask.
+▶ **2026-11-20: v0.4.0 is released.** Tag `v0.4.0` is on `ef87fcc9` and was pushed 2026-11-20 (21:54Z, on Quinn's word).
+- **What shipped:** the new UI on today's engine (the calendar read-only, Ask hidden, a frameless window).
+  - PR #80 (merged 2026-11-19, `04c5f85f`) carried the whole of `feat/v0.4.0-ui`, the brand app and tray icons
+    included (`96e927d1`). PR #81: the installer's brand icon (`0b5111c7`). PR #82: knowlu.com's live pilot page
+    ported into `site/` byte for byte (`ef87fcc9`), so a `v*` tag no longer rolls the site back.
+  - Design and plan: `docs/specs/2026-11-17-v0.4.0-new-ui-design.md` and `docs/plans/2026-11-17-v0.4.0-new-ui-plan.md`.
+    The reference for what shipped is `docs/reference/app.md` (the window, `ui-ready`, the static layout, the
+    fixture harness) and `docs/surface/anatomy.md` §3.17 (the engine's new `courses` region).
+- **Proof:** the live proof on staging and Quinn's hand check passed 2026-11-19. The workspace gate on the icon branch (`b39f2744`, 2026-11-19) was
+  3385 passed / 0 failed / 3 ignored, with `.rsrc` the only warning; CI on `main` was green on `ef87fcc9`.
+- **The release:** `release.yml` run 44824405471 succeeded. GitHub Release v0.4.0 carries
+  `Knowlu_0.4.0_x64-setup.exe` (6,880,456 bytes), its `.sig` and `latest.json`; `knowlu.com/releases/latest.json`
+  reads 0.4.0; the live homepage was unchanged by the deploy.
+- **The price:** the cloud design's Amendment 2026-11-10 (signed 2026-11-11) and Amendment 2026-11-17 (signed
+  2026-11-20) are on `main` (PR #83, merged 2026-11-20, `135ebe94`). In one line: $12.99 every 4 weeks
+  or $84.37 once a year, 14 days free, a 30-day money-back on the yearly plan, Link as seller of record, tax
+  added at checkout, no Pell price for now, and the old plans retired because there are zero customers (Quinn, 2026-11-20),
+  with prices built to change later. The switch is v0.4.1: until then checkout still sells the old plans, and
+  "Sold through Link" applies once Managed Payments is in effect. A 4-week charge the student did not mean to make
+  is refunded in the four cases of P15.
+- **v0.4.1 is the pricing lane (Contract).** Quinn ruled 2026-11-19 that billing moves in v0.4.1, not v0.5.0.
+  Its note `docs/specs/2026-11-19-v041-pricing-design.md` and plan `docs/plans/2026-11-19-v041-pricing-plan.md`
+  (r5) are on branch `docs/v041-pricing`, not on `main`; the r4 delta review passed with changes, applied in r5.
+- **Versions from here (Quinn, 2026-11-20):** point releases v0.4.1 to v0.4.9, then **v0.5.0**, the fully usable
+  product with the new sell-first onboarding; **v0.6.0** is Ask. The next session plans v0.4.1 to v0.4.9 with Fable 5.2.
+- **Small items for a point release:** `app/static/js/router.js:93` handles the view transition's `t.finished` but
+  not `t.ready` (an unhandled rejection under overlapping route changes; fix: `t.ready.catch(function () {})`).
+  From the ledger: the Done tab shows the engine's `closed_this_week` verbatim (approval cards counted as tasks,
+  a re-opened task still listed); after Lock in's Start next the hash stays on the finished task; `drawClock`
+  rebuilds `#clock` on every poll; the Calendar's day rollover is untested; the Wizard's plan buttons read
+  Monthly and Academic year and must say "every 4 weeks" with the signed prices.
+- **The privacy page and the pilot form (Contract, Quinn's):** knowlu.com's pilot form posts to Google Forms
+  (`site/index.html:39, 73, 306`), and `site/privacy.html` does not name it. Recommended: a privacy PR that names
+  Google Forms for the pilot interest form, with a version bump. (The site's "Windows and Mac" is Quinn's choice for
+  the pilot, 2026-11-19; the app itself is Windows-only.)
 - **The legal pages rewrite** is drafted and reviewed twice: `docs/specs/2026-11-17-legal-pages-rewrite.md`,
   with the audit in `docs/reports/2026-11-17-legal-pages-audit.md`. Nothing is published.
-- **Quinn's other rulings that day:**
+- **Quinn's other rulings of 2026-11-17:**
   - Grades are shown as text (VISION amended).
-  - The Pell deal is dropped for now.
   - The company is KNOWLU LLC, under Kentucky law and Kentucky courts.
   - Liability is capped at what the student paid in the prior 12 months.
-- **knowlu.com** shows pricing "to be announced". It was deployed by hand, so a `v*` tag would overwrite it
-  until plan task T4's port of the site (`site/`, commit `ddcc0ee0` on `feat/v0.4.0-ui`) reaches `main`.
 
 ▶ **C1b and C1c MERGED 2026-09-24, C3′ MERGED 2026-09-25, each on Quinn's word, each green on the self-hosted runner. Live billing is proven on prod (2026-09-24).**
 - **CI runs on GitHub's runners again (2026-09-29).** Quinn made the repository public that day, which makes Actions minutes free. The same day the controller deleted the `CI_SELF_HOSTED` variable, deregistered the `knowlu-laptop` runner and set fork-PR approval to *all external contributors*: a self-hosted runner on a public repository runs any fork's pull request on the laptop. **Do not re-register it while the repository is public.** Quinn plans to make it private again later; only then is the laptop runner safe to bring back (`C:\actions-runner\start-knowlu-runner.cmd`, labels `[self-hosted, windows, x64, knowlu-ci]`, PR #10 `312d833`).
@@ -452,7 +471,7 @@ VISION's successes 1, 2, 5 and 6. **Whether pilot students pay is ruled: they do
 Amendment 2026-10-16b, signed 2026-10-16, `docs/specs/2026-09-09-knowlu-cloud-design.md`). That amendment
 also gates any outside paid sign-up (the quiet release from spring 2027): the lawyer reads the terms as
 well as the privacy page, Kentucky sales-tax registration, Stripe live, a signed installer (Azure) and
-`site/terms.html` carrying the 2026-10-16 prices; none of that is scheduled until Quinn sets a quiet-release date. **The measure and size are
+`site/terms.html` carrying the Amendment 2026-11-10 prices as Amendment 2026-11-17 amends them (they publish with v0.4.1); none of that is scheduled until Quinn sets a quiet-release date. **The measure and size are
 ruled (Quinn, 2026-10-15; `docs/notes/2026-09-29-funding-and-seed-grant.md` §3c):** recruit 30, about
 20-24 expected to finish; success is at least 70% of the students still in the pilot in its last month
 using Knowlu 4+ days a week (the earlier 7 of 10 form stands), supporting: every student reaches a correct
