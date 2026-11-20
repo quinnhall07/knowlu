@@ -3,10 +3,11 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status:** r4. r2 answered review r1. r3 applied review r2's fixes
-(`docs/reports/2026-11-19-v041-pricing-spec-review-r2.md`, PASS with changes). **r4 revises r3 for
-Quinn's ruling of 2026-11-20** (zero customers; prices that can change later), as the note's r4 does. §12
-lists every task r4 changed, for a delta review.
+**Status:** r5. r2 answered review r1. r3 applied review r2's fixes
+(`docs/reports/2026-11-19-v041-pricing-spec-review-r2.md`, PASS with changes). r4 revised r3 for Quinn's
+ruling of 2026-11-20 (zero customers; prices that can change later). **r5 applies the r4 delta review**
+(`docs/reports/2026-11-20-v041-pricing-r4-review.md`, PASS with changes) and the signing of Amendment
+2026-11-17 (PR #83). §12 lists every task r4 changed, and its *Revision r5* every r5 change.
 
 **Size:** Contract. It moves money; it changes `app/src/account.rs` (`TOS_VERSION`, with D12
 `PRIVACY_VERSION`, and the checkout command); it is a release; it adds a publishing workflow (T10); it
@@ -20,7 +21,7 @@ lists where the note left room.
 **Goal.** Ship v0.4.1 with four things true:
 - **Billing charges the signed prices:** $12.99 every 4 weeks, or $84.37 once a year, with 14 days free
   once per account and a reminder before the first charge.
-- **The app's subscribe step states those prices** (P9; Q5), as the server sends them.
+- **The app's subscribe step states those prices** (P9; the amendment's (8)), as the server sends them.
 - **The terms state them.**
 - **A later price change, up or down, is a catalog change and a terms bump**, with no app release, by the
   runbook (ruling 7; D13-D16).
@@ -72,7 +73,10 @@ Read for r4 on 2026-11-20, in this worktree:
 - `.github/workflows/release.yml:1-40, 240-312`, `ci.yml:145-178`; `scripts/release.ps1:293-297, 326`;
   `site/releases/` (only `.gitkeep`); `cloud/supabase/config.toml:101-165`;
 - the legal spec `:185-193, 560-640, 755-794, 850, 908-914`;
-- the draft Amendment 2026-11-17, read in the `price-amend` worktree (`:1234-1511`).
+- Amendment 2026-11-17, signed 2026-11-20 (PR #83), read in the `price-amend` worktree (`:1234-1550`);
+- for r5: the r4 review report; `release.yml:255-312`; `app/src/account.rs:175-178`; `billing-jobs/index.ts`
+  and `handler_test.ts:1-20, 247-363`; `app/static` searched for dollar amounts (none in `.js` or `.html`);
+  `_shared/judge_caps.ts:37-125` searched.
 
 These facts are from `feat/v0.4.0-ui` on 2026-11-19, and this worktree on 2026-11-20. T0 re-checks them on
 `main`.
@@ -123,24 +127,26 @@ These facts are from `feat/v0.4.0-ui` on 2026-11-19, and this worktree on 2026-1
 
 ## 3. Preconditions, and what T0 and T0r settle
 
-**Quinn's items Q1-Q14, by what they block** (the note's §8 has each recommendation):
+**Quinn's items Q1-Q15, by what they block** (the note's §8 has each recommendation). Open: Q2, Q4, Q8,
+Q10-Q15.
 
 | Item | What | Blocks |
 |---|---|---|
-| Q1 | **Answered 2026-11-20: yes.** Amendment 2026-11-10 on `main`, plus Amendment 2026-11-17 (drafted on `docs/price-amendments`), signed | T1a (both on `main` first) |
+| Q1 | **Answered 2026-11-20: yes.** Amendment 2026-11-10 on `main`, plus Amendment 2026-11-17, signed 2026-11-20 (PR #83) | T1a (both on `main` first) |
 | Q2 | The production parity push, only if the testers and comp-guard stamps are the whole gap | the comp grants on Quinn's accounts; §8 C step 10 |
 | Q3 | **Answered 2026-11-20 by ruling (6):** no `academic_year` subscription is kept | — |
 | Q4 | Stripe and KNOWLU LLC: the same account's details, or a new account (deferred) | P7, the test-mode checklist, and so S1 |
-| Q5 | The subscribe step shows P9's price lines (the amendment's (8), signed with it) | T4 |
-| Q6 | The upgrade sheet sells both plans, Yearly first (the amendment's (9)) | T4 |
-| Q7 | No gift paragraph in these terms (the amendment's (10)) | T5 |
+| Q5 | **Settled 2026-11-20 by the amendment's (8):** the subscribe step shows P9's price lines | — |
+| Q6 | **Settled 2026-11-20 by the amendment's (9):** the upgrade sheet sells both plans, Yearly first | — |
+| Q7 | **Settled 2026-11-20 by the amendment's (10):** no gift paragraph in these terms | — |
 | Q8 | The mailing address, or "email only" | T5 |
 | Q9 | **Answered 2026-11-20 by ruling (6):** per Quinn account that holds an old-price subscription, comp grant, then cancel immediately. Each act still waits for Quinn's word | §8 C's own-subscriptions step, before step 7 |
 | Q10 | Managed Payments in effect (reading (i) with the change, or (ii)), so Link on the pages; or the fallback | T5's scope (checkpoint B) |
 | Q11 | The live reminder round trip | §8 C step 10b |
 | Q12 | 10b's leftover production records | §8 C step 10b |
 | Q13 | VISION's and CLAUDE.md's price lines in Quinn's words | the tag |
-| Q14 | **New in r4.** The price-change design: server-named checkout terms version; sign-up keeps the compiled one; terms publish via `site.yml`, narrowing C25 to the privacy page (note D15) | T5, T10 |
+| Q14 | **New in r4.** The price-change design: server-named checkout terms version; sign-up keeps the compiled one; terms publish via `site.yml` (one tag, never beside a release; r5), narrowing C25 to the privacy page (note D15). The amendment's *Reading (7)* leaves this to the lane | T5, T10 |
+| Q15 | **New in r5 (review I3).** Does `move` change a trial's first charge? Recommended and written into D14, marked pending: not on a raise, yes on a cut | T3's two trialing tests (T3 may merge with it open, as its stop rule says); the first price change that uses `move` |
 
 **Also Quinn's:** the test-mode half of the note's §4 checklist, before S1 (P7 below), after Q4.
 
@@ -197,11 +203,15 @@ answer a quote with its URL and the date read, or "not found"; questions 9-11 ar
 9. **Changing a subscription's price (r4, D14 `move`).** Whether updating a subscription item's price with
    `proration_behavior=none` leaves the current period as paid, bills the new price from the next renewal,
    keeps the billing date when the cadence is the same, and behaves the same on a `trialing` subscription
-   and under Managed Payments.
+   and under Managed Payments. (r5: m7) Whether Link, as seller of record, sends its own notice of a price
+   change, or imposes a notice rule of its own, and what it says.
 10. **An archived price (r4, D14 `stay`).** Whether a subscription on an archived (inactive) price keeps
-    renewing, and whether the portal still shows it.
+    renewing, and whether the portal still shows it. Whether an archived Price can be unarchived and sold
+    again under the same id (r5: m4). Whether the subscriptions list filters by price and returns every
+    status (`status=all`) (r5: m5).
 11. **Subscription metadata (r4, D14).** Whether a metadata write on a subscription is kept under Managed
-    Payments and fires `customer.subscription.updated` (the webhook must stay 2xx on it).
+    Payments and fires `customer.subscription.updated` (the webhook must stay 2xx on it), and whether
+    writing one key leaves the others, `metadata[account_id]` among them, untouched (r5: m6).
 
 ## 4. Tasks at a glance
 
@@ -220,8 +230,8 @@ commits go to `contract-reviewer`, and T5's page text to `reviewer`.
 | T4a offer command (r4) | D9, D15 | `app/src/account.rs` (`checkout_offer`, `checkout_offer_at`, `open_checkout`'s arguments, `checkout_url_at`'s body), `app/src/main.rs` (the command in both lists, `:181, 270`), `app/tests/account.rs` (two loopback tests) | `contract-engineer` (Opus, xhigh) | T1 merged (the offer's shape) | `contract-reviewer` |
 | S1 test-mode spike | D7 gate, D5, D6 | the ledger; `docs/reports/2026-11-2x-v041-s1-managed-payments.md` | main session, with Quinn at the test Dashboard | T1a-T4a merged (S1 drives a T4 dev build); P7 | checkpoint B |
 | S2 price-change rehearsal (r4) | D13-D16 | the ledger; a section of the S1 report; a scratch branch never merged | main session, with Quinn at the test Dashboard | S1; T0r answers 9-11 | checkpoint B |
-| T4 subscribe step and labels | D9 | `app/static/js/wizard.js`, `app/static/js/pages/settings.js`, `app/static/js/carried/account.js`, `app/tests/ui_wizard.rs`, `app/tests/ui_settings.rs`, `app/tests/ui_plans.rs` (new), `scripts/ui-fixture/checks/t21.py`, `scripts/ui-fixture/checks/t16.py` (one assertion), `scripts/ui-fixture/checks/t20.py` (sheet assertions; its `#up-subscribe` checks at `:94, 115` stay), `scripts/ui-fixture/envelopes/t16-settings-answers.json` (one value), new `checkout_offer` envelopes under `scripts/ui-fixture/envelopes/` (an invented offer, a failure) | `console-ui` (Opus, high) | T1 merged; the command's name and shape from T4a's brief; Q5, Q6 | `reviewer` |
-| T5 legal commit | D11, D12, D15's tie | red: `engine/tests/site.rs`, `app/tests/bundle_config.rs`, one appended test in `_shared/price_catalog_test.ts`, and with D12 `app/tests/ui_account_privacy.rs`. Draft: `site/terms.html`, `site/subscribed.html`, and with D12 `site/privacy.html` and `app/static/js/carried/reconsent.js`. The commit: those, plus `app/src/account.rs` (`TOS_VERSION`, and `PRIVACY_VERSION` with D12) and the `TERMS_VERSION` line in `_shared/price_catalog.ts` | `test-writer` (red), then `console-ui` (drafts), then `contract-engineer` (Opus, xhigh), who makes the one commit | checkpoint B; T0's count; Q7, Q8, Q14 | `contract-reviewer`; `reviewer` (text); Quinn reads the pages |
+| T4 subscribe step and labels | D9 | `app/static/js/wizard.js`, `app/static/js/pages/settings.js`, `app/static/js/carried/account.js`, `app/tests/ui_wizard.rs`, `app/tests/ui_settings.rs`, `app/tests/ui_plans.rs` (new), `scripts/ui-fixture/checks/t21.py`, `scripts/ui-fixture/checks/t16.py` (one assertion), `scripts/ui-fixture/checks/t20.py` (sheet assertions; its `#up-subscribe` checks at `:94, 115` stay), `scripts/ui-fixture/envelopes/t16-settings-answers.json` (one value), new `checkout_offer` envelopes under `scripts/ui-fixture/envelopes/` (an invented offer, a failure) | `console-ui` (Opus, high) | T1 merged; the command's name and shape from T4a's brief (Q5 and Q6 settled) | `reviewer` |
+| T5 legal commit | D11, D12, D15's tie | red: `engine/tests/site.rs`, `app/tests/bundle_config.rs`, one appended test in `_shared/price_catalog_test.ts`, and with D12 `app/tests/ui_account_privacy.rs`. Draft: `site/terms.html`, `site/subscribed.html`, and with D12 `site/privacy.html` and `app/static/js/carried/reconsent.js`. The commit: those, plus `app/src/account.rs` (`TOS_VERSION`, and `PRIVACY_VERSION` with D12) and the `TERMS_VERSION` line in `_shared/price_catalog.ts` | `test-writer` (red), then `console-ui` (drafts), then `contract-engineer` (Opus, xhigh), who makes the one commit | checkpoint B; T0's count; Q8, Q14 (Q7 settled) | `contract-reviewer`; `reviewer` (text); Quinn reads the pages |
 | T5b C1, only if T0 finds an account that is not Quinn's | D11 | the legal spec's C1: `account.rs`, `cloud/supabase/functions/account/{handler,handler_test}.ts`, `carried/reconsent.js` | `contract-engineer`, `cloud-engineer`, `console-ui` | T0 | `contract-reviewer`, `reviewer` |
 | T6 docs | all | `HANDOFF.md`, `docs/reference/app.md`, `cloud/supabase/README.md`; marker lines in the legal spec and the v0.4.0 note | `docs-keeper` (Sonnet, medium) | T5 | `reviewer` |
 | T7 version 0.4.1 | — | `Cargo.toml:9`, `app/tauri.conf.json:4`, `Cargo.lock` | main session | T5 | T8 |
@@ -316,7 +326,10 @@ Red first: commit the failing tests and record each failure reason.
   - **If the report contradicts the note**, amend the note within the open review round.
   - **Questions 9-11 (r4)** go into T3's brief. If question 9's answer is that a no-proration price change
     bills or credits the current period, stop T3's move step and go to Quinn: D14's "never on a paid
-    period" would not hold.
+    period" would not hold. If Link sends or requires its own notice (r5: m7), the main session adds it to
+    the note's D14 within the open round before T3's move step. If question 11 says one key's write
+    replaces the others, T3 writes the mark with `metadata[account_id]` read back and resent, and the
+    note says so.
 
 ### T1a. The price catalog (`cloud-engineer`; new in r4)
 
@@ -333,7 +346,9 @@ The one module every billing function reads (note D13). It writes no file and ca
   resolving with one variable unset leaves that entry matching no id and the other resolved.
 - `the_formatter_writes_every_4_weeks_and_once_a_year`: the two phrases, the P9 lines word for word (the
   note's §1), the tax line, the money-back line, and an invented entry at 1399 giving "$13.99 every 4
-  weeks". Generic cadences for unknown prices: "every 2 months", "every week", "every year".
+  weeks". Generic cadences for unknown prices: "every 2 months", "every week", "every year". (r5: I1) The
+  figures it writes for an entry, the list T5's terms tie reads: 1299 gives "$12.99"; 8437 gives "$84.37"
+  and "$6.49"; nothing gives "$6.50".
 - Two catalog tests live elsewhere, because each task merges green: the source scan is T3's red, in its
   own file (the last cloud task, when every literal is gone), and the terms tie is T5's red (when the
   terms change).
@@ -380,7 +395,9 @@ price id, the formatter, the offer). Nothing imports it yet. `TERMS_VERSION` is 
 - `the_form_keeps_every_load_bearing_key`: D7's load-bearing keys are present (the trial key only on a
   first subscription, D5). The dropped keys equal checkpoint A's list exactly. If the fallback applies,
   today's tax keys are pinned instead.
-- `stripes_page_states_the_renewal_terms`: D8's sentence, for each plan and trial combination.
+- `stripes_page_states_the_renewal_terms`: D8's sentence, for each plan and trial combination. (r5: m2) With
+  an invented catalog whose tax phrase or money-back line differs, the sentence carries the invented words:
+  they come from the catalog, not from `handler.ts`.
 - The `index.ts` text-read (`handler_test.ts:331-343`) checks:
   - that it imports the catalog and resolves it from `Deno.env.get`, and holds no cents map (the map at
     `index.ts:16-20` goes);
@@ -461,21 +478,40 @@ price id, the formatter, the offer). Nothing imports it yet. `TERMS_VERSION` is 
   count in `failed`, send nothing, and the next subscriber is still reached. Replaces `:332-363`.
 - `the_cancel_path_names_settings_and_membership`: "Settings", "Membership" and "Manage subscription"
   present, and no "gear".
-- **The move** (r4, D14), with a `KEPT` entry at `move` N = 10:
-  - `a_move_notices_then_marks_then_changes`: a subscriber on that price renewing in 12 days gets one mail
-    (the old and the new amount, the UTC−10 date, the tax line, "Manage subscription"), then one metadata
-    write, then one price change to the selling id with `proration_behavior` "none", in that order;
-  - `no_move_outside_the_window`: 9 days and 17 days away, another price, a `stay` entry, and
-    `cancel_at_period_end` each make no call and send nothing;
+- **The move** (r4, D14), with a `KEPT` entry at `move` N = 10, and `now` fixed:
+  - `a_move_notices_then_marks_then_changes`: an `active` subscriber on that price renewing in 12 days gets
+    one mail (the old and the new amount, the UTC−10 date, the tax line, "Manage subscription"), then one
+    metadata write whose form carries **only the mark key** (no `metadata[account_id]`; r5: m6), then one
+    price change to the selling id with `proration_behavior` "none", in that order;
+  - `the_window_is_exact` (r5: I4): Stripe's `current_period_end` exactly 10 × 24h ahead is moved; 10 × 24h
+    less one second, and exactly 16 × 24h, are not;
+  - `the_window_and_the_date_are_stripes` (r5: I4): the view row says 30 days but the Stripe read says 12
+    (and the reverse, with the view row inside its one-day margin): the decision and the date in the mail
+    follow the Stripe read;
+  - `no_move_outside_the_window`: 9 days and 17 days away, another price and a `stay` entry each make no
+    call and send nothing; `cancel_at_period_end` read from Stripe sends no mail and makes no write
+    (r5: m10; the read itself is the one call);
+  - **`a_raise_leaves_a_trials_first_charge`** (r5: I3, **pending Q15**): selling cents above the `KEPT`
+    entry's; a `trialing` subscription whose trial ends in 12 days gets no mail and no write; the same
+    subscription `active` and renewing in 12 days is moved;
+  - **`a_cut_moves_a_trial`** (r5: I3, **pending Q15**): selling cents below the `KEPT` entry's; the
+    `trialing` subscription is noticed, marked and changed;
+  - `a_yearly_subscriber_is_moved_before_the_yearly_renewal` (r5: I3): a `yearly` `KEPT` entry at `move`
+    N = 20, a subscriber started a year ago whose renewal is 22 days out: noticed, marked and changed to the
+    yearly selling id; one renewing in 40 days is not;
   - `a_failed_notice_changes_nothing`: no metadata write and no price change;
   - `a_noticed_subscription_is_changed_without_a_second_notice`: metadata already names this renewal;
-  - `one_move_failure_does_not_stop_the_run`.
+  - `one_move_failure_does_not_stop_the_run`;
+  - `the_move_comes_before_the_annual_reminder` (r5: m6): a subscriber due both on the same day gets the
+    notice first, and the reminder states the new amount.
+- `index.ts` text-read (r5: m6): every price variable resolved through `Deno.env.get` as optional, never
+  through the file's throwing `env` (`billing-jobs/index.ts:6-10`); no `STRIPE_PRICE_` literal.
 - `no_amount_is_written_outside_the_catalog` (r4; its own new file, `_shared/price_single_source_test.ts`,
-  so T3's files stay disjoint from T1a's): reads every non-test `.ts` file under `billing-checkout/`, `stripe-webhook/`,
-  `billing-jobs/` and `billing-portal/` (deno runs with `--allow-read`, `ci.yml:172`) and fails on a `$`
-  before a digit, a decimal money figure such as `12.99`, any catalog entry's cents as a number token, a
-  `STRIPE_PRICE_` name, "per month" or "a month". Red against `billing-jobs/handler.ts:72-73` until T3's
-  change.
+  so T3's files stay disjoint from T1a's): reads every non-test `.ts` file under `billing-checkout/`,
+  `stripe-webhook/`, `billing-jobs/` and `billing-portal/` (deno runs with `--allow-read`, `ci.yml:172`) and
+  fails on a `$` before a digit, a decimal money figure such as `12.99`, a `STRIPE_PRICE_` name, "per month"
+  or "a month". (r5: m3) No bare-cents rule: it would fail on `fail(500, …)` the day a price is $5.00. Red
+  against `billing-jobs/handler.ts:72-73` until T3's change.
 - The pause and resume tests (`:4-17`, `:70-245`) go with the code. `reminderDue`'s test (`:19-50`), the
   token test (`:52-68`) and the one-failure test (`:247-289`, moved to the new plans) stay.
 
@@ -484,15 +520,24 @@ price id, the formatter, the offer). Nothing imports it yet. `TERMS_VERSION` is 
   (`handler.ts:46-58, 69-75, 92-105, 126-166`). The reply becomes `{ reminded, moved, failed }`.
 - `Deps` gains `catalog`, `getSubscription(id)` (through `stripeGetFrom`, `_shared/stripe.ts:117`) and keeps
   `stripe` (POST) for the move. `index.ts` wires both.
-- The annual reminder and the move run per subscriber inside today's `try/catch` (`:117-178`).
+- The move, then the annual reminder, run per subscriber inside today's `try/catch` (`:117-178`) (r5: m6).
+- Whom the move reads: subscribers whose view `current_period_end` lies within one day either side of some
+  `move` entry's window; the window and the stated date then use the Stripe read (note D14, r5).
+- The raise-or-cut test compares the `KEPT` entry's cents with the selling entry's for the same key.
 - "click the gear" (`:86`) becomes "go to Settings, then Membership".
 
-**Stop rule.** If T0r's question 9 says a no-proration change touches the current period, the move step is
-not built; go to Quinn (checkpoint A's rule).
+**Stop rules.**
+- If T0r's question 9 says a no-proration change touches the current period, the move step is not built;
+  go to Quinn (checkpoint A's rule).
+- **Q15** (the trial rule) is pending. The two trialing tests are written as the note recommends. If Quinn
+  rules the other way before T3 merges, they become "a trial is moved either way" and the raise/cut
+  comparison is not built. T3 may merge with Q15 still open, because `KEPT` is empty at v0.4.1 and no
+  subscriber can be moved; a later ruling the other way is then a small change, and it must land before
+  the first price change that uses `move` (D16 step 0 checks it).
 
 ### S1. Test-mode spike (main session; §8 B; after T1a-T4a)
 
-### T4. Subscribe step and labels (`console-ui`; built as Q5 and Q6 rule)
+### T4. Subscribe step and labels (`console-ui`; Q5 and Q6 settled by the amendment's (8) and (9))
 
 The app renders the server's offer and holds no price (note D9, revised r4). The offer's shape, from T1:
 `{ ok, error, terms_version, plans: [{ plan, amount_cents, lines }], note }`, `plans` Yearly first. The
@@ -515,10 +560,15 @@ command is `checkout_offer` (T4a); `open_checkout` takes `{ plan, amountCents, t
   - The code asks `invoke("checkout_offer"` on entering the step (after `:384-393`'s entitlement check),
     and writes each line with `textContent`; no `innerHTML` takes an offer field.
   - The subscribe panel's markup carries no price line; it keeps its heading and lede.
-- `ui_wizard::without_an_offer_the_plan_buttons_wait` (r4): until an offer is held, both plan buttons are
-  rendered `disabled`; on a failed or incomplete answer the step shows "Prices could not be loaded. Check
-  your connection, then try again." and a Try again button that asks again; nothing is written to
-  `localStorage`, `sessionStorage` or a command that saves.
+- `ui_wizard::without_an_offer_the_plan_buttons_wait` (r4; r5: m1): until an offer is held, both plan
+  buttons are rendered `disabled`, beside a Try again button that asks again. The sentence depends on the
+  failure (note D9):
+  - an `error` that starts with `UNREACHABLE`'s clause ("the account service could not be reached",
+    `account.rs:175`): "Prices could not be loaded. Check your connection, then try again.";
+  - any other `error`: that sentence, as given;
+  - an answer that lacks either plan key: "Prices could not be loaded. Update Knowlu, then try again.".
+
+  Nothing is written to `localStorage`, `sessionStorage` or a command that saves.
 - `ui_settings::membership_shows_no_price` gains "84.37", "6.49" and "14 days".
 - `ui_settings::plan_words_cover_every_plan_billing_can_write`: `four_weekly` and `yearly` have words;
   `monthly` and `academic_year` have none.
@@ -526,6 +576,8 @@ command is `checkout_offer` (T4a); `open_checkout` takes `{ plan, amountCents, t
   - `the_upgrade_sheet_sells_both_plans_yearly_first`: `carried/account.js` sends `yearly` and
     `four_weekly` with the offer's two fields, with the yearly button first, inside `#up-subscribe`.
   - `the_sheet_holds_no_price`: the wizard test's literal rule over `carried/account.js`.
+  - `no_static_script_or_page_writes_a_dollar_amount` (r5: m2): no `.js` or `.html` file under
+    `app/static` matches `\$\d+\.\d\d`. Green today (searched 2026-11-20); the SVG logos are not read.
   - `only_the_two_plan_buttons_start_checkout`: the sheet's click handler starts `subscribe` only from
     `#up-sub-year` or `#up-sub-month`, never from `closest("#up-subscribe")`. Today's handler
     (`carried/account.js:214`) would start a checkout with no plan on a click on the price lines.
@@ -535,9 +587,10 @@ command is `checkout_offer` (T4a); `open_checkout` takes `{ plan, amountCents, t
 - **The DOM checks:**
   - Two new envelopes for `checkout_offer`: an invented offer (Yearly "$9.87 every 4 weeks, billed $128.31
     once a year. Renews yearly."; Every 4 weeks "$1.23 every 4 weeks."; note "Plus tax where it applies."),
-    and a failure.
+    and failures (r5: m1): one unreachable (an `error` starting with `UNREACHABLE`'s clause), one refusal
+    (an invented server sentence), and one offer missing `four_weekly`.
   - `t21.py`: `:16`'s docstring changes. `:264` expects the new labels, exactly the invented envelope's
-    lines and no "trial"; with the failing envelope, both buttons disabled and the retry sentence.
+    lines and no "trial"; with each failing envelope, both buttons disabled and that failure's sentence.
     `:273` expects `[{"plan": "yearly", ...}, {"plan": "four_weekly", ...}]` with the envelope's
     `amount_cents` and `terms_version`.
   - `t16.py::check_settings`: "Active, Every 4 weeks" (`settings.js:185`), with
@@ -560,11 +613,7 @@ command is `checkout_offer` (T4a); `open_checkout` takes `{ plan, amountCents, t
 **Stop rule.** If any `ui_account_privacy.rs` pin must change, stop. That file is T5's, and the main session
 sequences the two.
 
-**If Q5 is "price-free":**
-- the lines are not drawn; the offer is still asked for, for its two fields;
-- the DOM checks expect no lines.
-
-**If Q6 is "one plan":** the sheet keeps one button, sending `four_weekly`.
+*Removed in r5:* the "price-free" and "one plan" branches. The amendment's (8) and (9) settled both.
 
 The DOM runs use `scripts/ui-fixture/run.py`, at both sizes and in both themes.
 
@@ -608,10 +657,13 @@ The DOM runs use `scripts/ui-fixture/run.py`, at both sizes and in both themes.
   before" is absent).
 - `site::the_terms_carry_the_price_change_paragraph` (r4): the legal spec `:625` paragraph, with "between 7
   and 30 days ahead" and "never applies to a period you have already paid for".
-- `price_catalog_test::the_terms_state_the_catalogs_prices` (r4; deno, in T1a's file, which this task may
-  append to): every `$` figure in `site/terms.html` is some catalog entry's; every `SELLING` figure is
-  there; the page's version is `TERMS_VERSION`; and the price-change paragraph names the catalog's 7 and
-  30. Red until the commit below.
+- `price_catalog_test::the_terms_state_the_catalogs_prices` (r4; r5: I1; deno, in T1a's file, which this
+  task may append to): every `$` figure in `site/terms.html` is one the catalog's formatter writes for some
+  entry (its cents, or for a yearly entry its cents ÷ 13: T1a's figure list); every figure the formatter
+  writes for a `SELLING` entry is there; the page's version is `TERMS_VERSION`; and the price-change
+  paragraph names the catalog's 7 and 30. Its own cases, on text the test supplies: "$6.49" passes, "$6.50"
+  fails, a page without "$84.37" fails. The page case is red until the commit below; the supplied-text cases
+  pass from the start, so the red reason recorded is the page's.
 - `site::the_terms_carry_the_interim_terms_clauses`: the legal spec §7 item 8's strings, and no "Alabama".
 - `site::the_terms_promise_no_code_this_release_lacks`: none of "When you subscribe:", "Before the yearly
   plan renews", "A year for someone else" or "does not count as paid".
@@ -663,7 +715,11 @@ only one key ships.
   derived `STRIPE_PRICE_<KEY>_<CENTS>` names, the offer (`GET /billing-checkout`), the six handled event
   types, the 409s, the price check, the move (D14), and a pointer to `docs/reference/price-change.md`.
 - **`docs/reference/app.md`'s release section:** `site.yml` (T10), and the warning that a hand
-  `wrangler pages deploy site` takes the installer and `latest.json` off knowlu.com (note D15).
+  `wrangler pages deploy site` takes the installer and `latest.json` off knowlu.com (note D15). (r5: I6)
+  The recovery it names is `site.yml`, or a hand restore from the latest Release's assets into a `main`
+  checkout's `site/releases/` followed by the same deploy, on Quinn's word; **never a re-run of a tag's
+  `publish` job**, which puts that tag's `site/` (old terms, after a price change) back live, and whose
+  artifact lasts 7 days (`release.yml:262`).
 - **Marker lines** in the legal spec (§5's "Terms + Privacy B" row and the interim block; C25 narrowed to
   the privacy page, if Q14 is yes) and in the v0.4.0 note (A2's wizard clause, ended by this lane, and §13
   item 1).
@@ -675,12 +731,20 @@ Note D15. It does not gate the v0.4.1 tag; it must merge before the first price 
 **Red** (`engine/tests/workflows.rs`, beside today's pins):
 - `site_yml_is_started_by_hand_only`: `on:` is `workflow_dispatch` and nothing else.
 - `site_yml_runs_from_main_only`: a step refuses any `github.ref` but `refs/heads/main`.
-- `site_yml_restores_the_release_files_first`: before the deploy step, it downloads the latest release's
-  versioned installer and, when the release has one, `latest.json` (`release.yml:307-311` names them) into
+- `site_yml_reads_one_tag` (r5: I5): one step reads the latest Release's `tagName` (for example
+  `gh release view --json tagName`), and the restore and the privacy comparison both use that value; the
+  file never names "latest" a second way (no `git describe`, no second `gh release` lookup).
+- `site_yml_refuses_a_newer_tag_or_a_running_release` (r5: I5): it stops when any `v*` tag sorts after the
+  Release's tag, and when a `release.yml` run is queued or in progress.
+- `site_yml_has_a_concurrency_group_and_the_release_environment` (r5: I5): a `concurrency:` group of its
+  own, and its one job declares `environment: release`, as `release.yml`'s publish job does (`:281`;
+  pinned beside `workflows.rs:190`).
+- `site_yml_restores_the_release_files_first`: before the deploy step, it downloads that Release's
+  versioned installer and, when the Release has one, `latest.json` (`release.yml:307-311` names them) into
   `site/releases/`, copies the installer to `Knowlu-setup.exe` (`scripts/release.ps1:297`), and fails if
   the installer is missing.
-- `site_yml_refuses_a_changed_privacy_page`: it compares `site/privacy.html` with the latest `v*` tag's
-  and stops if they differ.
+- `site_yml_refuses_a_changed_privacy_page`: it compares `site/privacy.html` with that tag's and stops if
+  they differ.
 - `site_yml_deploys_as_the_release_does`: the same pinned `wrangler-action` SHA and `pages deploy site
   --project-name knowlu --branch main` (`release.yml:294-298`), and a `deploy_branch` input that defaults to
   `main` and allows a preview branch.
@@ -688,8 +752,9 @@ Note D15. It does not gate the v0.4.1 tag; it must merge before the first price 
   (`workflows.rs:216-217`; that pin names only `release.yml`). The SHA pin (`:47`) already reads every
   workflow file (`:13-21`), so it covers `site.yml` unchanged.
 
-**Change.** `.github/workflows/site.yml`, GitHub-hosted, `permissions: contents: read`, the same
-`CLOUDFLARE_*` secrets as `release.yml:296-297`.
+**Change.** `.github/workflows/site.yml`, GitHub-hosted, `permissions: { contents: read, actions: read }`
+(`actions: read` to see `release.yml`'s runs), `environment: release`, the same `CLOUDFLARE_*` secrets as
+`release.yml:296-297`. `release.yml` is not edited.
 
 **Stop rule.** If the waitlist lane's site-only deploy (W-D3) has merged, do not add a second workflow:
 narrow its legal-page guard to `site/privacy.html` and add the restore if it lacks one. If it is open,
@@ -701,7 +766,10 @@ stop; the main session sequences the two.
 ### T11. The price-change runbook (`docs-keeper`; new in r4)
 - Write `docs/reference/price-change.md` from note D16, step for step, with the final names from T1a-T4a
   and T10: the variable names, the catalog's fields, the commands to deploy the three functions, the
-  `site.yml` dispatch, and each check. Each live step says "on Quinn's word".
+  `site.yml` dispatch, and each check. Each live step says "on Quinn's word". (r5) It carries D16's
+  preconditions (privacy page equal to the latest Release's; Q15 ruled under `move`), the reuse rule for
+  an amount the key has had before, the every-status check before a `KEPT` entry goes, the documents list,
+  "a plan change needs a release", and D15's recovery rule (never a tag re-run).
 - Add the S2 lessons the main session records.
 - A pointer from `cloud/supabase/README.md`'s Billing section (T6).
 - `reviewer` checks it against D16 row by row; no step may be missing or reordered.
@@ -738,25 +806,32 @@ rests on S1, a proof, a review or Quinn.
 | D7 | load-bearing keys kept; only allowed keys dropped | T1, checkpoint A | `billing-checkout::the_form_keeps_every_load_bearing_key` |
 | D7 ⚑ | reading (i) or (ii); the test-mode gates (a)-(e) | T0r, S1 | T0r's report; the S1 report |
 | D7 | `_shared/stripe.ts` untouched | T1 | T8's diff check |
-| D8 | the renewal sentence | T1 | `billing-checkout::stripes_page_states_the_renewal_terms`; S1 (a); step 10b |
+| D8 | the renewal sentence; its tax and money-back words from the catalog (r5) | T1 | `billing-checkout::stripes_page_states_the_renewal_terms` (with the invented-words case); S1 (a); step 10b |
 | D9 | the offer from the server: one catalog, one bundle | T1, T4a | `billing-checkout::the_offer_is_the_catalogs`; `account::checkout_offer_at_reads_the_offer` |
 | D9 | the purchase sends the offer back | T4a, T4 | `account::checkout_url_at_sends_the_offer_it_was_given`; `ui_wizard::the_subscribe_buttons_send_the_signed_plans`; DOM t21 (`:273`) |
 | D9 | the app holds no price and renders what it is sent; order; no trial words | T4 | `ui_wizard::the_wizard_holds_no_price_and_renders_the_offer`; `ui_plans::the_sheet_holds_no_price`; DOM t21 and t20 with the invented envelope |
-| D9 | no offer, no figure; nothing cached | T4 | `ui_wizard::without_an_offer_the_plan_buttons_wait`; DOM t21 with the failing envelope |
+| D9 | no offer, no figure; nothing cached; each failure names its reason (r5) | T4 | `ui_wizard::without_an_offer_the_plan_buttons_wait`; DOM t21 with the three failing envelopes |
+| D13 | no dollar amount in any app script or page (r5) | T4 | `ui_plans::no_static_script_or_page_writes_a_dollar_amount` |
 | D9 | the sheet sells both plans; only the buttons start checkout | T4 | `ui_plans::the_upgrade_sheet_sells_both_plans_yearly_first`, `::only_the_two_plan_buttons_start_checkout`; DOM t20 |
 | D9 | Settings words, and no price | T4 | `ui_settings::plan_words_cover_every_plan_billing_can_write`, `::membership_shows_no_price`; `ui_plans::every_plan_the_catalog_can_name_has_a_word`; DOM t16 |
 | D9 ⚑ | the portal has no switching | Quinn | the checklist; S1 (d) |
 | D10 | the pause removed; the annual reminder states the subscriber's own price from the catalog; the cancel path | T3 | `billing-jobs::no_subscriber_is_ever_paused`, `::the_annual_reminder_states_the_subscribers_own_price`, `::a_kept_price_is_reminded_at_its_own_amount`, `::an_unknown_price_is_never_mailed`, `::the_cancel_path_names_settings_and_membership` |
 | D13 | one catalog; its rules; derived variable names; one formatter | T1a | the six `price_catalog_test` pins |
 | D13 | no amount outside the catalog on the server | T3 | `price_single_source_test::no_amount_is_written_outside_the_catalog` |
-| D13 | the terms state the catalog's prices and version | T5 | `price_catalog_test::the_terms_state_the_catalogs_prices`; `bundle_config::the_terms_version_constant_is_the_published_terms_date` |
-| D14 | `stay` and `move`: notice first, then mark, then change; the window; retries; no second notice | T3 | the five move pins; `price_catalog_test::a_move_entry_notices_inside_seven_to_thirty_days` |
-| D14 ⚑ | a no-proration change leaves the paid period alone, in Stripe's test mode | T0r, S2 | T0r's answer 9; S2 (Quinn reads the upcoming invoice) |
+| D13 | the terms state the formatter's figures ($6.49 included, $6.50 refused) and the catalog's version (r5: I1) | T1a, T5 | `price_catalog_test::the_formatter_writes_every_4_weeks_and_once_a_year` (its figure list), `::the_terms_state_the_catalogs_prices`; `bundle_config::the_terms_version_constant_is_the_published_terms_date` |
+| D14 | `stay` and `move`: notice first, then a mark carrying only its key, then change; retries; no second notice; one failure never stops the run | T3 | `billing-jobs::a_move_notices_then_marks_then_changes`, `::a_failed_notice_changes_nothing`, `::a_noticed_subscription_is_changed_without_a_second_notice`, `::one_move_failure_does_not_stop_the_run`, `::no_move_outside_the_window`; `price_catalog_test::a_move_entry_notices_inside_seven_to_thirty_days` |
+| D14 | the window's exact edges, on Stripe's value, which also gives the stated date (r5: I4) | T3 | `billing-jobs::the_window_is_exact`, `::the_window_and_the_date_are_stripes` |
+| D14 | the trial rule: a raise skips a trial's first charge, a cut moves it (r5: I3, **pending Q15**) | T3 | `billing-jobs::a_raise_leaves_a_trials_first_charge`, `::a_cut_moves_a_trial` |
+| D14 | a yearly subscriber is moved through the window before the yearly renewal (r5: I3) | T3 | `billing-jobs::a_yearly_subscriber_is_moved_before_the_yearly_renewal` |
+| D14 | the move before the annual reminder; every price variable optional (r5: m6) | T3 | `billing-jobs::the_move_comes_before_the_annual_reminder`; the `index.ts` text-read |
+| D14 ⚑ | a no-proration change leaves a **paid** period alone, in Stripe's test mode (r5: I2) | T0r, S2 | T0r's answer 9; S2 (e): the paid invoice unchanged, no proration line, the upcoming invoice at the new amount |
+| D14 ⚑ | under a raise, a trialing subscription is left alone in test mode (pending Q15) | S2 | S2 (d) |
 | D15 | checkout records the server's terms version; no build refused for its age | T1, T4a | `billing-checkout::a_changed_offer_is_refused`; `account::checkout_url_at_sends_the_offer_it_was_given` |
-| D15 | `site.yml`: by hand, `main` only, restore first, privacy refused, never self-hosted | T10 | the six `workflows` pins |
+| D15 | `site.yml`: by hand, `main` only, one tag, no newer tag or running release, its own concurrency, the `release` environment, restore first, privacy refused, never self-hosted (r5: I5) | T10 | the nine `workflows` pins |
+| D15 ⚑ | recovery is `site.yml` or a hand restore from the Release, never a tag re-run (r5: I6) | T6, T11 | `reviewer` reads `app.md` and the runbook against D15 |
 | D15 ⚑ | a site-only run keeps the installer and `latest.json` live | T10, T9 | T10's preview run; §8 C step 14 |
 | D15 ⚑ | a catalog change reaches an unchanged build | S2 | S2 (b) |
-| D16 | the runbook covers every step of D16 | T11 | `reviewer`, row by row; S2's lessons in it |
+| D16 | the runbook covers every step of D16, with r5's preconditions, reuse rule, every-status check, documents list and plan-change rule | T11 | `reviewer`, row by row; S2's lessons in it |
 | D11 | the terms text; no gift paragraph; no old-subscriber paragraph; the price-change paragraph | T5 | `site::the_terms_state_the_signed_prices`, `::the_terms_carry_the_interim_terms_clauses`, `::the_terms_promise_no_code_this_release_lacks`, `::the_terms_carry_the_price_change_paragraph`; `reviewer`; Quinn reads the terms |
 | D11 | the version tie; `subscribed.html` | T5 | `bundle_config::the_terms_version_constant_is_the_published_terms_date`; `site::the_subscribed_page_names_fourteen_days` |
 | D11 ⚑ | existing accounts | T0, T5b, T9 | the ledger's count; §8 C step 12, or T5b's tests |
@@ -776,7 +851,7 @@ rests on S1, a proof, a review or Quinn.
 | Checkpoint | When | Who | Passes when |
 |---|---|---|---|
 | Note and plan review | done: r1 FAIL, r2 PASS with changes, r3 applies them | `reviewer`; the controller checks r3 against r2's list before T0; then Quinn | the note's §8 settled by Quinn |
-| r4 delta review | after r4 | `reviewer`, on the note's §10 rows and the plan's §12 only | PASS; what stays open goes to Quinn as a short list |
+| r4 delta review | round 1 done: PASS with changes (`docs/reports/2026-11-20-v041-pricing-r4-review.md`); r5 applies it. Round 2 after r5 | `reviewer`, on the *Revision r5* tables only | PASS; what stays open goes to Quinn as a short list (the third-round rule) |
 | **A** | after T0r | main session | every question answered; T1's and T3's briefs written; a refused load-bearing key, or a no-proration change that touches the paid period, goes to Quinn |
 | Cloud review | T1a-T3 green | `reviewer` | PASS, with red-first visible |
 | Offer command | T4a green | `contract-reviewer` | PASS |
@@ -847,10 +922,10 @@ rests on S1, a proof, a review or Quinn.
   - what the portal offers.
 
 **B. S2, the price-change rehearsal (r4; after S1, on the same T4 build, unchanged)**
-- [ ] **S2 (a), setup.** Quinn creates a test-mode price on the product at an amount other than 12.99 (an
-      invented one; it never goes live), week × 4, tax-exclusive. The main session sets its
+- [ ] **S2 (a), setup.** Quinn creates a test-mode price on the product at an invented amount **above**
+      12.99 (a raise; it never goes live), week × 4, tax-exclusive. The main session sets its
       `STRIPE_PRICE_FOUR_WEEKLY_<CENTS>` on staging. Account C (a fresh scratch account) completes a
-      `four_weekly` checkout at 1299 with a test card; it is `trialing`, renewing about 14 days out.
+      `four_weekly` checkout at 1299 with a test card; it is `trialing`, its trial ending about 14 days out.
 - [ ] **S2 (b), the change reaches the app.** On a scratch branch `v041/s2-rehearsal`, never merged, the
       catalog's only change: the new amount becomes `four_weekly`'s `SELLING` entry, and 1299 moves to `KEPT`
       with `stay`. Deploy the three functions from it. With **no rebuild**, the T4 build shows the
@@ -862,14 +937,29 @@ rests on S1, a proof, a review or Quinn.
       statement is `unverified`: the main session copies it from `cron.job` at the time.
 - [ ] **S2 (c), stay first.** With 1299's `KEPT` rule set to `stay`, run the job: account C gets no mail, and
       its subscription is unchanged.
-- [ ] **S2 (d), then move.** Set the rule to `move`, N = 10, on the scratch branch; redeploy `billing-jobs`;
-      run the job. Account C (renewing 10 to 16 days out) gets one notice naming both amounts and the date.
-      Quinn reads the test subscription: the metadata mark, the new price, and an upcoming invoice at the new
-      amount with no proration for the period in progress. A second run sends no second notice and changes
-      nothing more. `entitlements` still reads `four_weekly`.
-- [ ] **S2 (e), back.** Redeploy the three functions from the integration branch. Quinn cancels account C's
-      subscription and archives the invented test price; the main session unsets its variable. The S1
-      report gains an S2 section (counts and wording only), and the runbook lessons go to T11.
+- [ ] **S2 (d), move on a trial** (r5: I2, I3). Set the rule to `move`, N = 10, on the scratch branch;
+      redeploy `billing-jobs`; run the job. Account C's trial ends 10 to 16 days out, and this is a raise, so
+      under D14's trial rule (**pending Q15**) it gets no mail and its subscription is unchanged. *If Q15 has
+      been ruled "move a trial either way" by then:* C gets the notice and the change here, and (e) uses a
+      second scratch account set up as in (a).
+- [ ] **S2 (e), move on a paid period** (r5: I2). This is the step that tests D14's promise.
+  1. Quinn ends account C's trial now in the test Dashboard, so the test card is charged 12.99 and a
+     28-day period starts, paid. The webhook writes `active`. (A Stripe test clock is another way to reach a
+     paid period.)
+  2. Set N = 22 on the scratch branch, so the renewal about 28 days out falls inside 22 × 24h to 28 × 24h;
+     redeploy `billing-jobs`; run the job.
+  3. Account C gets one notice naming both amounts and the renewal date.
+  4. Quinn reads three things in the test Dashboard: **the paid invoice is unchanged** (12.99, no credit
+     note); **no proration line or pending invoice item exists**; **the upcoming invoice is at the new
+     amount**, on the same renewal date. Also the metadata mark, with `account_id` still present.
+  5. A second run sends no second notice and changes nothing more. `entitlements` still reads
+     `four_weekly`.
+
+  If any of the three reads fails, stop: D14's `move` does not ship, and checkpoint B goes to Quinn.
+- [ ] **S2 (f), back.** Redeploy the three functions from the integration branch. Quinn cancels account C's
+      subscription (and the second account's, if used) and archives the invented test price; the main
+      session unsets its variable. The S1 report gains an S2 section (counts and wording only), and the
+      runbook lessons go to T11.
 
   Then checkpoint B.
 
@@ -946,10 +1036,15 @@ rests on S1, a proof, a review or Quinn.
       offers 0.4.1 to a v0.4.0 install. Then unset `STRIPE_PRICE_MONTHLY` and `STRIPE_PRICE_YEAR` on both
       projects (r4).
 - [ ] **14. T10's first live run** (r4; after T10 merges and its preview run passed; on Quinn's word):
-      dispatch `site.yml` on `main` with `site/` unchanged. Then knowlu.com serves the same pages,
-      `/releases/Knowlu-setup.exe`, the versioned installer and `latest.json`, and the updater still offers
-      0.4.1. If any is missing, re-run the tag's `publish` job (`gh run rerun <id> --failed` restores from the
-      build artifact while it lasts, `release.yml:262`) and stop: `site.yml` is not used until fixed.
+  1. (r5: m9) `git diff v0.4.1 main -- site/` is empty; record it. If not, stop: the run would publish
+     what the tag did not.
+  2. Dispatch `site.yml` on `main`.
+  3. knowlu.com serves the same pages, `/releases/Knowlu-setup.exe`, the versioned installer and
+     `latest.json`, and the updater still offers 0.4.1.
+  4. If any is missing (r5: I6): the hand restore from the v0.4.1 Release's assets into a `main` checkout's
+     `site/releases/`, then the same deploy, on Quinn's word; and stop: `site.yml` is not used until fixed.
+     Never a re-run of the tag's `publish` job: its artifact lasts 7 days (`release.yml:262`), and this step
+     may come weeks after the tag.
 
 **D. Pre-tag gate (before step 11)**
 - [ ] The merge tree equals the proved tree, or the proof restarts.
@@ -978,17 +1073,20 @@ rests on S1, a proof, a review or Quinn.
 | Managed Payments needs `_shared/stripe.ts` changed | T1 | Stop. Seven functions would redeploy. |
 | `trial_will_end` is not delivered in test mode | S1 (c) | Checkpoint B. Recommend holding: a missing reminder makes the first charge refundable. |
 | The portal cannot cancel these subscriptions in one click | S1 (d) | Checkpoint B, then the fallback (D7). |
-| A Dashboard price is wrong | D4's 500, on staging or at step 10b | Quinn corrects it with a new Price at the same amount; the derived variable is set to the new id (the only time one is re-pointed: nothing was sold on the old). |
+| A Dashboard price is wrong | D4's 500, on staging or at step 10b | Quinn corrects it with a new Price at the same amount, archives the wrong one, and the derived variable is set to the new id. This is the one exception to D16 step 1's "never a second Price at the same key and cents" (r5: m4), allowed only because D4 refused every sale on the wrong one. |
 | An unset price value on the webhook | the deliveries at step 10 | It cannot answer 500 (D2). An unknown id shows as `plan: null` and as a `billing-jobs` failure. |
 | T0 finds a paying subscription that is not Quinn's (r4) | T0's counts, or step 7 | Stop. Ruling (6)'s premise is false; the lane goes back to Quinn before anything is built on it. |
 | The catalog and the terms page disagree (r4) | `price_catalog_test::the_terms_state_the_catalogs_prices` in CI | The PR cannot merge. Never fixed by editing the test. |
 | An amount creeps back outside the catalog (r4) | `price_single_source_test::no_amount_is_written_outside_the_catalog` in CI | The PR cannot merge; the amount moves into the catalog. |
-| Stripe's no-proration change touches the paid period (r4) | T0r question 9, or S2 (d)'s upcoming invoice | Checkpoint A or B: the move is not built or not shipped (T3's stop rule), `stay` alone ships, and Quinn is told. D14's text is amended within the open round. |
+| Stripe's no-proration change touches the paid period (r4) | T0r question 9, or S2 (e)'s three reads on a paid period | Checkpoint A or B: the move is not built or not shipped (T3's stop rule), `stay` alone ships, and Quinn is told. D14's text is amended within the open round. |
 | A move's mark fails after its notice was sent (r4) | `failed` in the job's reply; a second notice the next day | Accepted: the student gets the same notice twice, never a change without one. The run log names the account id only. |
 | The offer cannot be read (r4) | B0; `checkout_offer` errors | The plan buttons wait and say why (D9); nothing sells on a stale figure. A staging outage blocks S1 until fixed. |
-| S2's scratch functions left deployed (r4) | checkpoint B | S2 (e) redeploys the lane's; checkpoint B reads each function's offer, and an invented figure stops it. |
-| Someone runs `wrangler pages deploy site` by hand (r4) | knowlu.com's `/releases/Knowlu-setup.exe` or `latest.json` 404 | Re-run the tag's `publish` job, or `site.yml` once T10 has merged. T6 writes the warning into `docs/reference/app.md`. |
-| `site.yml` drops the installer on its first run (r4) | §8 C step 14's check | Re-run the tag's `publish` job (`release.yml:262`'s artifact, while it lasts) and stop using `site.yml` until fixed. Its preview run comes first so this is caught off the live site. |
+| S2's scratch functions left deployed (r4) | checkpoint B | S2 (f) redeploys the lane's; checkpoint B reads each function's offer, and an invented figure stops it. |
+| Someone runs `wrangler pages deploy site` by hand (r4) | knowlu.com's `/releases/Knowlu-setup.exe` or `latest.json` 404 | (r5: I6) A `site.yml` run once T10 has merged; before that, or if it cannot run, a hand restore from the latest Release's assets into a `main` checkout's `site/releases/`, then the same deploy, on Quinn's word. **Never re-run a tag's `publish` job**: after a price change it puts the old terms back live while checkout records the new version, and its artifact lasts 7 days (`release.yml:262`). T6 writes this into `docs/reference/app.md`. |
+| `site.yml` drops the installer on its first run (r4) | §8 C step 14's check | The hand restore above, on Quinn's word, and stop using `site.yml` until fixed (r5: I6). Its preview run comes first so this is caught off the live site. |
+| `site.yml` would publish something the tag did not (r5: m9) | `git diff v0.4.1 main -- site/` is not empty before step 14 | Step 14 waits until the difference is meant to go live (a price change's PR, by D16) or is gone. |
+| `site.yml` runs during a release, or after a failed one (r5: I5) | a `v*` tag newer than the latest Release, or a running `release.yml` | It refuses (T10's pins). Finish or fix the release first. |
+| Q15 is ruled "move a trial either way" after T3 merges (r5) | Quinn's answer | A small T3 follow-up drops the raise/cut comparison and flips the two trialing tests. It must land before the first price change that uses `move` (D16 step 0); `KEPT` is empty until then. |
 | The waitlist lane's site-only deploy (W-D3) and T10 collide (r4) | T10 start | T10's stop rule: one workflow, the restore, the narrowed guard. |
 | Counts change between T0 and step 7 | step 7 | Stop and tell Quinn. A new account that is not Quinn's makes T5b required. |
 | The reminder does not arrive in 10b | 10b step 4 | Quinn cancels at 30 minutes anyway, and the `canceled` read-back comes before `DELETE`. The gate is recorded as failed, and Quinn decides at D whether to hold the tag. |
@@ -1039,12 +1137,12 @@ Quinn's call.
    subscription is kept at an old price, under any name, so there is nothing to map (D1).
 2. **When billing moves.** In v0.4.1 (Quinn, 2026-11-19), against v0.5.0 in the v0.4.0 note and the legal
    spec. The rest of the billing lane stays in v0.5.0 (note §7).
-3. **A2 against P9.** A2's wizard clause ends with this lane, so P9 governs, and the subscribe step shows the
-   prices (D9). Quinn confirms (Q5). If the app is to stay price-free, Q1's amendment narrows P9 in
-   writing.
-4. **The upgrade sheet.** It shows both plans, Yearly first, replacing the 2026-09-14 one-plan ruling (Q6).
-5. **The gift year.** R3 says to keep it if the amendment has it, and it does. These terms still leave it out
-   until the gift lane ships (Q7).
+3. **A2 against P9.** Settled by the amendment's (8): A2's wizard clause ends with this lane, P9 governs,
+   and the subscribe step shows the prices (D9).
+4. **The upgrade sheet.** Settled by the amendment's (9): both plans, Yearly first, replacing the
+   2026-09-14 one-plan ruling.
+5. **The gift year.** Settled by the amendment's (10): it stays signed, and these terms leave it out until
+   the gift lane ships.
 6. **Where the reminder lives.** The amendment's consequences list it under `billing-jobs`. That list is
    marked "not done by this amendment" and leaves mechanisms to the plan. The webhook sends it (D6), for
    the reasons D6 gives. P14's text is met either way.
@@ -1069,7 +1167,11 @@ Quinn's call.
     `TOS_VERSION` still moves in the change's PR and reaches students with the next ordinary release (D15).
 15. **"Lower or raise."** Both follow D16's steps. A cut under `move` lowers the renewal; under `stay` the
     student keeps paying the old, higher price until they cancel. The amendment for a cut should say which
-    it means; the note does not choose (D14).
+    it means; the note does not choose (D14). The one place raise and cut differ in code is the trial rule
+    (D14, pending Q15).
+16. **"Proper adjustments" and adding a plan** (r5: m11). Read as amounts only. Adding or dropping a plan
+    key (the 6-month open item) needs an app release and its own lane, because the app's buttons are per
+    key (D16).
 
 ## 12. Revision 2026-11-20 (Quinn's ruling)
 
@@ -1107,5 +1209,33 @@ r4 follows the note's §10. A delta review reads the rows below and the note's �
 `monthly`; `ui_plans::the_shown_prices_are_the_charged_cents` and `::the_sheet_states_the_same_prices`
 (nothing to compare: the app holds no figure); the four price lines written into `wizard.js`.
 
-**What still needs Quinn before work starts:** Q14 (the note's §8 item 14), with Q2, Q4, Q8, Q10 to Q13 as
-before. Q5 to Q7 are settled when Amendment 2026-11-17 is signed.
+**What still needed Quinn at r4:** Q14, with Q2, Q4, Q8, Q10 to Q13. (r5: Q5 to Q7 are now settled by the
+signed amendment, and Q15 is added; the open list is under *Revision r5*.)
+
+### Revision r5 (the r4 delta review, and the amendment signed)
+
+r5 applies `docs/reports/2026-11-20-v041-pricing-r4-review.md` with the note's §10 *Revision r5*. Round 2
+reads these rows and that table only.
+
+| Finding | Plan change |
+|---|---|
+| I1 | T1a's formatter pin lists the figures it writes (1299 → "$12.99"; 8437 → "$84.37" and "$6.49"); T5's terms tie counts those figures, with "$6.49" passing and "$6.50" failing on supplied text; ledger D13. |
+| I2 | §8 S2: a raise; (d) on a trial; (e) on a paid period after ending the trial, N = 22, with Quinn's three reads; (f) back; ledger D14 ⚑ rows; §9's proration row reads S2 (e). |
+| I3 | T3: `a_raise_leaves_a_trials_first_charge`, `a_cut_moves_a_trial` (pending Q15) and `a_yearly_subscriber_is_moved_before_the_yearly_renewal`; T3's Q15 stop rule; §3 Q15; §9 row. |
+| I4 | T3: `the_window_is_exact` and `the_window_and_the_date_are_stripes`; whom the move reads; ledger D14. |
+| I5 | T10: `site_yml_reads_one_tag`, `site_yml_refuses_a_newer_tag_or_a_running_release`, `site_yml_has_a_concurrency_group_and_the_release_environment`; `actions: read`; ledger D15 (nine pins); §9 row. |
+| I6 | §8 C step 14, §9's two site rows, T6's `app.md` text, T11: recovery is `site.yml` or a hand restore from the Release, never a tag's `publish` re-run. |
+| m1 | T4: three failure sentences (unreachable, refusal, missing plan) and three failing DOM envelopes; ledger D9. |
+| m2 | T1: D8's tax and money-back words from the catalog (invented-words case); T4: `no_static_script_or_page_writes_a_dollar_amount`; T11 carries D16's documents list. |
+| m3 | T3: the source scan drops the bare-cents rule. |
+| m4 | T0r question 10 asks about unarchiving; §9's wrong-price row is the one allowed exception; T11 carries the reuse rule. |
+| m5 | T0r question 10 asks about the every-status list; T11 carries the check. |
+| m6 | T3: the mark carries only its key; the move before the annual reminder; the `index.ts` text-read; T0r question 11 and checkpoint A's fallback. |
+| m7 | T0r question 9 asks about Link's own notice; checkpoint A adds it to D14 if so. |
+| m8 | Status, the code-read list, §3 (Q1, Q5-Q7 settled; Q14 cites Reading (7)), T4's heading and the §4 rows, §11 items 3-5; T4's price-free and one-plan branches removed. |
+| m9 | §8 C step 14 records an empty `git diff v0.4.1 main -- site/` first; §9 row; T11 carries D16 step 0's privacy precondition. |
+| m10 | T3: cancelling at period end is "no mail and no write". |
+| m11 | §11 item 16; T11 carries "a plan change needs a release". |
+
+**Open for Quinn after r5:** Q2, Q4, Q8, Q10, Q11, Q12, Q13, Q14 and Q15 (the note's §8 items of the same
+numbers).
