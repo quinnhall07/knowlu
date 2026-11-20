@@ -11,7 +11,7 @@
 | # | Decision | Consequence |
 |---|---|---|
 | D1 | **Build on the cloud, both meanings, CI first.** Releases are built and signed by CI; the backend is hosted. | Plan C0 (CI) is the first plan. The laptop leaves the release path; the updater keypair is regenerated and exists only in CI secrets. |
-| D2 | **No free tier. One edition. $9.99/month. An account is required.** *(amended 2026-10-16: a $39.99 6-month term replaces the academic-year price, and Pell Grant recipients pay 75% less; see the amendment at the end)* | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
+| D2 | **No free tier. One edition. $9.99/month. An account is required.** *(amended 2026-11-10: $12.99 every 4 weeks, or $6.49 every 4 weeks billed $84.37 a year; Pell Grant recipients pay 50% less; see Amendment 2026-11-10 at the end)* | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
 | D3 | **All three judgments — enrichment, event verdicts, email triage — run in the cloud. No local runs.** Cheapest models that do the job. | Plan 3a's llama.cpp runtime, install UI and digest table are removed (C4). The judge *seam* stays; its tier 3 becomes an HTTP call to our service. |
 | D4 | **The deterministic, offline-capable core stays in the app; everything that depends on the internet moves to the cloud — as much as possible.** *(amended 2026-09-17 — see the amendment at the end)* | The app keeps: vault, ranking, capacity, rendering, journal, scheduler, the deterministic parsers' *input fetch* for credentialed portals (§4.3). The cloud gets: accounts, entitlement, judgment, email ingestion, event feeds, sync, analytics, updates. |
 | D5 | **Analytics:** (a) interaction events and (b) corrections to AI judgments, collected automatically under the ToS; (c) raw content only behind a separate opt-in; issue reports carry diagnostic context. | §6. Gmail-derived content is excluded from (c) by Google policy regardless of opt-in (§9). |
@@ -132,7 +132,7 @@ Git commit/push/rebase (`history.rs`); the model runtime; the free-tier/entitlem
 - **Identity:** Supabase Auth, email + password with email confirmation, plus magic-link sign-in. No social login at launch (one path to test, one path to support). Sessions are JWTs the app stores in Credential Manager under `knowlu/<profile_id>/session`; refresh is the SDK's; sign-out revokes.
 - **Account row:** `accounts(id, email, created_at, tos_version, tos_accepted_at, privacy_version, age_attested_at, stripe_customer_id, status)`. **No birthdate, ever** — the 18+ attestation is a boolean with a timestamp (§9 Q2).
 - **Entitlement:** `entitlements(account_id, plan, status, current_period_end, source)` written only by the Stripe webhook handler. The app calls `GET /entitlement` at launch and every 6 h; the answer is cached in `settings.json` with a **72-hour grace** so a dead hotel Wi-Fi never blanks today's page; past grace the page shows a banner and the slots keep ranking but the cloud steps are skipped as named steps (`judge (skipped: no entitlement)`), never a failed slot.
-- **Billing:** Stripe Checkout (hosted) for sign-up, Stripe Customer Portal for cancel/update card, Stripe Tax for Kentucky and any other registrations. A cancel link is in the settings panel and in every billing email (§9 Q8). Summer auto-pause (VISION) is *recommended* as a Stripe pause_collection on a June–August schedule; **confirm** (§11).
+- **Billing:** Stripe Checkout (hosted) for sign-up, Stripe Customer Portal for cancel/update card, Stripe Tax for Kentucky and any other registrations. A cancel link is in the settings panel and in every billing email (§9 Q8). Summer auto-pause (VISION) is *recommended* as a Stripe pause_collection on a June–August schedule; **confirm** (§11). *(amended 2026-11-10: new subscriptions have no summer pause; see Amendment 2026-11-10 at the end)*
 - **Deletion right:** `DELETE /account` cascades: entitlement cancelled at period end via Stripe, judgments/corrections/events/issues rows deleted, storage objects deleted, a tombstone `(email_hash, deleted_at)` kept 90 days for abuse control, then gone.
 - **Anti-cracking, honestly:** the client is inspectable and always will be. What cannot be copied is server-side: the entitlement check every 6 h, the prompts and grammars (never shipped in the binary from C2 on), the parsers for credentialed portals (§4.3), the rule table, the sync. A patched client with no valid session gets no judgments, no ingestion, no sync — which is to say, it gets the deterministic ranking of an empty vault.
 
@@ -338,8 +338,8 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 | # | Recommendation | Ruling |
 |---|---|---|
 | R1 | Start the Google verification track in C1 week 1 — domain, privacy policy, consent screen, demo video — so it is not on C2's critical path | yes (default) |
-| R2 | A 7-day free trial on the $9.99 plan (card up front, cancel any time) — the first-session moment is the retention lever and a wall before it costs more than a week of inference | yes (default) |
-| R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | **both kept — Quinn, 2026-09-09.** *(amended 2026-10-16: the academic-year price is replaced by a $39.99 6-month term; the pause stands; see the amendment at the end)* The pause is the one thing nobody else does; it halves summer revenue and that cost is accepted. Implemented as a Stripe `pause_collection` schedule (C1) |
+| R2 | A 7-day free trial on the $9.99 plan (card up front, cancel any time) — the first-session moment is the retention lever and a wall before it costs more than a week of inference | yes (default) *(amended 2026-11-10: the trial is 14 days; see Amendment 2026-11-10 at the end)* |
+| R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | **both kept — Quinn, 2026-09-09.** *(amended 2026-11-10: there is no academic-year price or term, and new subscriptions have no summer pause; see Amendment 2026-11-10 at the end)* The pause is the one thing nobody else does; it halves summer revenue and that cost is accepted. Implemented as a Stripe `pause_collection` schedule (C1) |
 | R4 | Client-side encryption of note bodies in sync (account-derived key) | yes (default); it forecloses server-side search we do not need *(amended 2026-09-17 — see the amendment at the end)* — **reversed** |
 | R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes (default) |
 | R6 | Staging Supabase project + test Stripe from day one | yes (default) |
@@ -989,3 +989,244 @@ The rest of the pilot paragraph (the A13 sentence and the quiet-release sentence
 - Whether L10's friends' releases satisfy the Pilot's "v0.1.1 built by CI" item.
 - The VISION wording that places the syllabus read (L5) in a stage: VISION's Build order names it in none; left for a later amendment.
 - The registrar at schools other than the first: VISION's pilot paragraph says the pilot adds it, but ruling 10's Pilot list has no registrar item once the UA registrar moved to the MVP; a later amendment adds the line before Pilot planning.
+
+## Amendment 2026-11-10 — the price: $12.99 every 4 weeks, $84.37 a year, a 50% Pell price, a 14-day trial, money back on the year, a gift year (Quinn's rulings of 2026-11-10) — **SIGNED by Quinn, 2026-11-11**
+
+Authority: Quinn's rulings in the session of 2026-11-10, made after three research reports (what students
+will pay; the smallest Pell discount that draws Pell students in; whether some price endings sell
+better). The reports are session notes, not in the repository; the reasons this amendment relies on are
+stated below. This text answers the round-1 and round-2 reviews
+(`docs/reports/2026-11-10-price-amendment-review-r1.md`, `-r2.md`). Quinn ruled the yearly price, (8),
+(9) and (10) after round 2, so those rulings and P12 to P14 have not been reviewed. Quinn signed
+without a third round (CLAUDE.md allows none); the gift spec and the billing plan review those parts
+when they are built. At signing (2026-11-11) Quinn also confirmed P3's and P5's yearly rules, P4's
+interplay with P12, P12's and P13's terms, P14's trial reminder, and the quiet release's price (below).
+
+**What it replaces.**
+- D2's price and its 2026-10-16 marker; R2's trial length; R3 and its 2026-10-16 marker (the pause
+  ends, and there is no academic-year price or term); §5.1's Billing line (the summer pause); and the
+  old price, trial or pause where the body names them (§2, §4.2 step 2, §10's VISION diff, §13). Once
+  this is signed, those markers are replaced, not appended to, by one pointing here.
+- Amendment 2026-10-16: rulings (1)–(3), its sentence on the trial and the pause, its margin check
+  (with the $0.80 revisit trigger, replaced by the check below) and its consequences paragraph. The
+  6-month term was never built (the code is still at `academic_year` and $69.99), so nothing of it is
+  removed. Rulings (4) and (5) stand: proof by the Pell award letter, checked once a year (made precise
+  in P6), and no prices in grant applications.
+- Amendment 2026-10-16b: its gate line "the terms (`site/terms.html`) carrying the Amendment 2026-10-16
+  prices" now reads "the Amendment 2026-11-10 prices", and its open item's "the Pell price of Amendment
+  2026-10-16" now means this amendment's Pell price. Its ruling (2), "a discounted price", is the first
+  open item below.
+- The waitlist design's Q4 ruling (the founding offer, and "Pell students pay the lower price, never
+  both") is superseded by ruling (3).
+
+> **The price (Quinn's rulings of 2026-11-10).**
+> (1) **The short plan is $12.99, billed every 4 weeks** ("We should charge every 4 weeks rather than
+> a month"), which is 13 charges a year. **There is no summer pause** ("no summer pause for monthly").
+> Wherever its price appears, it says "every 4 weeks", never "a month".
+> (2) **The yearly plan is $6.49 every 4 weeks, billed $84.37 once a year** ("$6.49/4 weeks for
+> yearly"; 13 × $6.49), renewing yearly. Both plans are shown in the same unit ("Show both plans in the
+> same unit"): the yearly plan, shown first, as "$6.49 every 4 weeks, billed $84.37 once a year. Renews
+> yearly.", beside "$12.99 every 4 weeks". The page may call the year half price while $6.49 is no more
+> than half of $12.99.
+> (3) **There is no founding price** ("drop the founding price entirely"). The waitlist offers early
+> access and invites, not a discount.
+> (4) **Pell Grant recipients pay 50% less on either plan**, rounded down so the price is never more
+> than half: **$6.49 every 4 weeks on the 4-week plan; on yearly, $3.24 every 4 weeks, billed $42.12 a
+> year** (13 × $3.24). It is a price, not a free tier: D2's "no free tier" and "one edition" stand.
+> (5) **The Pell price is claimed first and proved within 30 days** by uploading the award letter
+> ("Claim now, upload within 30 days"). Reminders go out at the claim, on day 23 and on day 29, each
+> naming the date and what happens next.
+> (6) **Without an accepted letter by the deadline:** on the 4-week plan, every charge after the
+> deadline is $12.99, and nothing already paid is charged again. On yearly, nothing more is charged:
+> the $42.12 counts as half a year, so the plan ends 6 months after its first charge and renews at
+> $84.37 unless the student cancels or moves to the 4-week plan. Knowlu never cuts off access inside a
+> paid period over the letter, never charges the difference, and never sends anyone to collections.
+> (7) **The free trial is 14 days**, card up front, cancel any time; R2 otherwise stands.
+> (8) **The yearly plan carries a 30-day money-back guarantee** ("Give the 30-day money-back guarantee
+> on the yearly plan"). Its terms are P12.
+> (9) **A year can be given to a student** ("I like the gift to a student idea"): one payment at the
+> regular yearly price, $84.37, that never renews. Its terms are P13, and it is designed in its own
+> short spec.
+> (10) **There is no referral program for now** ("No referrals for now").
+
+**The rules that make (5)–(9) buildable.** The round-1 review found cases rulings (5)–(7) leave open.
+These rules close them and are signed with this amendment.
+- **P1. The claim's instant** is the subscription's creation (Checkout completed), not the moment the
+  box is ticked. The deadline is that instant plus 30 × 24 hours, UTC. The reminders stop when a
+  letter is accepted or the subscription ends. Turning off renewal does not stop them while (6) could
+  still shorten a paid yearly plan: they then say the plan ends 6 months after its first charge unless
+  a letter arrives, and name that date.
+- **P2. A letter under check.** A letter uploaded before the deadline holds the deadline until it is
+  decided. A rejection (not a Pell award, or not for the right award year, P6) gives 7 days from the
+  rejection, or until the deadline if that is later, once; the rejection email names the new deadline.
+- **P3. One trial per account, and one unproven claim per account.** After a claim lapses, the Pell
+  price needs an accepted letter first. Without both, cancelling and subscribing again buys about 42
+  days (a 14-day trial and one 4-week period) for $6.49, over and over. The yearly re-check of P6 is
+  not an unproven claim: a student whose letter was accepted gets the 30 days at every re-check.
+- **P4. A late letter.** On yearly, a letter accepted before the shortened plan ends restores the full
+  year; one accepted after it ends (the $84.37 has renewed) brings the Pell price from the next
+  renewal, with no refund of the difference (P12's money-back still applies to that renewal). On the
+  4-week plan, it brings the Pell price from the next charge.
+- **P5. Claims and switches after checkout.** A subscriber can claim the Pell price from Settings; it
+  applies from the next charge, its 30 days run from the claim, and it counts as the one unproven
+  claim. On yearly, a Settings claim with no accepted letter by its deadline lapses and the next
+  renewal is at the regular price; the year already paid is not shortened. A plan
+  switch inside the 30 days keeps the original claim instant; on a switch to yearly, (6)'s "first
+  charge" is the switch's charge.
+- **P6. The yearly re-check.** "Verified through" is the end of the award year on the accepted letter
+  (30 June). The Pell price lasts to the first charge after that date, which is treated as a new claim
+  with its own 30 days. The right award year is the one covering the claim instant, or the next one.
+- **P7. Notice before a shortened year renews.** Before the shortened yearly renews at $84.37, a
+  notice gives the amount, the date and how to cancel. The lawyer sets how far ahead.
+- **P8. Refunds and disputes.** A refunded or disputed charge is not a paid period. The Pell spec
+  covers both, and the webhook learns of both.
+- **P9. Disclosure, before the card.** The app's subscribe step and Stripe Checkout state the
+  every-4-weeks billing of (1), the billed amount of (2), on yearly the money-back terms of P12, and
+  for a Pell claim (5) and (6) with both amounts ($12.99, $84.37) and the 6-month outcome, all before
+  the card is entered. The consent record keeps the plan, the claim and the terms shown. Prices are
+  shown "plus tax where it applies".
+- **P10. Codes and old subscriptions.** Promotion codes stay for comp grants only, and no code applies
+  to a Pell price. A subscription started before the switch keeps its price and its terms, the summer
+  pause included, until cancelled, under its old plan name; the pause job stays for those
+  subscriptions alone, and its resume path stays while any subscription is paused.
+- **P11. Per-period figures.** Each yearly price is 13 times its shown per-period figure, so the
+  display is exact: $6.49 × 13 = $84.37, and for Pell $3.24 × 13 = $42.12. A per-period figure that is
+  not exact is rounded up to the cent, never down, and the billed amount is always beside it.
+- **P12. The money-back guarantee** (8). On request within 30 days of a yearly charge, the first or
+  any renewal, the whole charge is refunded; this covers a forgotten renewal. Access ends the day of
+  the refund. After a money-back refund, the account gets no second one for 12 months. Pell yearly is
+  included. The refunded charge is not a paid period (P8). The 4-week plan has no money-back.
+- **P13. The gift year** (9). The giver pays $84.37 once, through a one-time checkout; it never renews,
+  and there is no Pell price on a gift. The giver gets a code to hand over: Knowlu never asks the giver
+  for the student's email or anything else about the student. The student redeems the code on their
+  own account, and near the end of the year the student is asked whether to subscribe. A gift code is
+  not a promotion code (P10). Codes never expire (the gift-card rules are on the lawyer's read), and an
+  unredeemed code is refundable to the giver within 30 days of purchase. The gift spec settles whether
+  the giver needs an account, what happens when a student who already pays redeems a code, whether a
+  gift year counts as the account's trial (P3), and what the giver's purchase record holds.
+- **P14. The trial reminder** (7). Three days before the first charge after the trial, an email gives
+  the plan, the amount, the date and how to cancel (Quinn, 2026-11-11).
+
+**Why these numbers.** The research put the most a student pays from their own money at about $10–12
+a month. $12.99 every 4 weeks is above that on purpose: it is the price that makes the year the
+obvious buy. Over a year it is 13 charges, $168.87. The year, $84.37, saves $84.50 of that (50%), and
+$45.53 (35%) against a student who pays every 4 weeks only during the school year (about 10 charges,
+$129.90). Yearly plans keep students far longer than monthly ones, and the year is taken in one
+charge, $5.54 under what the old price earned in a year with the pause ($9.99 × 9 months = $89.91).
+Both plans are shown per 4 weeks so the two figures compare directly. The yearly price is the risk: it
+is about twice what the closest planners and the median education app charge for a year ($36–45). So
+before Launch the quiet release's split between yearly and 4-week buyers is read, and the price comes
+back to Quinn if the year sells poorly. For Pell, the major low-income consumer tiers (Amazon Prime
+Access, Walmart+ Assist) sit at about half off. Nothing on record shows 75% drawing more students in
+than 50%, while 75% needs at least twice the Pell buyers to earn the same (on what is kept, about 2.4
+times on the 4-week plan and 2.6 times on yearly). How students prove eligibility matters more than
+the depth: programs that check documents before granting the price reach 20–40% of those eligible,
+and in Michigan's HAIL trial a free-tuition promise with no forms moved low-income students far more
+than the same offer made conditional on proving need. Hence claim first, letter second. The trial:
+across 17,000+ apps, trials of 10–16 days converted to paid at about the same rate as 5–9 days (46.6%
+against 45.9%) but renewed the first time more often (72.0% against 62.8%); the data are
+correlational.
+
+**The margin check.** It assumes $0.60 per student per month to serve (about $0.55 per 4 weeks), with
+Stripe at 2.9% + $0.30 and, because Managed Payments is already on (`HANDOFF.md`), also at 7.1% + $0.30:
+
+| Plan | Price | Kept per charge, at 2.9% | Share at 2.9% | Share at 7.1% |
+|---|---|---|---|---|
+| 4-week | $12.99 | $11.76 | 91% | 86% |
+| Yearly | $84.37 | $74.42 (a year served) | 88% | 84% |
+| Pell 4-week | $6.49 | $5.45 | 84% | 80% |
+| Pell yearly | $42.12 | $33.40 (a year served) | 79% | 75% |
+
+Over a year the 4-week plan keeps about $152.87 of $168.87 at 2.9%. If serving costs double, the Pell
+yearly keeps about 62% at 2.9% and 58% at 7.1%. A 14-day trial costs about $0.28 to serve, against $0.14
+for 7 days. A money-back refund (P12) costs the Stripe fee, which Stripe keeps: about $2.75 on a $84.37
+charge at 2.9%, and $6.29 at 7.1%.
+
+**Decided at signing (Quinn, 2026-11-11):**
+- **The quiet release's price** (Amendment 2026-10-16b, ruling 2, "a discounted price") is the regular
+  prices with the Pell price and no other discount. This replaces 10-16b's "discounted"; VISION's pilot
+  paragraph follows (Quinn's words, below).
+- **P12's and P13's terms** as written above: the money-back on every yearly charge, renewals included;
+  access ending the day of the refund; one money-back per account in 12 months; Pell yearly included;
+  gift codes that never expire; an unredeemed gift refundable to the giver within 30 days.
+
+**Open, decided before these prices ship (Quinn's call, or a spike):**
+- **A 6-month plan.** Recommended: none at launch; revisit after the quiet release if the yearly's
+  up-front price holds students back. If one is ever offered, the word "bi-annual" is never used,
+  since many read it as every two years.
+- **Managed Payments** is already on. Open: whether Stripe as merchant of record changes the seller the
+  terms name, 10-16b's Kentucky registration item, and whether (6)'s conditional pricing can be
+  expressed at all. The fee is read off the first non-zero live charge (the only live charge so far
+  was at $0), and so is whether the fee is kept on a refund.
+- **Shortening a paid year.** The repo never shortens a period today. Whatever mechanism is chosen must
+  move the subscription item's period end, so that `entitlements.current_period_end` follows. A
+  test-mode spike under Managed Payments is the Pell plan's first task: it proves a paid year can be
+  shortened and restored again (P4), and Pell yearly is not offered until it passes.
+- **The claim and the letter as data** (2026-10-16's open item, widened). The claim is itself a Pell
+  status, recorded at day 0; Stripe sees it through the Pell price ids; someone or something reads the
+  letter (recommended: a person, not a model, so there is no new transfer); and something is kept
+  (recommended: only "verified through" and the award year, with the letter deleted once checked). All
+  of it is on the privacy page before the claim ships, including that the consent log keeps the claim
+  for its 3 years, and the Pell flag never enters telemetry or logs. The Pell lane and the waitlist lane each name which privacy bump carries their text, and in
+  what order. The gift's purchase record (P13) is on the privacy page before gifts ship.
+- **Cancelling a yearly plan.** Recommended: inside P12's 30 days, cancelling offers the money-back
+  refund; after them, it stops the renewal, and the plan runs to the end of the year paid for, with no
+  partial refund except where the law requires one.
+- **The lawyer's read** (already 10-16b's gate) covers: the timing and placement of P9's disclosures;
+  the conditional terms stated as amounts and dates; the notice windows (P7, and P14's 3 days before
+  the first charge after the trial); the published terms' "the change will not apply to a period you have already paid
+  for" and refund promise, against which (6) must be framed as a disclosed term; the every-4-weeks
+  billing and how it is shown; the "half price" comparison with the 4-week plan, against the FTC's
+  guides on price comparisons; P12's money-back terms; P13's gift codes against federal and state
+  gift-card rules; yearly cancellation and state pro-rata refund rules; what the consent log holds;
+  the annual reminder and the yearly renewal notice; Managed Payments as seller; and the award letter.
+
+**Consequences (not done by this amendment).**
+- **Quinn's words:** VISION's One edition line, its pilot paragraph's "discounted price" and Launch's
+  "$9.99"; CLAUDE.md's Direction line.
+- **Billing** (contract-level: money).
+  - `billing-checkout`: four Stripe prices (4-week $12.99, `interval=week`, `interval_count=4`; yearly
+    $84.37; Pell 4-week $6.49; Pell yearly $42.12; `academic_year` goes); the hard-coded cents map in
+    `index.ts` that feeds the consent log; the trial (14 days, once per account); promotion codes
+    (P10); the consent record (P9); the money-back refund path (P12); and a one-time gift checkout
+    (P13, its own spec).
+  - `stripe-webhook`: the plan and the Pell flag come from the price id, not the billing interval
+    (today a 4-week subscription would get no plan, and `billing-jobs` would fail on it every day); it
+    handles refunds, P12's included, and disputes (P8). The plan names for the four prices are chosen
+    in the plan; the 4-week plan does not take the name `monthly`, which stays for subscriptions kept
+    under P10, and existing `academic_year` rows map to the yearly plan.
+  - `billing-jobs`: `priceOf` writes the amount and the interval actually billed ("every 4 weeks",
+    never "per month" for the 4-week plan) into the reminder California requires; the pause job runs
+    only for P10's kept subscriptions; the annual reminder stays, for every plan; and it sends P7's
+    notice and P14's trial reminder.
+  - The Stripe Customer Portal: Pell prices are never switchable there, and switches go through
+    Knowlu's own endpoint (P5).
+  - Test data that names `academic_year` (`cloud/supabase/migrations/testers_cases.ts`,
+    `cloud/supabase/proofs/testers_staging.sql`).
+- **The app:** the subscribe step's two price lines (`app/static/index.html`), the second subscribe
+  button fixed to monthly (`console.js`, `#up-subscribe`), the other plan ids and the plan name shown
+  in Settings (`console.js`), and `app/src/account.rs`'s `TOS_VERSION` and
+  `checkout_url_at`, whose body a Pell claim changes. `account.rs` is on the contract list, so this goes
+  to `contract-engineer` and `contract-reviewer`.
+- **The site:** `site/index.html` (both plans per 4 weeks, the Pell line and the money-back line, and no
+  free-months copy); `site/terms.html` (still at the older $69.99; its price-change promise,
+  summer-pause section, annual reminder and refund lines, plus P12 and P13; a terms change);
+  `site/subscribed.html` (the trial); `site/privacy.html` (the Pell data and the gift record, above).
+- **Documents:** `docs/reference/app.md`'s price lines, `HANDOFF.md`'s Launch "$9.99" lines, and the
+  onboarding redesign draft's payment line (`docs/specs/2026-10-23-onboarding-redesign-draft.md`).
+- **The Pell claim** is new work, contract-level because it moves money: a spec for the claim (at
+  checkout and from Settings), the upload, the check, the reminders, (6)'s outcomes and P1–P8, the
+  yearly re-check, refunds and disputes, and the deletion of the letter.
+- **The gift year** is new work, contract-level because it moves money: a short spec for P13 (the
+  one-time checkout, the code, redemption, the end-of-year ask and the giver's refund).
+- **The waitlist design** (`2026-11-09-waitlist-design.md`): its founding offer is decided as none and
+  its Q4 is superseded. The waitlist plan leaves out everything the offer threads through:
+  - the `founding`, `offer_version` and `offer_cutoff` columns (§3.1);
+  - `waitlist_join`'s offer parameters and the `founding` that `waitlist_confirm` returns;
+  - retention's founding facts, and the rejoin that keeps the flag;
+  - the registry's offer row and the confirm page's offer display;
+  - their tests, the title and §1's scope;
+  - §9.1's privacy-page bullet about price offers.
+
+  W7's test ("no 6.99, no founding under `site/`") stays as a standing guard, and the waitlist's prices
+  row follows this amendment.
