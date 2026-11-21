@@ -94,6 +94,7 @@ export const REGISTERED_PROPERTIES = new Set([
   "NAME", "REFRESH-INTERVAL", "SOURCE", "COLOR", "IMAGE", "CONFERENCE",
 ]);
 const STRUCTURAL = new Set(["BEGIN", "END"]);
+const COMPONENT_NAME = /^[A-Za-z0-9-]+$/;
 const X_NAME = /^X-[A-Z0-9-]+$/;
 const NOT_A_PROPERTY = { notProperty: true };
 export const NOT_A_PROPERTY_LABEL = "(not a property line)";
@@ -149,6 +150,8 @@ function parseLine(line) {
   }
   if (line[i] !== ":") return NOT_A_PROPERTY;
   const raw = line.slice(i + 1);
+  // BEGIN and END mark a component only when the value is one token ("Begin: chapter 4" is prose).
+  if (STRUCTURAL.has(name) && !COMPONENT_NAME.test(raw.trim())) return NOT_A_PROPERTY;
   return { name, params, raw, value: unescapeText(raw) };
 }
 
@@ -200,6 +203,36 @@ function first(item, name) {
   return item.props.find((p) => p.name === name);
 }
 
+// For DTSTART, DTEND and DUE the first well-formed occurrence wins: a date or a date-time. A value
+// that is neither ("Due: Friday after class", a broken line of prose) is ignored for dating.
+const DATE_VALUE = /^\d{8}(T\d{6}Z?)?$/i;
+
+function firstDate(item, name) {
+  return item.props.find((p) => p.name === name && DATE_VALUE.test(p.value.trim()));
+}
+
+// For UID the first well-formed occurrence wins: non-empty, with no whitespace. Failing that, the
+// first non-empty value, whose shape is then the fixed "(UID with spaces)".
+function chosenUid(item) {
+  const values = item.props.filter((p) => p.name === "UID").map((p) => p.value.trim()).filter((v) => v !== "");
+  const good = values.find((v) => !/\s/.test(v));
+  return good !== undefined ? good : values.length > 0 ? values[0] : null;
+}
+
+// The plain hosts that end the chosen UIDs of at least 2 items, lowercased.
+function sharedUidHosts(items) {
+  const counts = new Map();
+  for (const item of items) {
+    const uid = chosenUid(item);
+    if (uid === null || /\s/.test(uid)) continue;
+    const at = uid.lastIndexOf("@");
+    if (at < 0) continue;
+    const host = uid.slice(at + 1);
+    if (PLAIN_HOST.test(host)) bump(counts, host.toLowerCase());
+  }
+  return new Set([...counts.entries()].filter(([, n]) => n >= 2).map(([h]) => h));
+}
+
 function dateOf(prop) {
   const m = prop && /^(\d{4})(\d{2})(\d{2})/.exec(prop.value.trim());
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
@@ -237,14 +270,18 @@ function maskUidPart(s) {
     .replace(/\u0000/g, "<hex>");
 }
 
-// UUIDs and runs of 8+ hex characters become <hex>, digit runs #, and other words <w> unless they
-// are in UID_WORDS. Punctuation stays. The part after the last "@" is kept as written when it is a
-// plain host name, and masked like the rest when it is not.
-export function uidShape(uid) {
+// A UID holding whitespace is only "(UID with spaces)": generated UIDs never hold any, so it is
+// prose. Otherwise UUIDs and runs of 8+ hex characters become <hex>, digit runs #, and other words
+// <w> unless they are in UID_WORDS; punctuation stays. The part after the last "@" is kept as
+// written only when it is a plain host name that sharedHosts (lowercased) holds, meaning the UIDs of
+// at least 2 items end with it; otherwise it is "<host>".
+export function uidShape(uid, sharedHosts = new Set()) {
+  if (/\s/.test(uid)) return "(UID with spaces)";
   const at = uid.lastIndexOf("@");
   if (at < 0) return maskUidPart(uid);
   const host = uid.slice(at + 1);
-  return `${maskUidPart(uid.slice(0, at))}@${PLAIN_HOST.test(host) ? host : maskUidPart(host)}`;
+  const keep = PLAIN_HOST.test(host) && sharedHosts.has(host.toLowerCase());
+  return `${maskUidPart(uid.slice(0, at))}@${keep ? host : "<host>"}`;
 }
 
 function countsSorted(map, keyName) {
@@ -312,20 +349,21 @@ export function summarise(cal, { now, showTitles = false } = {}) {
   const endingCounts = new Map(ENDING_PHRASES.map((p) => [p, 0]));
   let noEnding = 0;
   const unmatched = [];
+  const sharedHosts = sharedUidHosts(items);
 
   for (const item of items) {
     if (item.type === "VEVENT") totals.vevent++;
     else totals.vtodo++;
 
-    for (const p of item.props) {
-      if (p.name === "DTSTART" || p.name === "DUE") {
-        const d = dateOf(p);
-        if (d && (totals.earliest === null || d < totals.earliest)) totals.earliest = d;
-        if (d && (totals.latest === null || d > totals.latest)) totals.latest = d;
-      }
+    const start = firstDate(item, "DTSTART");
+    const due = firstDate(item, "DUE");
+    for (const p of [start, due]) {
+      const d = dateOf(p);
+      if (d && (totals.earliest === null || d < totals.earliest)) totals.earliest = d;
+      if (d && (totals.latest === null || d > totals.latest)) totals.latest = d;
     }
 
-    const primary = first(item, "DTSTART") || first(item, "DUE");
+    const primary = start || due;
     const pdate = dateOf(primary);
     if (!primary || !pdate) {
       totals.noDate++;
@@ -345,15 +383,14 @@ export function summarise(cal, { now, showTitles = false } = {}) {
       else if (pdate < later) totals.next30++;
       else totals.later++;
     }
-    const start = first(item, "DTSTART");
-    const end = first(item, "DTEND");
+    const end = firstDate(item, "DTEND");
     if (end && (!start || end.value.trim() !== start.value.trim())) totals.dtendDiffers++;
 
     for (const name of new Set(item.props.map((p) => p.name))) bump(propCounts, name);
     if (item.notProperty > 0) bump(propCounts, NOT_A_PROPERTY_LABEL);
 
-    const uid = first(item, "UID");
-    bump(shapes, uid ? uidShape(uid.value.trim()) : "(no UID)");
+    const uid = chosenUid(item);
+    bump(shapes, uid === null ? "(no UID)" : uidShape(uid, sharedHosts));
 
     const labels = new Set();
     for (const p of item.props) {
@@ -445,7 +482,7 @@ export function renderText(s) {
   L.push("== Properties on items (items carrying each) ==");
   for (const p of s.properties) L.push(`${p.name}  ${p.count}`);
   L.push("");
-  L.push(`== UID shapes (digits as #, hex runs as <hex>, other words as <w>; top ${TOP_UID_SHAPES}) ==`);
+  L.push(`== UID shapes (digits as #, hex runs as <hex>, other words as <w>, unshared hosts as <host>; top ${TOP_UID_SHAPES}) ==`);
   for (const u of s.uidShapes) L.push(`${u.count}  ${u.shape}`);
   L.push("");
   L.push("== Classes (CATEGORIES) ==");
@@ -595,6 +632,11 @@ const LINK_ON_COMMAND_LINE =
   "your shell history: reset the feed link in your school's site, then run this again with no link and " +
   "paste the new one when asked";
 
+// Any argument holding "://", or a scheme at its start or after "=" (leading whitespace allowed).
+function looksLikeLink(a) {
+  return a.includes("://") || /(^|=)\s*(https?|webcal):/i.test(a);
+}
+
 function parseArgs(argv) {
   const o = { file: null, now: null, showTitles: false, json: false, help: false };
   for (let i = 0; i < argv.length; i++) {
@@ -623,7 +665,7 @@ function parseArgs(argv) {
 // main(argv, io) -> exit code. io: { stdout(s), stderr(s), readLine(), readFile(path), fetch,
 // today(), timeoutMs?, maxBytes? }.
 export async function main(argv, io) {
-  if (argv.some((a) => /^(https?|webcal):/i.test(a))) {
+  if (argv.some(looksLikeLink)) {
     io.stderr(`feed-shape: ${LINK_ON_COMMAND_LINE}\n`);
     return 2;
   }

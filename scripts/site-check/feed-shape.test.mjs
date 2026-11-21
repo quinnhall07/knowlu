@@ -100,9 +100,10 @@ test("parameters are split from the value, quoted ones included", () => {
 });
 
 test("UID shapes replace digit runs and hex runs", () => {
-  assert.equal(uidShape("_12345_1-assignment@lms.example"), "_#_#-assignment@lms.example");
-  assert.equal(uidShape("0f8fad5b-d9cb-469f-a165-70867728950e"), "<hex>");
-  assert.equal(uidShape("event-ab12cd34ef56@x.example"), "event-<hex>@x.example");
+  const shared = new Set(["lms.example", "x.example"]);
+  assert.equal(uidShape("_12345_1-assignment@lms.example", shared), "_#_#-assignment@lms.example");
+  assert.equal(uidShape("0f8fad5b-d9cb-469f-a165-70867728950e", shared), "<hex>");
+  assert.equal(uidShape("event-ab12cd34ef56@x.example", shared), "event-<hex>@x.example");
   const s = summarise(parse(cal(BASIC)), { now: NOW });
   assert.deepEqual(s.uidShapes[0], { shape: "<hex>", count: 1 });
   assert.ok(report(cal(BASIC)).includes("_#_#-assignment@lms.example"));
@@ -375,17 +376,22 @@ test("a line inside an item that is not a property line is counted, its text nev
   assert.ok(!/zqx/i.test(shown), "not even with --show-titles");
 });
 
-test("UID shapes mask words except the tool's structural words, and keep a plain host", () => {
-  assert.equal(uidShape("photosynthesis-lab-writeup-zqxuser@lms.example"), "<w>-<w>-<w>-<w>@lms.example");
-  assert.equal(uidShape("_12345_1-gradableitem-blackboard@school.example"), "_#_#-gradableitem-blackboard@school.example");
-  assert.equal(uidShape("Event-d2l-Assignment-77@host.example"), "Event-d2l-Assignment-#@host.example");
-  assert.equal(uidShape("event-ab12cd34ef56@x.example"), "event-<hex>@x.example");
-  assert.equal(uidShape("0f8fad5b-d9cb-469f-a165-70867728950e"), "<hex>");
-  assert.equal(uidShape("uid-123-deadbeefcafe"), "uid-#-<hex>");
-  assert.equal(uidShape("assignment12345"), "assignment#");
-  assert.equal(uidShape("café-ñandú@x.example"), "<w>-<w>@x.example");
-  assert.equal(uidShape("a1@zqx host!"), "<w>#@<w> <w>!", "a host that is not a plain host name is masked too");
-  assert.equal(uidShape("one@two@lms.example"), "<w>@<w>@lms.example");
+test("UID shapes mask words except the tool's structural words, and keep a shared plain host", () => {
+  const shared = new Set(["lms.example", "school.example", "host.example", "x.example"]);
+  assert.equal(uidShape("photosynthesis-lab-writeup-zqxuser@lms.example", shared), "<w>-<w>-<w>-<w>@lms.example");
+  assert.equal(uidShape("_12345_1-gradableitem-blackboard@school.example", shared), "_#_#-gradableitem-blackboard@school.example");
+  assert.equal(uidShape("Event-d2l-Assignment-77@host.example", shared), "Event-d2l-Assignment-#@host.example");
+  assert.equal(uidShape("event-ab12cd34ef56@x.example", shared), "event-<hex>@x.example");
+  assert.equal(uidShape("0f8fad5b-d9cb-469f-a165-70867728950e", shared), "<hex>");
+  assert.equal(uidShape("uid-123-deadbeefcafe", shared), "uid-#-<hex>");
+  assert.equal(uidShape("assignment12345", shared), "assignment#");
+  assert.equal(uidShape("café-ñandú@x.example", shared), "<w>-<w>@x.example");
+  assert.equal(uidShape("a1@zqx host!", shared), "(UID with spaces)");
+  assert.equal(uidShape("one@two@lms.example", shared), "<w>@<w>@lms.example");
+  assert.equal(uidShape("one@LMS.Example", shared), "<w>@LMS.Example", "hosts compare case-insensitively, kept as written");
+  assert.equal(uidShape("one@zqxsolo.example", shared), "<w>@<host>", "a host no other item shares");
+  assert.equal(uidShape("one@zqx_bad.example", new Set(["zqx_bad.example"])), "<w>@<host>", "not a plain host name");
+  assert.equal(uidShape("one@lms.example"), "<w>@<host>", "no shared hosts given");
   const text = cal(["BEGIN:VEVENT", "UID:zqxsentinel-essay-draft@lms.example", "DTSTART:20261101T080000Z", "END:VEVENT"]);
   const s = summarise(parse(text), { now: NOW });
   assert.ok(!/zqxsentinel|essay|draft/i.test(renderText(s) + renderJson(s)));
@@ -594,6 +600,116 @@ test("only registered names and uppercase X- names count as properties", () => {
 
 test("an uppercase X- name is still read for site markers", () => {
   assert.equal(siteCounts(["X-LMS-LINK:https://www.webassign.net/x"])["WebAssign"], 1);
+});
+
+// --- Review round 3 -------------------------------------------------------------------------
+
+test("a broken 'Uid:' line before the real UID leaks nothing, and the real UID wins", () => {
+  const text = cal([
+    "BEGIN:VEVENT",
+    "DESCRIPTION:Questions?",
+    "Uid: write to SENTINELA@Sentinelb.Sentinelc",
+    "UID:123@lms.example",
+    "DTSTART:20261101T080000Z",
+    "UID:dup-9@zqxdup.example",
+    "END:VEVENT",
+    "BEGIN:VEVENT",
+    "UID:124@lms.example",
+    "DTSTART:20261102T080000Z",
+    "END:VEVENT",
+  ]);
+  const s = summarise(parse(text), { now: NOW });
+  const out = renderText(s) + renderJson(s);
+  assert.ok(!/sentinel/i.test(out), "no sentinel");
+  assert.ok(!/zqxdup/i.test(out), "a later duplicate UID never replaces the first");
+  assert.deepEqual(s.uidShapes, [{ shape: "#@lms.example", count: 2 }]);
+});
+
+test("a UID made only of a spaced value shows the fixed text", () => {
+  const text = cal(["BEGIN:VEVENT", "Uid: write to SENTINELA@Sentinelb.Sentinelc", "DTSTART:20261101T080000Z", "END:VEVENT"]);
+  const s = summarise(parse(text), { now: NOW });
+  assert.deepEqual(s.uidShapes, [{ shape: "(UID with spaces)", count: 1 }]);
+  assert.ok(!/sentinel/i.test(renderText(s) + renderJson(s)));
+});
+
+test("a host only one item carries is shown as <host>; a host two items share is kept", () => {
+  const solo = summarise(parse(cal(["BEGIN:VEVENT", "UID:lab-12@Ch.4.Sentineld", "DTSTART:20261101T080000Z", "END:VEVENT"])), { now: NOW });
+  assert.deepEqual(solo.uidShapes, [{ shape: "<w>-#@<host>", count: 1 }]);
+  assert.ok(!/sentineld/i.test(renderText(solo) + renderJson(solo)));
+  const pair = cal([
+    "BEGIN:VEVENT", "UID:lab-12@lms.example", "DTSTART:20261101T080000Z", "END:VEVENT",
+    "BEGIN:VEVENT", "UID:lab-13@LMS.example", "DTSTART:20261102T080000Z", "END:VEVENT",
+  ]);
+  const t = report(pair);
+  assert.ok(t.includes("<w>-#@lms.example"));
+  assert.ok(t.includes("<w>-#@LMS.example"));
+});
+
+test("a 'Begin:' line of prose opens no component and the item keeps its date, UID and ending", () => {
+  const text = cal([
+    "BEGIN:VEVENT",
+    "DESCRIPTION:Steps",
+    "Begin: chapter 4 tonight",
+    "End: of the unit ZQXEND",
+    "UID:b-1@lms.example",
+    "DTSTART:20261101T080000Z",
+    "SUMMARY:Lab 1 - Due",
+    "END:VEVENT",
+    "BEGIN:VEVENT",
+    "UID:b-2@lms.example",
+    "DTSTART:20261102T080000Z",
+    "END:VEVENT",
+  ]);
+  const c = parse(text);
+  assert.equal(c.items.length, 2);
+  assert.equal(c.items[0].notProperty, 2);
+  const s = summarise(c, { now: NOW });
+  assert.equal(s.totals.noDate, 0);
+  assert.equal(s.totals.timed, 2);
+  assert.deepEqual(s.uidShapes, [{ shape: "<w>-#@lms.example", count: 2 }]);
+  assert.equal(s.endings.phrases.find((p) => p.phrase === "due").count, 1);
+  assert.ok(!/zqxend|chapter/i.test(renderText(s) + renderJson(s)));
+});
+
+test("a 'Due:' line of prose is ignored for dating, and the first well-formed DTSTART or DUE wins", () => {
+  const text = cal([
+    "BEGIN:VTODO",
+    "UID:t-1@lms.example",
+    "DESCRIPTION:Bring",
+    "Due: Friday after class",
+    "DUE;VALUE=DATE:20261203",
+    "DUE:20261231",
+    "SUMMARY:Set 2 - Due",
+    "END:VTODO",
+    "BEGIN:VEVENT",
+    "UID:t-2@lms.example",
+    "DTSTART:20261101T080000Z",
+    "DTSTART:20261225T080000Z",
+    "END:VEVENT",
+  ]);
+  const s = summarise(parse(text), { now: NOW });
+  assert.equal(s.totals.noDate, 0);
+  assert.equal(s.totals.allDay, 1);
+  assert.equal(s.totals.timed, 1);
+  assert.equal(s.totals.earliest, "2026-11-01");
+  assert.equal(s.totals.latest, "2026-12-03", "later duplicates never count");
+});
+
+test("every command-line form of a link is refused with the reset advice, never repeated", async () => {
+  for (const argv of [
+    [`--file=https://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    [`--now=webcal://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    [` https://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    ["--file", ` webcal://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    ["--file", `\thttp:${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    [`ftp://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    ["--json", `feed=${LINK_HOST}://${LINK_TOKEN}`],
+  ]) {
+    const { out, io: x } = io();
+    assert.equal(await main(argv, x), 2, JSON.stringify(argv));
+    assert.match(out.stderr, /reset the feed link/, JSON.stringify(argv));
+    assertNoLink(out.stdout + out.stderr);
+  }
 });
 
 test("structural lines are accepted in any case", () => {
