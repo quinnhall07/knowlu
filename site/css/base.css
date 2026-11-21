@@ -9,7 +9,7 @@
 
 /* ---------- reset and running text ---------- */
 *, *::before, *::after { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: calc(var(--nav-h) + 16px); scroll-padding-bottom: 20px; scrollbar-color: var(--field-line) var(--bg); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html { scroll-behavior: smooth; scroll-padding-top: calc(var(--nav-h) + var(--safe-t) + 16px); scroll-padding-bottom: 20px; scrollbar-color: var(--field-line) var(--bg); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body { margin: 0; min-width: 320px; overflow-x: clip; background: var(--bg); color: var(--ink); font: 400 var(--t-body)/1.55 var(--serif); -webkit-font-smoothing: antialiased; caret-color: var(--accent); }
 ::selection { background: var(--red); color: var(--cream); }
 img, svg, canvas { display: block; max-width: 100%; }
@@ -30,7 +30,7 @@ a:hover { text-decoration-color: var(--accent); }
 
 .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .skip { position: absolute; left: 16px; top: -60px; z-index: 30; background: var(--ink); color: var(--bg); display: flex; align-items: center; min-height: 44px; padding: 0 16px; font: 600 var(--t-small)/1 var(--sans); text-decoration: none; border-radius: var(--r); }
-.skip:focus { top: 12px; }
+.skip:focus { top: calc(12px + var(--safe-t)); }
 
 /* ---------- the wordmark: "lu" in cream on the red tile ----------
    Round 1, note 10: Quinn's pick of four versions (the even frame with cream letters).
@@ -128,10 +128,13 @@ a.wm:active { transform: translateY(1px); }
 .nx-row .btn:focus-visible { outline-offset: -5px; outline-color: var(--btn-fg); }
 .nx-row .btn.is-done { background: var(--red-deep); }
 
-/* ---------- nav: solid by default; clear while the big wordmark is in view (site.js) ---------- */
-.nav { position: fixed; inset: 0 0 auto 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); transition: background-color var(--med) var(--ease), border-color var(--med) var(--ease); }
-.nav-in { max-width: var(--page); margin: 0 auto; height: var(--nav-h); padding-inline: var(--gut); display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; }
-.nav nav { display: flex; gap: 8px; }
+/* ---------- nav: solid by default; clear while the big wordmark is in view (site.js) ----------
+   A phone: the wordmark, Menu and Apply. Menu opens the section links in a panel under the bar (site.js); with
+   scripts off there is no Menu and the footer carries the links. From 740px the links sit in the bar beside Apply,
+   and from 1180px in its middle. The bar clears the status bar when the page runs under it (--safe-t). */
+.nav { position: fixed; inset: 0 0 auto 0; z-index: 10; padding-top: var(--safe-t); background: var(--bg); border-bottom: 1px solid var(--line); transition: background-color var(--med) var(--ease), border-color var(--med) var(--ease); }
+.nav-in { max-width: var(--page); margin: 0 auto; height: var(--nav-h); padding-inline: var(--gut); display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 4px; }
+.nav nav { display: none; }
 .nav nav a {
   display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px;
   color: var(--ink-2); text-decoration: underline; text-decoration-color: transparent; font: 500 16px/1 var(--sans);
@@ -142,6 +145,51 @@ a.wm:active { transform: translateY(1px); }
 .nav-wm { justify-self: start; display: inline-flex; align-items: center; min-height: 44px; transition: opacity var(--med) var(--ease), visibility var(--med), transform var(--fast) var(--ease); }
 .nav.over { background: transparent; border-color: transparent; }
 .nav.over .nav-wm { opacity: 0; visibility: hidden; }
+/* on the narrowest phones Apply drops "for the pilot" so the three fit */
+.nav-x { display: none; }
+
+/* Menu: a word set like the links, underlined in the red while its panel is open */
+.nav-menu {
+  display: none; align-items: center; min-height: 44px; min-width: 44px; margin: 0; padding: 0 10px;
+  font: 500 15px/1 var(--sans); color: var(--ink-2); background: none; border: 0; border-radius: var(--r); cursor: pointer;
+  text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 4px; text-decoration-color: transparent;
+  transition: color var(--fast) var(--ease), text-decoration-color var(--fast) var(--ease);
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.js .nav-menu { display: inline-flex; }
+.nav-menu:focus-visible, .nav-menu[aria-expanded="true"] { color: var(--ink); text-decoration-color: var(--accent); }
+.nav-menu:active { transform: translateY(1px); }
+@media (hover: hover) { .nav-menu:hover { color: var(--ink); text-decoration-color: var(--accent); } }
+
+/* the open panel: the links as ruled rows under the bar, at the gutter, the bar solid above them. It exists only
+   below the width where the links sit in the bar, so it is written for that range alone. */
+@media (max-width: 739.98px) {
+  .nav.is-open { background: var(--bg); border-color: var(--line); }
+  .nav.is-open .nav-wm { opacity: 1; visibility: visible; }
+  .js .nav.is-open nav {
+    display: grid; position: absolute; top: 100%; left: 0; right: 0;
+    padding: 0 var(--gut) 10px; background: var(--bg); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    box-shadow: 0 28px 40px -30px color-mix(in srgb, var(--shadow) 45%, transparent);
+  }
+  .js .nav.is-open nav a { min-height: 56px; padding: 0; font-size: 18px; color: var(--ink); border-bottom: 1px solid var(--line-2); }
+  .js .nav.is-open nav a:last-child { border-bottom: 0; }
+}
+@media (max-width: 739.98px) and (prefers-reduced-motion: no-preference) {
+  .js .nav.is-open nav { transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
+  @starting-style { .js .nav.is-open nav { opacity: 0; transform: translateY(-6px); } }
+}
+
+@media (min-width: 360px) {
+  .nav-x { display: inline; }
+}
+@media (min-width: 740px) {
+  .nav-in { gap: 24px; }
+  .nav nav { display: flex; gap: 8px; }
+  .js .nav-menu { display: none; }
+}
+@media (min-width: 1180px) {
+  .nav-in { grid-template-columns: 1fr auto 1fr; }
+}
 
 /* ---------- footer ---------- */
 .ft { margin-top: var(--sec); border-top: 1px solid var(--line); }
@@ -159,7 +207,7 @@ a.wm:active { transform: translateY(1px); }
 }
 .ft-nav a:hover, .ft-nav a:focus-visible { text-decoration-color: var(--accent); }
 .ft-nav a:active { transform: translateY(1px); }
-.ft-base { max-width: var(--page); margin: 0 auto; padding: 0 var(--gut) 36px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; }
+.ft-base { max-width: var(--page); margin: 0 auto; padding: 0 var(--gut) calc(36px + var(--safe-b)); display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; }
 .ft-base::before { content: ""; flex: 0 0 100%; height: 1px; background: var(--line-2); margin-bottom: 8px; }
 .ft-base p { font: 400 14px/1.45 var(--sans); color: var(--ink-3); }
 .ft-base .ft-review { flex: 1 1 26em; }
@@ -177,10 +225,6 @@ a.wm:active { transform: translateY(1px); }
 [data-build="parts"] { transition: none; }
 
 /* ---------- smaller screens ---------- */
-@media (max-width: 999px) {
-  .nav-in { grid-template-columns: 1fr auto; }
-  .nav nav { display: none; }
-}
 @media (max-width: 899.98px) {
   .ft-in { grid-template-columns: 1fr; gap: 36px; }
   .ft-base .ft-review { flex-basis: 100%; order: 2; }
@@ -205,8 +249,18 @@ a.wm:active { transform: translateY(1px); }
   .nx-row:has([data-ref-share][hidden]) [data-ref-copy] { grid-column: 1 / -1; }
 }
 
+/* ---------- small portrait: what we leave out ----------
+   A phone held upright (below 740px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
+   desktop are unchanged; a phone on its side still shows everything. Each section file has its own block. Here: the
+   room between sections, a third less (--sec from 56px to 40px, the footer's top from 56px), so the page reads as one
+   scroll. */
+@media (max-width: 739.98px) and (orientation: portrait) {
+  :root { --sec: 40px; }
+  .ft-in { padding-top: 40px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .btn, .theme, .nx-link, a, a.wm, .wl-row, .nx-row, .nav, .nav-wm, [data-build] { transition: none; }
+  .btn, .theme, .nx-link, a, a.wm, .wl-row, .nx-row, .nav, .nav-wm, .nav-menu, [data-build] { transition: none; }
   .js [data-build]:not([data-build="parts"]):not(.is-in) { opacity: 1; transform: none; }
 }

@@ -20,8 +20,14 @@
   "use strict";
 
   var PRIVACY_CHANGES = {
-    "2026-10-20": [
-      "It now covers connecting Google Calendar and Gmail, the email you forward to Knowlu (received by Amazon Web Services) and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, daily counts of your AI calls, any free tester access, and the interests you give for campus events.",
+    "2026-11-21": [
+      "KNOWLU LLC operates Knowlu. The policy now names every company that handles part of your data, including Link, Stripe's checkout, which sells the subscription; Resend, which sends our email; and Google, which hosts our support mailbox.",
+      "The policy also lists the record of each judgment and the rules learned from it, the sign-in security log, mail you send us, and the two answers you give at setup.",
+      "You can choose This computer only, so your plan is not kept in your account; Knowlu still sends our servers what it needs to work, and the policy lists all of it.",
+      "No one at Knowlu reads your tasks or mail without your explicit consent unless a valid legal demand requires it, and a new section says who can access your data.",
+      "Email you forward to Knowlu, received by Amazon Web Services, is deleted as soon as Knowlu is done with it, and disconnecting Gmail or a mailbox deletes the records of what Knowlu decided about its email.",
+      "Kept sign-ins are offered at setup, already on and marked Recommended, and you can turn each one off at setup or later in Settings.",
+      "If you apply to the pilot on our website, your answers are kept in Knowlu's Google account, used only for the pilot and deleted when the pilot ends, or sooner if you ask.",
       "Until you accept, Knowlu keeps today's page and your calendar up to date, but does not sync, import or read anything else new.",
       "To leave instead, use Settings → Delete my data."
     ]

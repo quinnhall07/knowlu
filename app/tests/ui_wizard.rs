@@ -299,6 +299,22 @@ fn the_code_request_spells_its_argument_the_way_tauri_delivers_it() {
     }
 }
 
+/// The terms the wizard's box accepts are the terms `TOS_VERSION` records (legal-pages rewrite §2, §7 items 8
+/// and 9; `account.rs`'s rule): a sign-up and a checkout write this constant down, so the published terms carry
+/// it as their date, or the consent log points at text nobody can find. Here, not beside the privacy tie:
+/// `bundle_config.rs` holds the six kept tests and no other (`ui_swap.rs`).
+#[test]
+fn the_terms_version_constant_is_the_published_terms_date() {
+    let rust = read_app("src/account.rs");
+    let version = rust
+        .split("pub const TOS_VERSION: &str = \"").nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("account.rs must declare `pub const TOS_VERSION: &str = \"…\";`");
+    let page = fs::read_to_string(app_dir().join("../site/terms.html")).expect("../site/terms.html");
+    assert!(page.contains(&format!("Effective {version}.")), "the terms' Effective date is {version}");
+    assert!(page.contains(&format!("These terms are version <strong>{version}</strong>")), "…and so is their version line");
+}
+
 /// Spec §7: Back and Next are rendered state, never a dead control. Changed (plan §7, owners' split): the
 /// upgrade overlay's half (`#up-subscribe`, its two stand-down checks, "press Subscribe again") is T20's and
 /// lives in `ui_account_privacy.rs`; this file pins the wizard's.

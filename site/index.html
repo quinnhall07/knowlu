@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Knowlu: know what’s next.</title>
 <meta name="description" content="Knowlu is a desktop app for college students, on Windows and Mac, that gathers your classes, assignments and deadlines and tells you what to do next.">
 <meta name="robots" content="noindex">
@@ -11,6 +11,17 @@
 <link rel="icon" href="favicon.ico?v=c33137" sizes="32x32">
 <link rel="icon" href="favicon.svg?v=c33137" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png?v=c33137">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Knowlu">
+<meta property="og:url" content="https://knowlu.com/">
+<meta property="og:title" content="Knowlu: know what’s next.">
+<meta property="og:description" content="Knowlu is a desktop app for college students, on Windows and Mac, that gathers your classes, assignments and deadlines and tells you what to do next.">
+<meta property="og:image" content="https://knowlu.com/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The Knowlu lettermark: lu in cream on a red tile">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://knowlu.com/og-image.png">
 <link rel="preload" href="fonts/PT_Serif-Caption-Web-Regular.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="preload" href="fonts/ZillaSlab-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/AlbertSans-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -31,12 +42,15 @@
 <header class="nav" data-nav>
   <div class="nav-in">
     <a class="wm nav-wm" href="#top" aria-label="Knowlu, back to top"><span class="wm-k">Know<b>lu</b></span></a>
-    <nav aria-label="Main">
+    <!-- On a phone, Menu opens the links below it as a panel under the bar (js/site.js); with scripts off it stays
+         out of sight and the footer carries the links. -->
+    <button class="nav-menu" type="button" aria-expanded="false" aria-controls="nav-links" data-nav-menu>Menu</button>
+    <nav id="nav-links" aria-label="Main">
       <a href="#what">What it does</a>
       <a href="#pilot">Pilot</a>
       <a href="#questions">Questions</a>
     </nav>
-    <a class="btn small" href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Apply for the pilot</a>
+    <a class="btn small" href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29"><span>Apply<span class="nav-x"> for the pilot</span></span></a>
   </div>
 </header>
 
@@ -71,7 +85,10 @@
 
       <div class="hero-go">
         <a class="btn hero-go-btn" href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Apply for the free pilot</a>
-        <p class="hero-go-note">About two minutes to apply. Stay the semester and it’s free forever.<br>For college students, on Windows and Mac.</p>
+        <!-- Two versions of the fine print: an upright phone shows the short one (css/hero.css). Only one is ever
+             displayed, so a screen reader hears one. -->
+        <p class="hero-go-note hero-go-long">About two minutes to apply. Stay the semester and it’s free forever.<br>For college students, on Windows and Mac.</p>
+        <p class="hero-go-note hero-go-short">Free forever if you stay the semester. Windows and Mac.</p>
       </div>
     </div>
   </section>
@@ -246,7 +263,7 @@
             </div>
           </div>
         </div>
-        <p class="pc-hint pc-js">Press Start or Later.</p>
+        <p class="pc-hint pc-js" data-touch="Tap Start or Later.">Press Start or Later.</p>
         <p class="vh" role="status" data-say></p>
       </div>
     </article>
@@ -289,7 +306,7 @@
             </ol>
           </div>
         </div>
-        <p class="pc-hint pc-js" id="pc-ahead-hint" data-hint data-hold="Now choose a day. Faded days are on or after the deadline, or would overlap something.">Choose a block, then choose a day to move it to. Arrow keys work too.</p>
+        <p class="pc-hint pc-js" id="pc-ahead-hint" data-hint data-hold="Now choose a day. Faded days are on or after the deadline, or would overlap something." data-touch="Tap a block, then tap a day to move it to." data-touch-hold="Now tap a day. Faded days are on or after the deadline, or would overlap something.">Choose a block, then choose a day to move it to. Arrow keys work too.</p>
         <p class="vh" role="status" data-say></p>
       </div>
     </article>
@@ -375,7 +392,7 @@
           <a class="btn pr-go" data-pf-full href="https://docs.google.com/forms/d/e/1FAIpQLSd7BqTSwq7x_6HlJW_NcDQK_EF9v3OE8PNyOiaIzFZN5t3MSA/viewform?usp=pp_url&amp;entry.1521613834=The%20website%20%28knowlu.com%29">Fill out the full application</a>
         </div>
         <p class="vh" role="status" data-pf-say></p>
-        <p class="pl-priv"><a href="privacy.html">Your passwords never leave your device. Your data is never sold or shared.</a></p>
+        <p class="pl-priv"><a href="privacy.html">Your passwords never leave your device. Your data is never sold or shared.</a><br><a href="pilot-privacy.html">How Knowlu handles your data</a></p>
       </div>
       <div class="pl-side">
         <ol class="pl-steps" role="list" data-pl-steps>
@@ -447,6 +464,7 @@
       <a href="#letter">From the founder</a>
       <a href="privacy.html">Privacy</a>
       <a href="terms.html">Terms</a>
+      <a href="pilot-privacy.html">Pilot privacy</a>
     </nav>
   </div>
   <div class="ft-base">

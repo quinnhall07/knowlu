@@ -21,8 +21,8 @@ pub const DEFAULT_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3M
 /// The policy versions a sign-up records. Dates, not numbers, because the pages carry a date too and
 /// a reader comparing the two should not have to hold a mapping in their head. Bump BOTH the constant
 /// and the page's date in the same commit, or the consent log points at text nobody can find.
-pub const TOS_VERSION: &str = "2026-09-10";
-pub const PRIVACY_VERSION: &str = "2026-10-20";
+pub const TOS_VERSION: &str = "2026-11-21";
+pub const PRIVACY_VERSION: &str = "2026-11-21";
 
 /// Where a session lives before there is a vault to key it to. The wizard signs in on panel 2 and
 /// creates the vault on panel 9, so for those seven panels the profile id does not exist yet — and it
