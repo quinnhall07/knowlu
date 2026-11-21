@@ -106,6 +106,31 @@
     check();
   }
 
+  /* ---------- the phone menu: Menu shows and hides the section links under the bar ----------
+     It closes on Escape (focus goes back to Menu), on a link, on a tap or click outside the bar, when focus leaves
+     the bar, and when the screen grows wide enough for the links to sit in the bar (css/base.css, 740px). */
+  var menuBtn = document.querySelector('[data-nav-menu]');
+  var menu = menuBtn && document.getElementById(menuBtn.getAttribute('aria-controls'));
+  if (nav && menuBtn && menu) {
+    var isOpen = function () { return menuBtn.getAttribute('aria-expanded') === 'true'; };
+    var setMenu = function (open, refocus) {
+      if (open === isOpen()) return;
+      menuBtn.setAttribute('aria-expanded', String(open));
+      nav.classList.toggle('is-open', open);
+      if (!open && refocus) menuBtn.focus();
+    };
+    menuBtn.addEventListener('click', function () { setMenu(!isOpen()); });
+    menu.addEventListener('click', function (e) { if (e.target.closest('a')) setMenu(false); });
+    document.addEventListener('pointerdown', function (e) { if (isOpen() && !nav.contains(e.target)) setMenu(false); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && isOpen()) { e.preventDefault(); setMenu(false, true); }
+    });
+    nav.addEventListener('focusout', function (e) { if (e.relatedTarget && !nav.contains(e.relatedTarget)) setMenu(false); });
+    var wide = window.matchMedia('(min-width: 740px)');
+    var onWide = function () { if (wide.matches) setMenu(false); };
+    if (wide.addEventListener) wide.addEventListener('change', onWide); else if (wide.addListener) wide.addListener(onWide);
+  }
+
   /* ---------- building on scroll: .is-in once, at about 30% in view (or 30% of the screen for a tall one), then kl:in ---------- */
   var builds = Array.prototype.slice.call(document.querySelectorAll('[data-build]'));
   function arrive(el) {

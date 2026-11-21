@@ -91,12 +91,15 @@
   --t-body: 18px;
   --t-small: 15px;
 
-  /* layout */
+  /* layout. The page is drawn edge to edge (viewport-fit=cover), so the gutter is never narrower than a phone's
+     notch or rounded corner, and the fixed nav and the footer clear the status bar and the home bar (--safe-t, -b). */
   --r: 2px;
-  --gut: clamp(16px, 4vw, 56px);
+  --gut: max(clamp(16px, 4vw, 56px), env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
   --page: 1600px;
   --nav-h: 76px;
-  --sec: clamp(88px, 10vw, 168px);
+  --sec: clamp(56px, 10vw, 168px);
 
   /* motion */
   --ease: cubic-bezier(.16, 1, .3, 1);
