@@ -33,7 +33,7 @@
 
 .faq-a { padding: 0 48px 24px 0; max-width: 38em; font: 400 var(--t-body)/1.55 var(--serif); color: var(--ink-2); }
 
-@media (min-width: 760px) {
+@media (min-width: 740px) {
   .faq { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(32px, 6vw, 104px); }
   .faq summary { padding: 24px 56px 24px 0; font-size: 22px; }
   .faq-a { font-size: 19px; padding-bottom: 28px; }

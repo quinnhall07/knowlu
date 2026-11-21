@@ -34,7 +34,7 @@
 .pf-copy .draft-note { margin-top: 4px; }
 
 /* a tablet and wider: the figure on the left at its own width, the words beside it on its baseline */
-@media (min-width: 760px) {
+@media (min-width: 740px) {
   .pf-in { grid-template-columns: auto minmax(0, 1fr); column-gap: clamp(32px, 5vw, 88px); align-items: end; }
   .pf-n { font-size: clamp(104px, min(15vw, 21vmin), 248px); }
   .pf-copy { padding-bottom: .4em; }
@@ -57,8 +57,8 @@
 }
 
 /* ---------- small portrait: what we leave out ----------
-   A phone held upright (below 760px) shows less, step by step; a phone on its side still shows everything. The
+   A phone held upright (below 740px) shows less, step by step; a phone on its side still shows everything. The
    figure stays at every size. Here only the room above and below it is a third less, as everywhere on the page. */
-@media (max-width: 759.98px) and (orientation: portrait) {
+@media (max-width: 739.98px) and (orientation: portrait) {
   .pf-in { padding-block: 44px 40px; }
 }

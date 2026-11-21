@@ -31,7 +31,7 @@
 .pc-foot { margin: clamp(40px, 7vw, 120px) 0 0; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-3); }
 
 /* a tablet and wider: the words and the window side by side, the window in the wider column */
-@media (min-width: 760px) {
+@media (min-width: 740px) {
   .pc { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(36px, 5.5vw, 104px); align-items: center; }
   .pc:nth-of-type(even) { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
   .pc:nth-of-type(even) .pc-copy { order: 2; }
@@ -40,7 +40,7 @@
 /* The week needs about 600px to show its eight days side by side, more than a tablet's wider column has. Until the
    screen is wide enough for that, it takes the full width under its words, and the words take two columns above it:
    the heading and its line on the left, the number on the right. */
-@media (min-width: 760px) and (max-width: 1179.98px) {
+@media (min-width: 740px) and (max-width: 1179.98px) {
   .pc.pc-ahead { grid-template-columns: minmax(0, 1fr); }
   .pc-ahead .pc-copy { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); grid-template-rows: auto 1fr; column-gap: clamp(36px, 5.5vw, 104px); align-items: start; }
   .pc-ahead .pc-copy > :not(.pc-fact) { grid-column: 1; }
@@ -229,11 +229,11 @@ button.pc-ev.is-drag { z-index: 4; cursor: grabbing; transition: none; box-shado
 }
 
 /* ---------- small portrait: what we leave out ----------
-   A phone held upright (below 760px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
+   A phone held upright (below 740px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
    desktop are unchanged; a phone on its side still shows everything. Here: the sourced number under each piece's
    words, and the captions under the first two windows (the week keeps its own, which says how to move a block).
    Each piece keeps its heading, its sentence and its window, and the pieces sit closer, as one scroll. */
-@media (max-width: 759.98px) and (orientation: portrait) {
+@media (max-width: 739.98px) and (orientation: portrait) {
   .pc-copy p.pc-fact, .pc-miss .pc-hint, .pc-now .pc-hint { display: none; }
   .pc { gap: 24px; }
   .pc + .pc { margin-top: 48px; }

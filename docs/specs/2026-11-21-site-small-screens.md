@@ -26,7 +26,7 @@ sideways. Phone portrait mostly works. The problems are in between:
    returns focus to its button, and works without JS (the links stay reachable in the footer). Every target is at
    least 44×44. Reason: visitors can reach the sections, and the only extra element is one button.
 2. **Tablets get two columns earlier.** The side-by-side layouts (hero lockup | card, stat number | words, piece
-   text | demo, letter, pilot, FAQ) start at about 760px rather than 1000px, with the demos scaled to fit their
+   text | demo, letter, pilot, FAQ) start at about 740px rather than 1000px (760 at first; lowered so an upright iPad mini, 744 wide, gets it), with the demos scaled to fit their
    column. The breakpoint follows the content: whatever width each section actually fits at, checked at 768 and
    1024. Reason: a tablet should read as a small desktop, not a stretched phone.
 3. **Demos are tuned for touch.** They stay interactive. On coarse pointers the captions say "Tap" where they

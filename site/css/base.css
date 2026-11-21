@@ -130,7 +130,7 @@ a.wm:active { transform: translateY(1px); }
 
 /* ---------- nav: solid by default; clear while the big wordmark is in view (site.js) ----------
    A phone: the wordmark, Menu and Apply. Menu opens the section links in a panel under the bar (site.js); with
-   scripts off there is no Menu and the footer carries the links. From 760px the links sit in the bar beside Apply,
+   scripts off there is no Menu and the footer carries the links. From 740px the links sit in the bar beside Apply,
    and from 1180px in its middle. The bar clears the status bar when the page runs under it (--safe-t). */
 .nav { position: fixed; inset: 0 0 auto 0; z-index: 10; padding-top: var(--safe-t); background: var(--bg); border-bottom: 1px solid var(--line); transition: background-color var(--med) var(--ease), border-color var(--med) var(--ease); }
 .nav-in { max-width: var(--page); margin: 0 auto; height: var(--nav-h); padding-inline: var(--gut); display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 4px; }
@@ -163,7 +163,7 @@ a.wm:active { transform: translateY(1px); }
 
 /* the open panel: the links as ruled rows under the bar, at the gutter, the bar solid above them. It exists only
    below the width where the links sit in the bar, so it is written for that range alone. */
-@media (max-width: 759.98px) {
+@media (max-width: 739.98px) {
   .nav.is-open { background: var(--bg); border-color: var(--line); }
   .nav.is-open .nav-wm { opacity: 1; visibility: visible; }
   .js .nav.is-open nav {
@@ -174,7 +174,7 @@ a.wm:active { transform: translateY(1px); }
   .js .nav.is-open nav a { min-height: 56px; padding: 0; font-size: 18px; color: var(--ink); border-bottom: 1px solid var(--line-2); }
   .js .nav.is-open nav a:last-child { border-bottom: 0; }
 }
-@media (max-width: 759.98px) and (prefers-reduced-motion: no-preference) {
+@media (max-width: 739.98px) and (prefers-reduced-motion: no-preference) {
   .js .nav.is-open nav { transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease); }
   @starting-style { .js .nav.is-open nav { opacity: 0; transform: translateY(-6px); } }
 }
@@ -182,7 +182,7 @@ a.wm:active { transform: translateY(1px); }
 @media (min-width: 360px) {
   .nav-x { display: inline; }
 }
-@media (min-width: 760px) {
+@media (min-width: 740px) {
   .nav-in { gap: 24px; }
   .nav nav { display: flex; gap: 8px; }
   .js .nav-menu { display: none; }
@@ -250,11 +250,11 @@ a.wm:active { transform: translateY(1px); }
 }
 
 /* ---------- small portrait: what we leave out ----------
-   A phone held upright (below 760px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
+   A phone held upright (below 740px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
    desktop are unchanged; a phone on its side still shows everything. Each section file has its own block. Here: the
    room between sections, a third less (--sec from 56px to 40px, the footer's top from 56px), so the page reads as one
    scroll. */
-@media (max-width: 759.98px) and (orientation: portrait) {
+@media (max-width: 739.98px) and (orientation: portrait) {
   :root { --sec: 40px; }
   .ft-in { padding-top: 40px; }
 }

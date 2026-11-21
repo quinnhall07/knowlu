@@ -223,7 +223,7 @@ html:not(.js) .price::before {
 .pr-note { font: 500 var(--t-small)/1.4 var(--sans); color: var(--ink-3); text-wrap: balance; text-shadow: var(--halo); }
 
 /* ---------- a tablet and wider: heading and form on the left, the steps on the right ---------- */
-@media (min-width: 760px) {
+@media (min-width: 740px) {
   .pl-in {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: clamp(48px, 6.4vw, 112px);
     grid-template-areas: "head side" "form side"; grid-template-rows: auto 1fr;
@@ -237,7 +237,7 @@ html:not(.js) .price::before {
   .pl-end p { font-size: var(--t-lead); }
 }
 /* a tablet's narrower column: the outline button may take two lines, so it grows to fit them */
-@media (min-width: 760px) and (max-width: 1179.98px) {
+@media (min-width: 740px) and (max-width: 1179.98px) {
   .pl-full { height: auto; min-height: 56px; padding: 14px 22px; line-height: 1.25; }
 }
 @media (min-width: 1200px) {
@@ -285,10 +285,10 @@ html:not(.js) .price::before {
 }
 
 /* ---------- small portrait: what we leave out ----------
-   A phone held upright (below 760px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
+   A phone held upright (below 740px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
    desktop are unchanged; a phone on its side still shows everything. Here: the pilot's three steps. The way straight
    to the full application and its note stay, under the form. */
-@media (max-width: 759.98px) and (orientation: portrait) {
+@media (max-width: 739.98px) and (orientation: portrait) {
   .pl-steps { display: none; }
   .pl-in { padding-block: 56px; }
   .pl-side { margin-top: 48px; }

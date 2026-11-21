@@ -389,7 +389,7 @@
       hint.textContent = first;
       say(piece, first);
     });
-    document.addEventListener('click', function (e) { if (held && !week.contains(e.target)) release(); });
+    document.addEventListener('pointerdown', function (e) { if (held && !week.contains(e.target)) release(); });
 
     // a mouse or pen can also drag a block; a finger taps, so the page still scrolls
     function dayAt(x, y) {

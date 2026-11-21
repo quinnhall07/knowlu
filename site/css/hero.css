@@ -97,7 +97,7 @@
    Every size here is a share of the screen's width, so the three always fit inside the gutters: the list takes up
    to 46% of the width, the gap 5%, and the wordmark (3.96em wide) the 41% that is left at most. The words under the
    button wrap to the room the list leaves them. */
-@media (min-width: 760px), (min-width: 600px) and (orientation: landscape) and (max-height: 520px) {
+@media (min-width: 740px), (min-width: 600px) and (orientation: landscape) and (max-height: 520px) {
   .hero-in {
     grid-template-columns: minmax(0, max-content) auto; grid-template-rows: auto auto;
     grid-template-areas: "lock today" "go today";
@@ -146,12 +146,12 @@
 }
 
 /* ---------- small portrait: what we leave out ----------
-   A phone held upright (the stacked layout, below the 760px two-column width) shows less, step by step. Hidden with
+   A phone held upright (the stacked layout, below the 740px two-column width) shows less, step by step. Hidden with
    CSS only, so the markup, the tablet and the desktop are unchanged; a phone on its side still shows everything.
    Here: the example list for today and its caption, and the long fine print, which gives way to the short one. The
    hero is then the lockup, the button and one line under it, with more room between lockup and button so the paper
    reads as space, not as a gap. */
-@media (max-width: 759.98px) and (orientation: portrait) {
+@media (max-width: 739.98px) and (orientation: portrait) {
   .hero-today, .hero-go-long { display: none; }
   .hero-go-short { display: block; }
   .hero-in { padding-bottom: 32px; }
