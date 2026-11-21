@@ -596,3 +596,267 @@ fn the_rls_job_runs_the_security_advisor_after_the_suite_and_fails_on_warn() {
     assert_eq!(ifs(step), ifs(pgtap), "the advisor step's one if is pgTAP's: {step}");
     assert!(!job.contains("continue-on-error"), "cloud-rls must not soften a failure with continue-on-error:\n{job}");
 }
+
+// --- site.yml: publishing knowlu.com without a release (v0.4.1 pricing, note D15, T10) ---------
+//
+// `release.yml`'s Pages step replaces the whole site, and `site/releases/` (the installer,
+// `Knowlu-setup.exe`, `latest.json`) exists only in the build's artifact, never in git. So a deploy
+// from a checkout takes the installer and the updater's manifest off knowlu.com. `site.yml` is the
+// one way to publish a new terms page between releases: by hand, from `main`, never beside a release,
+// with that Release's files restored first and the privacy page unchanged since its tag.
+
+/// site.yml's code: every line but a whole-line comment, so a comment that names a command can
+/// neither satisfy a pin nor trip one.
+fn site() -> String {
+    let text = workflow("site.yml");
+    let code: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+    code.join("\n") + "\n"
+}
+
+/// The one job's steps, each from its `- ` to the next step.
+fn site_steps(code: &str) -> Vec<String> {
+    let jobs = code.split("\njobs:\n").nth(1).expect("site.yml has a `jobs:` block");
+    jobs.split("\n      - ").skip(1).map(String::from).collect()
+}
+
+/// The index of the one step that contains `needle`.
+fn site_step(steps: &[String], needle: &str) -> usize {
+    let hits: Vec<usize> = steps.iter().enumerate().filter(|(_, s)| s.contains(needle)).map(|(i, _)| i).collect();
+    assert_eq!(hits.len(), 1, "site.yml: exactly one step contains `{needle}`, found {hits:?}");
+    hits[0]
+}
+
+/// The step indexes of every deploy, so each guard can be shown to run before all of them.
+fn site_deploys(steps: &[String]) -> Vec<usize> {
+    let d: Vec<usize> = steps.iter().enumerate().filter(|(_, s)| s.contains("cloudflare/wrangler-action@")).map(|(i, _)| i).collect();
+    assert!(!d.is_empty(), "site.yml deploys with cloudflare/wrangler-action");
+    d
+}
+
+/// A guard is never skipped or softened.
+fn assert_unconditional(step: &str) {
+    assert!(!step.lines().any(|l| l.trim_start().starts_with("if:")), "a guard step carries no if: {step}");
+    assert!(!step.contains("continue-on-error"), "a guard step is never softened: {step}");
+}
+
+#[test]
+fn site_yml_is_started_by_hand_only() {
+    let code = site();
+    let lines: Vec<&str> = code.lines().collect();
+    assert_eq!(lines.iter().filter(|l| l.starts_with("on:")).count(), 1, "site.yml has one top-level `on:`");
+    let at = lines.iter().position(|l| *l == "on:").expect("site.yml's `on:` is a block, so workflow_dispatch can carry its input");
+    let triggers: Vec<&str> = lines[at + 1..]
+        .iter()
+        .take_while(|l| l.is_empty() || l.starts_with(' '))
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .map(|l| l.trim().trim_end_matches(':'))
+        .collect();
+    assert_eq!(triggers, ["workflow_dispatch"], "site.yml is started by hand and by nothing else");
+}
+
+#[test]
+fn site_yml_runs_from_main_only() {
+    let code = site();
+    let steps = site_steps(&code);
+    let main = site_step(&steps, "refs/heads/main");
+    assert_eq!(main, 0, "the ref check is the first step, before anything is read or deployed");
+    let s = &steps[main];
+    assert!(s.contains("${{ github.ref }}"), "the check reads github.ref: {s}");
+    assert!(s.contains("!= \"refs/heads/main\"") && s.contains("exit 1"), "any ref but refs/heads/main fails the run: {s}");
+    // The `exit 1` must be the ref branch's own, never only the deploy_branch `case`'s below it.
+    let (_, after) = s.split_once("if [ \"$REF\" != \"refs/heads/main\" ]; then").expect("the ref check is `if [ \"$REF\" != \"refs/heads/main\" ]; then`");
+    let branch: Vec<&str> = after.lines().take_while(|l| l.trim() != "fi").collect();
+    assert!(branch.iter().any(|l| l.trim() == "exit 1"), "the wrong-ref branch itself exits 1: {branch:?}");
+    assert_unconditional(s);
+    // A job-level `if:` would skip the run green instead of refusing it.
+    let job = code.split("\njobs:\n").nth(1).unwrap();
+    assert!(!job.lines().any(|l| l.starts_with("    if:")), "no job-level if: a wrong ref is refused, never skipped");
+    assert!(!code.contains("continue-on-error"), "nothing in site.yml is softened");
+}
+
+#[test]
+fn site_yml_reads_one_tag() {
+    let code = site();
+    let steps = site_steps(&code);
+    assert_eq!(code.matches("gh release ").count(), 2, "exactly two gh release calls: view (the tag) and download (the restore)");
+    let view: Vec<&str> = code.lines().filter(|l| l.contains("gh release view")).collect();
+    assert_eq!(view.len(), 1, "the latest Release is read once: {view:?}");
+    assert!(view[0].contains("gh release view --json tagName"), "with no tag argument, which names the latest Release: {}", view[0]);
+    assert_eq!(view[0].trim(), "tag=$(gh release view --json tagName --jq .tagName)", "the exact line, so no tag argument can be added");
+    for other in ["git describe", "releases/latest", "--latest", "gh api"] {
+        assert!(!code.contains(other), "site.yml names the latest a second way: `{other}`");
+    }
+    let tag = site_step(&steps, "gh release view");
+    assert!(steps[tag].contains("id: tag") && steps[tag].contains(">> \"$GITHUB_OUTPUT\""), "the tag step publishes `tag`: {}", steps[tag]);
+    let restore = site_step(&steps, "gh release download");
+    let privacy = site_step(&steps, "site/privacy.html");
+    for (what, i) in [("the restore", restore), ("the privacy comparison", privacy)] {
+        assert!(tag < i, "{what} comes after the tag is read");
+        assert!(steps[i].contains("TAG: ${{ steps.tag.outputs.tag }}"), "{what} uses the tag step's value: {}", steps[i]);
+    }
+    assert!(steps[restore].contains("gh release download \"$TAG\""), "the restore downloads that tag's Release: {}", steps[restore]);
+}
+
+#[test]
+fn site_yml_refuses_a_newer_tag_or_a_running_release() {
+    let code = site();
+    let steps = site_steps(&code);
+    let checkout = site_step(&steps, "actions/checkout@");
+    assert!(
+        code.contains("git ls-remote --tags origin") || steps[checkout].contains("fetch-depth: 0"),
+        "the tags come from the remote: checkout's default depth of 1 fetches none, and the check would pass on nothing: {}",
+        steps[checkout]
+    );
+    assert!(!steps[checkout].contains("fetch-depth: 1"), "fetch-depth: 1 fetches no tags: {}", steps[checkout]);
+    let newer = site_step(&steps, "--sort=v:refname");
+    let sort: Vec<&str> = code.lines().filter(|l| l.contains("--sort=v:refname")).collect();
+    assert_eq!(sort.len(), 1, "one version-sorted tag list: {sort:?}");
+    assert!(sort[0].contains("'v*'"), "every v* tag is compared: {}", sort[0]);
+    assert!(sort[0].contains("git tag --list") || sort[0].contains("git ls-remote --tags origin"), "the list is git's own: {}", sort[0]);
+    assert!(sort[0].contains("tail -n 1"), "ascending version order, so the newest is the last line: {}", sort[0]);
+    assert!(steps[newer].contains("steps.tag.outputs.tag") && steps[newer].contains("exit 1"), "a tag newer than the Release's stops the run: {}", steps[newer]);
+    let running = site_step(&steps, "gh run list");
+    let list: Vec<&str> = code.lines().filter(|l| l.contains("gh run list")).collect();
+    assert_eq!(list.len(), 1, "one run lookup: {list:?}");
+    assert!(list[0].contains("--workflow release.yml"), "the lookup reads release.yml's runs: {}", list[0]);
+    assert!(list[0].contains("select(.status != \"completed\")"), "queued, waiting and in-progress runs all count: {}", list[0]);
+    assert!(steps[running].contains("exit 1"), "a release run that is not completed stops the run: {}", steps[running]);
+    // Which way each comparison points: a flipped `!=` would refuse every good run and pass every bad one.
+    for (i, cond) in [(newer, "if [ \"$newest\" != \"$TAG\" ]; then"), (running, "if [ \"$open\" != \"0\" ]; then")] {
+        assert!(steps[i].lines().any(|l| l.trim() == cond), "the guard's condition is exactly `{cond}`: {}", steps[i]);
+    }
+    let restore = site_step(&steps, "gh release download");
+    for (what, i) in [("the tag check", newer), ("the run check", running)] {
+        assert_unconditional(&steps[i]);
+        assert!(i < restore, "{what} runs before the restore");
+        for d in site_deploys(&steps) {
+            assert!(i < d, "{what} runs before the deploy");
+        }
+    }
+}
+
+#[test]
+fn site_yml_permissions_are_exactly_read_only() {
+    let code = site();
+    let perms: Vec<&str> = code.lines().filter(|l| l.trim_start().starts_with("permissions:")).collect();
+    assert_eq!(
+        perms,
+        ["    permissions: { contents: read, actions: read }"],
+        "one permissions line, the job's: contents to read the Release, actions to see release.yml's runs"
+    );
+    assert!(!code.contains("id-token"), "no id-token: the release environment is the signing credential's OIDC subject");
+}
+
+#[test]
+fn site_yml_has_a_concurrency_group_and_the_release_environment() {
+    let code = site();
+    let (head, jobs) = code.split_once("\njobs:\n").expect("site.yml has a `jobs:` block");
+    let job_keys: Vec<&str> = jobs.lines().filter(|l| regex::Regex::new(r"^  [a-z-]+:\s*$").unwrap().is_match(l)).collect();
+    assert_eq!(job_keys.len(), 1, "site.yml has one job: {job_keys:?}");
+    let lines: Vec<&str> = head.lines().collect();
+    let at = lines.iter().position(|l| *l == "concurrency:").expect("site.yml has a workflow-level concurrency: block");
+    let group = lines[at + 1..]
+        .iter()
+        .take_while(|l| l.starts_with(' '))
+        .find_map(|l| l.trim().strip_prefix("group:"))
+        .map(str::trim)
+        .expect("the concurrency block names a group");
+    assert!(group.contains("site"), "the group is site.yml's own: {group}");
+    for name in all_workflows().into_iter().filter(|n| n != "site.yml") {
+        assert!(!workflow(&name).contains(&format!("group: {group}")), "{name} shares site.yml's concurrency group {group}");
+    }
+    assert_eq!(code.matches("environment: release").count(), 1, "the one job declares the release environment, once");
+    assert!(jobs.lines().any(|l| l == "    environment: release"), "environment: release is job-level, as release.yml's publish job has it");
+}
+
+#[test]
+fn site_yml_restores_the_release_files_first() {
+    let code = site();
+    let steps = site_steps(&code);
+    let restore = site_step(&steps, "gh release download");
+    let s = &steps[restore];
+    let download: Vec<&str> = s.lines().filter(|l| l.contains("gh release download")).collect();
+    assert_eq!(download.len(), 1, "one download: {download:?}");
+    for part in ["--dir site/releases", "--pattern '*-setup.exe'", "--pattern 'latest.json'"] {
+        assert!(download[0].contains(part), "the download carries `{part}`: {}", download[0]);
+    }
+    assert!(
+        s.lines().any(|l| l.trim_start().starts_with("cp ") && l.trim_end().ends_with(" site/releases/Knowlu-setup.exe")),
+        "the installer is copied to the stable Knowlu-setup.exe, as release.ps1 does: {s}"
+    );
+    assert!(s.contains("installer") && s.contains("exit 1"), "a missing installer stops the run: {s}");
+    assert_unconditional(s);
+    for d in site_deploys(&steps) {
+        assert!(restore < d, "the restore runs before the deploy");
+    }
+}
+
+#[test]
+fn site_yml_refuses_a_changed_privacy_page() {
+    let code = site();
+    let steps = site_steps(&code);
+    let privacy = site_step(&steps, "site/privacy.html");
+    let s = &steps[privacy];
+    assert!(s.contains("git diff --quiet \"$TAG\" HEAD -- site/privacy.html"), "the page is compared with the tag's: {s}");
+    let cond = "if ! git diff --quiet \"$TAG\" HEAD -- site/privacy.html; then";
+    assert!(s.lines().any(|l| l.trim() == cond), "the refusal is on a difference, exactly `{cond}`: {s}");
+    assert!(s.contains("exit 1"), "a changed page stops the run: {s}");
+    assert_unconditional(s);
+    for d in site_deploys(&steps) {
+        assert!(privacy < d, "the comparison runs before the deploy");
+    }
+}
+
+#[test]
+fn site_yml_deploys_as_the_release_does() {
+    let code = site();
+    let steps = site_steps(&code);
+    let r = workflow("release.yml");
+    // `- uses: x` and a named step's `uses: x` are the same reference.
+    let refs = |text: &str| -> Vec<String> {
+        uses_lines(text).into_iter().map(|l| l.trim_start_matches("- ").to_string()).filter(|l| l.contains("cloudflare/wrangler-action@")).collect()
+    };
+    let release_uses = refs(&r);
+    assert_eq!(release_uses.len(), 1);
+    let release_with = |key: &str| -> String {
+        r.lines().map(str::trim).find(|l| l.starts_with(key)).unwrap_or_else(|| panic!("release.yml has no {key}")).to_string()
+    };
+    let command = release_with("command:");
+    assert!(command.contains("--branch main"), "release.yml deploys to the main branch: {command}");
+    let deploys = site_deploys(&steps);
+    assert_eq!(deploys.len(), 2, "two deploys, one per deploy_branch choice, each with a literal command");
+    assert_eq!(code.matches("pages deploy").count(), 2, "no Pages deploy outside the two guarded wrangler-action steps");
+    for (d, branch) in deploys.iter().zip(["main", "preview"]) {
+        let s = &steps[*d];
+        let uses = refs(s);
+        assert_eq!(uses, release_uses, "the same pinned wrangler-action as release.yml");
+        let ifs: Vec<&str> = s.lines().map(str::trim).filter(|l| l.starts_with("if:")).collect();
+        assert_eq!(ifs, [format!("if: inputs.deploy_branch == '{branch}'")], "the {branch} deploy runs for its own choice only");
+        for key in ["apiToken:", "accountId:"] {
+            assert!(s.lines().any(|l| l.trim() == release_with(key)), "the {branch} deploy passes {key} as release.yml does: {s}");
+        }
+        let want = command.replace("--branch main", &format!("--branch {branch}"));
+        assert!(s.lines().any(|l| l.trim() == want), "the {branch} deploy runs `{want}`: {s}");
+    }
+    let (head, _) = code.split_once("\njobs:\n").unwrap();
+    let input = head.split_once("      deploy_branch:\n").map(|(_, rest)| rest).expect("workflow_dispatch has a deploy_branch input");
+    let input: Vec<&str> = input.lines().take_while(|l| l.starts_with("        ")).map(str::trim).collect();
+    for line in ["type: choice", "default: main", "options: [main, preview]"] {
+        assert!(input.contains(&line), "deploy_branch carries `{line}`: {input:?}");
+    }
+    let first = &steps[0];
+    assert!(
+        first.contains("${{ inputs.deploy_branch }}") && first.contains("main|preview)"),
+        "the first step refuses a deploy_branch that neither deploy would take, so a run never ends green with nothing deployed: {first}"
+    );
+}
+
+#[test]
+fn site_yml_never_runs_self_hosted() {
+    let raw = workflow("site.yml");
+    assert!(!raw.contains("self-hosted"), "site.yml must never run self-hosted");
+    assert!(!raw.contains("CI_SELF_HOSTED"), "site.yml must not read the CI switch");
+    let code = site();
+    let runs: Vec<&str> = code.lines().filter(|l| l.trim_start().starts_with("runs-on:")).map(str::trim).collect();
+    assert_eq!(runs, ["runs-on: ubuntu-24.04"], "one GitHub-hosted runner, named literally");
+}

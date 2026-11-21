@@ -1,0 +1,150 @@
+# Publishes knowlu.com without a release (v0.4.1 pricing, design note D15). A price change is a
+# catalog change plus a new terms page, and the page has to go live without a `v*` tag.
+#
+# Why a workflow and never a hand deploy: release.yml's Pages step replaces the whole site, and
+# site/releases/ (the versioned installer, Knowlu-setup.exe, latest.json) lives only in that run's
+# artifact - in git it holds .gitkeep. A plain `pages deploy site` from a checkout takes the installer
+# and the updater's manifest off knowlu.com. This file puts them back first, from the latest GitHub
+# Release, which is the lasting copy.
+#
+# The guards, in order, each a failed run rather than a skipped one:
+#   - from main only;
+#   - ONE tag: the latest Release's tagName is read once, and both the restore and the privacy
+#     comparison use it;
+#   - never beside a release: no v* tag may sort after that tag (a release is in flight or failed -
+#     release.yml creates the Release only after its own deploy), and no release.yml run may be
+#     unfinished. The tags come from a full-history checkout, because depth 1 fetches none;
+#   - site/privacy.html must equal that tag's: the privacy version is compiled into the app, so the
+#     page changes only with a release.
+#
+# Recovery when knowlu.com has lost its installer or latest.json is another run of this file. Never
+# re-run a tag's publish job: it deploys that tag's site/, whose terms page may be older than the
+# catalog's TERMS_VERSION, and its artifact is kept 7 days only.
+#
+# engine/tests/workflows.rs pins all of it (the site_yml_* tests).
+name: site
+on:
+  workflow_dispatch:
+    inputs:
+      # `preview` deploys to the Pages preview alias, for reading the pages, the installer and
+      # latest.json before the live run. A choice, not free text: each value has its own deploy step
+      # with a literal command, so no input is ever expanded into a command line.
+      deploy_branch:
+        description: Pages branch to deploy (main is knowlu.com)
+        type: choice
+        default: main
+        options: [main, preview]
+# Its own group: two site runs queue rather than overlap, and a running deploy is never cancelled
+# halfway. A release is kept apart by the run check below, not by this group.
+concurrency:
+  group: site-publish
+  cancel-in-progress: false
+jobs:
+  publish-site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # As release.yml's publish job: a required reviewer added to the `release` environment gates
+    # this too, and the CLOUDFLARE_* secrets resolve whether or not they are scoped to it.
+    environment: release
+    # Read only, and never id-token: the `release` environment is the subject of the signing
+    # credential's OIDC trust (release.yml, azure/login). contents reads the Release and the tags;
+    # actions sees release.yml's runs.
+    permissions: { contents: read, actions: read }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: main only
+        env:
+          REF: ${{ github.ref }}
+          DEPLOY_BRANCH: ${{ inputs.deploy_branch }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "site.yml publishes from main only; this run is on $REF"
+            exit 1
+          fi
+          # The choice input already limits this; a value neither deploy step takes would end the
+          # run green with nothing deployed, so it is refused here as well.
+          case "$DEPLOY_BRANCH" in
+            main|preview) ;;
+            *) echo "deploy_branch must be main or preview, not '$DEPLOY_BRANCH'"; exit 1 ;;
+          esac
+      # fetch-depth: 0 - the newer-tag check below needs every tag, and depth 1 fetches none.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with: { fetch-depth: 0 , persist-credentials: false }
+      # The one place "latest" is decided. With no tag argument, gh names the latest Release
+      # (drafts and prereleases excluded).
+      - name: the release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$(gh release view --json tagName --jq .tagName)
+          if ! [[ "$tag" =~ ^v[0-9] ]]; then
+            echo "the latest Release names no v* tag: '$tag'"
+            exit 1
+          fi
+          echo "latest Release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # Version order, not string order, so v0.10.0 sorts after v0.9.0.
+      - name: no newer tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          newest=$(git tag --list 'v*' --sort=v:refname | tail -n 1)
+          if [ "$newest" != "$TAG" ]; then
+            echo "tag $newest sorts after the latest Release ($TAG): a release is in flight or has failed; finish it first"
+            exit 1
+          fi
+      # Any status but completed counts: queued, waiting on a reviewer, in progress.
+      - name: no release running
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          open=$(gh run list --workflow release.yml --limit 20 --json status --jq '[.[] | select(.status != "completed")] | length')
+          if [ "$open" != "0" ]; then
+            echo "$open release.yml run(s) not completed: wait for the release to finish"
+            exit 1
+          fi
+      - name: privacy page unchanged since the release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if ! git diff --quiet "$TAG" HEAD -- site/privacy.html; then
+            echo "site/privacy.html differs from $TAG's: the privacy version is compiled into the app, so this page ships with a release"
+            exit 1
+          fi
+      # What release.yml's artifact put in site/releases/: the versioned installer, the stable
+      # Knowlu-setup.exe (release.ps1 copies it), and latest.json when the Release carries one.
+      - name: restore the release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release download "$TAG" --dir site/releases --pattern '*-setup.exe' --pattern 'latest.json'
+          shopt -s nullglob
+          installers=(site/releases/*-setup.exe)
+          if [ "${#installers[@]}" -ne 1 ]; then
+            echo "expected one installer among $TAG's assets, found ${#installers[@]}"
+            exit 1
+          fi
+          cp "${installers[0]}" site/releases/Knowlu-setup.exe
+          ls -l site/releases
+      # release.yml's deploy, line for line, once per choice.
+      - name: deploy (main)
+        if: inputs.deploy_branch == 'main'
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy site --project-name knowlu --branch main --commit-dirty=true
+      - name: deploy (preview)
+        if: inputs.deploy_branch == 'preview'
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy site --project-name knowlu --branch preview --commit-dirty=true
