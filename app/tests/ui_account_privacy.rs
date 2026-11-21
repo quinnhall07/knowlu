@@ -242,6 +242,26 @@ fn the_panels_changes_name_gmail_and_amazon() {
     }
 }
 
+/// Pilot-privacy amendment §8 item 5 (and §3.6, D8): the launch bump's lines name This computer only, the
+/// legal-demand exception, the decision records deleted on disconnect and the pilot form, beside the rewrite's
+/// bump lines (who operates Knowlu, the companies newly named, §5).
+#[test]
+fn the_panels_changes_name_the_launch_bumps_changes() {
+    let js = reconsent();
+    let table = changes_table(&js);
+    for w in ["This computer only", "valid legal demand", "who can access your data", "decided about its email", "pilot", "KNOWLU LLC", "Link", "Resend"] {
+        assert!(table.contains(w), "the changes must name {w:?}");
+    }
+}
+
+/// The rewrite's C18 (m7): never the word "AI" in the changes, the same word-boundary test the site's pins use.
+#[test]
+fn the_panels_changes_never_say_ai() {
+    let js = reconsent();
+    let ai = changes_table(&js).split(|c: char| !c.is_alphanumeric()).filter(|w| *w == "AI").count();
+    assert_eq!(ai, 0, "the changes say \"AI\" {ai} time(s)");
+}
+
 #[test]
 fn the_panels_first_line_names_the_version_from_the_key_never_a_literal_date() {
     let js = reconsent();

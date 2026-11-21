@@ -107,7 +107,7 @@
   // emits, and this is the page's copy (ui_wizard.rs pins the two together).
   var UNREACHABLE = "the account service could not be reached";
   // The site's privacy sentence, byte for byte (ui_wizard.rs reads site/privacy.html).
-  var PRIVACY = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
+  var PRIVACY = "Your tasks and notes live in a plain-text folder on this machine and, unless you choose This computer only, in your Knowlu account, so every computer you sign in on opens on the same day; that copy is encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
   var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
   // Escaped on purpose: the shipped page carries no bare network literal.
   var ICS_OK = /^https:\/\/\S+(\.ics($|\?)|\/calendar\/)/i;
