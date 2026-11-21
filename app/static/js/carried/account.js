@@ -216,7 +216,7 @@
             if (!UP.root) { return; }
             if (yes2) { finishUpgrade(); return; }
             if (tries < 40) { setTimeout(tick, 3000); }
-            else { say("Still not subscribed. When the payment page is done, press Subscribe again."); }
+            else { say("Still not subscribed. When the payment page is done, choose a plan again."); }
           });
         };
         setTimeout(tick, 3000);

@@ -316,7 +316,7 @@ fn the_terms_version_constant_is_the_published_terms_date() {
 }
 
 /// Spec §7: Back and Next are rendered state, never a dead control. Changed (plan §7, owners' split): the
-/// upgrade overlay's half (`#up-subscribe`, its two stand-down checks, "press Subscribe again") is T20's and
+/// upgrade overlay's half (`#up-subscribe`, its two stand-down checks, "choose a plan again") is T20's and
 /// lives in `ui_account_privacy.rs`; this file pins the wizard's.
 #[test]
 fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
