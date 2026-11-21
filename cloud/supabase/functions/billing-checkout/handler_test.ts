@@ -245,7 +245,8 @@ Deno.test("a_changed_offer_is_refused", async () => {
       // Present but not equal, whatever its type (note D3: "Anything else is refused with 409").
       { plan: "four_weekly", amount_cents: "1299", terms_version: TERMS_VERSION },
       { plan: "four_weekly", amount_cents: 12.99, terms_version: TERMS_VERSION },
-      { plan: "four_weekly", amount_cents: 1299, terms_version: 20260910 },
+      // The terms version's own digits, as a number.
+      { plan: "four_weekly", amount_cents: 1299, terms_version: Number(TERMS_VERSION.replaceAll("-", "")) },
     ]
   ) {
     const { deps, seen } = fakes();

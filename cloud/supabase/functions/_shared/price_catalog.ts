@@ -91,7 +91,7 @@ export interface Offer {
 
 /** The version of the terms page that states the selling prices. A quoted literal on one line: the
  * app's terms tie reads this file as text. */
-export const TERMS_VERSION = "2026-09-10";
+export const TERMS_VERSION = "2026-11-21";
 
 /** Fixed forever: a key's cadence never changes with its price (D13). */
 export const CADENCE: Record<PlanKey, Cadence> = {
