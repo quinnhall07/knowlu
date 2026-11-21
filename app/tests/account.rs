@@ -1434,11 +1434,116 @@ fn the_checkout_retries_the_consent_first_and_a_failed_retry_still_reaches_strip
         (500, r#"{"msg":"the consent route is down"}"#.to_string()),
         (200, r#"{"url":"https://checkout.example.invalid/c/cs_1"}"#.to_string()),
     ]);
-    let out = checkout_url_at(&format!("{base}/functions/v1"), "the-token", "monthly");
+    let out = checkout_url_at(&format!("{base}/functions/v1"), "the-token", "four_weekly", 1299, "2031-02-03");
     let seen = handle.join().expect("server thread");
     assert_eq!(out.expect("a checkout link"), "https://checkout.example.invalid/c/cs_1");
     assert!(seen[0].starts_with("POST /functions/v1/account/consent "), "the retry comes first: {}", seen[0]);
     assert!(seen[1].starts_with("POST /functions/v1/billing-checkout "), "{}", seen[1]);
+}
+
+/// The JSON body of one request `loopback` saw: everything after the head.
+fn request_body(seen: &str) -> serde_json::Value {
+    let body = seen.split("\r\n\r\n").nth(1).expect("a body");
+    serde_json::from_str(body).expect("a JSON body")
+}
+
+/// v0.4.1 (note D9): the app holds no price. The subscribe step's offer is the server's, read from
+/// `GET /billing-checkout` with the session's bearer and handed on unchanged. A refusal is the
+/// server's own sentence, through `provider_error`. No network starts with `UNREACHABLE`, the clause
+/// the page reads to say the prices could not be loaded without a connection. A 2xx that is not a
+/// JSON object is a named failure, never an empty offer. The figures are invented: nothing on this
+/// side may assume the catalog's. The page's envelope, `{ ok, error, terms_version, plans, note }`, is
+/// pinned here too, because the subscribe step reads exactly those five keys.
+#[test]
+fn checkout_offer_at_reads_the_offer() {
+    use knowlu::account::{checkout_offer_answer, checkout_offer_at, UNREACHABLE};
+    let offer = serde_json::json!({
+        "terms_version": "2031-02-03",
+        "plans": [
+            { "plan": "yearly", "amount_cents": 4321, "lines": ["A whole sentence.", "Another whole sentence."] },
+            { "plan": "four_weekly", "amount_cents": 765, "lines": ["One more sentence."] },
+        ],
+        "note": "A line below both.",
+    });
+    let (base, handle) = loopback(vec![
+        (200, offer.to_string()),
+        (401, r#"{"error":"the session has expired"}"#.to_string()),
+        (500, r#"{"error":"the function is not configured"}"#.to_string()),
+        (200, "not json".to_string()),
+        (200, "[]".to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..5).map(|_| checkout_offer_at(&api, "the-access-token")).collect();
+    let seen = handle.join().expect("server thread");
+    assert_eq!(got[0], Ok(offer.clone()), "the offer, unchanged");
+    assert_eq!(got[1], Err("the session has expired".to_string()), "a refusal is the server's own sentence");
+    assert_eq!(got[2], Err("the function is not configured".to_string()), "a 5xx too");
+    assert_eq!(got[3], Err("the offer reply could not be read".to_string()), "a 2xx with no offer in it");
+    assert_eq!(got[4], Err("the offer reply could not be read".to_string()), "JSON that is not an object holds no offer either");
+    assert_eq!(seen.len(), 5);
+    for s in &seen {
+        assert!(s.starts_with("GET /functions/v1/billing-checkout HTTP/1.1\r\n"), "{s}");
+        assert!(s.to_ascii_lowercase().contains("\r\nauthorization: bearer the-access-token\r\n"), "{s}");
+    }
+
+    // Nothing listens on this port: bound only to learn that it is free, then released.
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        format!("http://127.0.0.1:{}/functions/v1", l.local_addr().expect("addr").port())
+    };
+    let down = checkout_offer_at(&closed, "the-access-token");
+    assert!(down.as_ref().is_err_and(|e| e.starts_with(UNREACHABLE)), "{down:?}");
+
+    let page = checkout_offer_answer(Ok(offer.clone()));
+    let want = serde_json::json!({ "ok": true, "error": null, "terms_version": "2031-02-03", "plans": offer["plans"], "note": "A line below both." });
+    assert_eq!(page, want, "the server's three fields, as they came");
+    let page = checkout_offer_answer(down);
+    // Whole-object equality, key by key: indexing a missing key reads as null, so a misspelt key
+    // would pass a field-by-field check while the page read `undefined`.
+    let want = serde_json::json!({ "ok": false, "error": page["error"].clone(), "terms_version": null, "plans": null, "note": null });
+    assert_eq!(page, want, "the five keys and nothing else");
+    assert!(page["error"].as_str().is_some_and(|e| e.starts_with(UNREACHABLE)), "the sentence, for the page to read: {page}");
+}
+
+/// v0.4.1 (notes D3, D9, D15): the checkout sends back the offer the student was shown, exactly
+/// `plan`, `amount_cents` and `terms_version`, so the consent row the server writes is the amount and
+/// terms version the page showed. The compiled-in `TOS_VERSION` is sign-up's. It still rides the
+/// consent retry in front, and reaches the checkout only when the offer named it. Invented figures.
+#[test]
+fn checkout_url_at_sends_the_offer_it_was_given() {
+    use knowlu::account::checkout_url_at;
+    let shown = "2031-02-03";
+    assert_ne!(shown, TOS_VERSION, "the offer's version must differ from sign-up's for this test to say anything");
+    let (base, handle) = loopback(vec![
+        (200, r#"{"ok":true}"#.to_string()),
+        (200, r#"{"url":"https://checkout.example.invalid/c/cs_2"}"#.to_string()),
+        (200, r#"{"ok":true}"#.to_string()),
+        (200, r#"{"url":"https://checkout.example.invalid/c/cs_3"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let first = checkout_url_at(&api, "the-access-token", "yearly", 4321, shown);
+    let second = checkout_url_at(&api, "the-access-token", "four_weekly", 765, TOS_VERSION);
+    let seen = handle.join().expect("server thread");
+    assert_eq!(first.as_deref(), Ok("https://checkout.example.invalid/c/cs_2"));
+    assert_eq!(second.as_deref(), Ok("https://checkout.example.invalid/c/cs_3"));
+    assert_eq!(seen.len(), 4, "a consent retry and a checkout, twice");
+    for consent in [&seen[0], &seen[2]] {
+        assert!(consent.starts_with("POST /functions/v1/account/consent HTTP/1.1\r\n"), "the retry comes first: {consent}");
+        let sign_up = serde_json::json!({ "tos_version": TOS_VERSION, "privacy_version": PRIVACY_VERSION, "age_attested": true });
+        assert_eq!(request_body(consent), sign_up, "the retry still sends sign-up's versions (D15)");
+    }
+    for checkout in [&seen[1], &seen[3]] {
+        assert!(checkout.starts_with("POST /functions/v1/billing-checkout HTTP/1.1\r\n"), "{checkout}");
+    }
+    let offered = serde_json::json!({ "plan": "yearly", "amount_cents": 4321, "terms_version": shown });
+    assert_eq!(request_body(&seen[1]), offered, "exactly the offer it was given, nothing more");
+    let raw = seen[1].split("\r\n\r\n").nth(1).expect("a body");
+    assert!(!raw.contains(TOS_VERSION), "sign-up's version never rides a checkout it was not given: {raw}");
+    let named = serde_json::json!({ "plan": "four_weekly", "amount_cents": 765, "terms_version": TOS_VERSION });
+    assert_eq!(request_body(&seen[3]), named, "…unless the offer named it");
+    for s in &seen {
+        assert!(s.to_ascii_lowercase().contains("\r\nauthorization: bearer the-access-token\r\n"), "{s}");
+    }
 }
 
 // ---- L4: the recorded privacy version, its cache, the gate and Accept (plan §4.4) ----
