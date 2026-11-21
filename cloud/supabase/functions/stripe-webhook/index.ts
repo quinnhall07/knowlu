@@ -1,5 +1,6 @@
 import { restFromEnv, restSelect, restUpsert } from "../_shared/db.ts";
 import { asResponse, fail } from "../_shared/http.ts";
+import { CATALOG, resolveCatalog } from "../_shared/price_catalog.ts";
 import { stripeGetFrom } from "../_shared/stripe.ts";
 import { handle } from "./handler.ts";
 
@@ -7,6 +8,14 @@ function env(name: string): string {
   const v = Deno.env.get(name);
   if (!v) throw fail(500, "the function is not configured");
   return v;
+}
+
+// The price catalog (note D13), resolved once per cold start through `Deno.env.get`, never through
+// `env` above: every variable is optional here (note D2), so one unset value leaves its entry matching
+// no id and is logged once, rather than answering 500 to every event Stripe sends.
+const catalog = resolveCatalog(CATALOG, (name) => Deno.env.get(name));
+if (catalog.missing.length > 0) {
+  console.error(`stripe-webhook: price variables not set: ${catalog.missing.join(", ")}`);
 }
 
 Deno.serve(async (req) => {
@@ -66,6 +75,28 @@ Deno.serve(async (req) => {
       // webhook endpoint. The id is path-encoded — it is Stripe's, but it arrives over the wire.
       fetchSubscription: (id) =>
         stripeGetFrom(stripeKey, globalThis.fetch)(`/v1/subscriptions/${encodeURIComponent(id)}`),
+      catalog,
+      // D6: the account's own address, by the account id the event carries; nothing else.
+      accountEmail: async (accountId) => {
+        const rows = await restSelect<{ email: string }>(
+          rest,
+          "accounts",
+          `id=eq.${encodeURIComponent(accountId)}&select=email&limit=1`,
+        );
+        return rows[0]?.email ?? null;
+      },
+      // The shape `billing-jobs/index.ts` sends with. A failure throws, and the handler answers 502.
+      sendEmail: async (m) => {
+        const res = await fetch(env("EMAIL_API_URL"), {
+          method: "POST",
+          headers: { authorization: `Bearer ${env("EMAIL_API_KEY")}`, "content-type": "application/json" },
+          body: JSON.stringify({ from: env("EMAIL_FROM"), to: m.to, subject: m.subject, text: m.text }),
+        });
+        if (!res.ok) {
+          console.error(`email: ${res.status}`);
+          throw fail(502, "the reminder could not be sent");
+        }
+      },
     });
   } catch (e) {
     return asResponse(e);
