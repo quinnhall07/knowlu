@@ -1108,17 +1108,24 @@ open sales.
 Item numbers are r3's, so the plan's Q-numbers still hold. r4 marked three items answered and added item
 14. r5 marks items 5, 6 and 7 settled by the signed amendment and adds item 15.
 
-**Still open:** 2, 4, 8, 10, 11, 12, 13, 14 and 15.
+**Still open:** 10, 11, 12 and 13. Items 2, 4, 8, 14 and 15 were answered on 2026-11-21, and item 16 was added
+and answered the same day.
 
 1. **Answered 2026-11-20: yes.** Amendment 2026-11-10 goes to `main`, with Amendment 2026-11-17, signed by
    Quinn on 2026-11-20 (PR #83), recording the 2026-11-17 rulings and rulings (6) to (10). T1a waits until
    both are on `main`.
-2. **The production parity push, if T0 finds the testers or comp-guard migration missing** (§4 step 0).
+2. **Answered 2026-11-21: there is nothing to push.** A read-only read of production, on Quinn's word, found
+   every migration in the repository applied (42 of 42), `20261020000500_testers` and
+   `20261020000600_comp_guards` among them. The question was: **the production parity push, if T0 finds the
+   testers or comp-guard migration missing** (§4 step 0).
    Blocks the comp grants on Quinn's accounts and step 10. *Recommend:* yes, if those two stamps are the
    whole gap, pushed from a scratch copy ending at `20261020000600`. Otherwise it is L9 proper, and v0.4.1
    waits for it.
 3. **Answered 2026-11-20 by ruling (6).** No `academic_year` subscription is kept, under any name (D1).
-4. **Moving Stripe to KNOWLU LLC.** Blocks the test-mode checklist, and so S1. *Recommend:* defer a new
+4. **Answered 2026-11-21: before v0.5.0 is released.** The first step is one question to Stripe Support:
+   whether the account's business details can change in place while Managed Payments is on. If they can, it
+   is a details change before step 9; if not, a new account is set up after v0.4.1 and before v0.5.0. The
+   question was: **moving Stripe to KNOWLU LLC.** It blocked the test-mode checklist, and so S1. *Recommend:* defer a new
    account until after v0.4.1, but before 10-16b's gate opens sales; after that it means recreating every
    paying subscription. A new account costs new secrets, a new endpoint, product, prices, portal and
    Managed Payments setting, every stored customer id cleared, and S1 again. If the move is only the same
@@ -1129,7 +1136,8 @@ Item numbers are r3's, so the plan's Q-numbers still hold. r4 marked three items
    first, replacing the 2026-09-14 one-plan ruling (D9).
 7. **Settled 2026-11-20 by the amendment's (10)** (`:1459-1462`): the gift year stays signed and these terms
    leave it out until the gift lane ships (D11).
-8. **A mailing address for the terms' Notices clause.** Blocks T5. *Recommend:* give it before T5, or rule
+8. **Answered 2026-11-21: email only for now.** It goes on the lawyer's list. The question was: **a mailing
+   address for the terms' Notices clause.** It blocked T5. *Recommend:* give it before T5, or rule
    email-only (it then goes on the lawyer's list).
 9. **Answered 2026-11-20 by ruling (6).** Each of your accounts that holds an old-price subscription gets a
    comp grant, then that subscription is cancelled immediately, in both modes (§4). It is no longer a
@@ -1147,7 +1155,7 @@ Item numbers are r3's, so the plan's Q-numbers still hold. r4 marked three items
     *Recommend:* accept them.
 13. **VISION's "One edition" line and CLAUDE.md's Direction line, in your words.** Blocks the tag.
     *Recommend:* yes.
-14. **The price-change design (new in r4).** The amendment's *Reading (7)* leaves to this lane whether a
+14. **Answered 2026-11-21: yes to all three.** The question was: **the price-change design (new in r4).** The amendment's *Reading (7)* leaves to this lane whether a
     change needs an app or a terms release (`:1400-1402`); this is the lane's answer, for you to confirm
     before T5. Three parts, one answer:
     - checkout records the terms version the server names, so a terms bump refuses no build (D3, D15);
@@ -1163,7 +1171,8 @@ Item numbers are r3's, so the plan's Q-numbers still hold. r4 marked three items
 
     Blocks T5 and T10. *Recommend:* yes to all three. Price changes are rare, and the lag in the second
     part never touches a charge.
-15. **What `move` does to a trial's first charge (new in r5; review I3).** A student who starts a trial at
+15. **Answered 2026-11-21: the first charge stays as agreed**, which is the recommendation below, so D14 is
+    no longer pending. The question was: **what `move` does to a trial's first charge (new in r5; review I3).** A student who starts a trial at
     the old price a few days before a change would otherwise have their first charge moved, while their
     consent row records the old cents. Blocks the first price change that uses `move`; T3 builds the
     recommendation and may merge with this open, because `KEPT` is empty at v0.4.1. *Recommend:* on
@@ -1173,6 +1182,10 @@ Item numbers are r3's, so the plan's Q-numbers still hold. r4 marked three items
     the 14-day trial and N of 15 or more, no trial is in the window, so the first charge stays the old price,
     as the consent row records (N4). D14 is written this way, marked pending. The other answer is to treat a
     trial like any period and move it either way.
+16. **Answered 2026-11-21 (new; raised while the roadmap was planned): the privacy page says only what is
+    kept.** Checkout records the price and the terms version accepted; nothing stores the plan and the
+    wording shown. The privacy text's sentence about keeping "the renewal terms you were shown" is dropped,
+    and T5 describes what is recorded. The fuller record is built only if the lawyer asks for it.
 
 *Settled outside this lane, and not on this list:* the tag replaces the whole live site with `site/`
 (`release.yml:294-297`). The controller ports the live site into `site/` (branch `site/port-live-1119`)
