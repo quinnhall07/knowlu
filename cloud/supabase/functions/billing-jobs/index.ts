@@ -1,12 +1,21 @@
 import { restFromEnv, restSelectAll, restUpsert } from "../_shared/db.ts";
 import { asResponse, fail } from "../_shared/http.ts";
-import { stripePostFrom } from "../_shared/stripe.ts";
+import { CATALOG, resolveCatalog } from "../_shared/price_catalog.ts";
+import { stripeGetFrom, stripePostFrom } from "../_shared/stripe.ts";
 import { handle, Subscriber } from "./handler.ts";
 
 function env(name: string): string {
   const v = Deno.env.get(name);
   if (!v) throw fail(500, "the function is not configured");
   return v;
+}
+
+// The price catalog (note D13), resolved once per cold start through `Deno.env.get`, never through
+// `env` above: every variable is optional here (note D14), so one unset kept variable leaves that
+// entry matching no id and is logged once, rather than answering 500 for the whole run.
+const catalog = resolveCatalog(CATALOG, (name) => Deno.env.get(name));
+if (catalog.missing.length > 0) {
+  console.error(`billing-jobs: price variables not set: ${catalog.missing.join(", ")}`);
 }
 
 Deno.serve(async (req) => {
@@ -22,7 +31,11 @@ Deno.serve(async (req) => {
         // and `order=account_id` is what makes the paging stable.
         return await restSelectAll<Subscriber>(rest, "billing_subscribers", "select=*&order=account_id");
       },
+      // D10, D14: the subscriber's own subscription, through the pinned GET helper, path-encoded.
+      getSubscription: (id) =>
+        stripeGetFrom(stripeKey, globalThis.fetch)(`/v1/subscriptions/${encodeURIComponent(id)}`),
       stripe: stripePostFrom(stripeKey, globalThis.fetch),
+      catalog,
       sendEmail: async (m) => {
         const res = await fetch(env("EMAIL_API_URL"), {
           method: "POST",
