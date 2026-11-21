@@ -62,7 +62,7 @@ fn membership_shows_no_price() {
         for (i, _) in low.match_indices("trial") {
             assert!(low[i..].starts_with("trialing"), "{f}: \"trial\" outside the status code trialing: {}", &low[i.saturating_sub(30)..(i + 30).min(low.len())]);
         }
-        for banned in ["7-day", "seven days", "7 days", "per month", "a month", "/month", "/mo", "per year", "12.99", "9.99", "69.99", "pell"] {
+        for banned in ["7-day", "seven days", "7 days", "14 days", "per month", "a month", "/month", "/mo", "per year", "12.99", "9.99", "69.99", "84.37", "6.49", "pell"] {
             assert!(!low.contains(banned), "{f}: {banned:?}");
         }
     }
@@ -73,6 +73,22 @@ fn membership_shows_no_price() {
     }
     assert!(member.contains("\"tester\"") && member.contains("Free tester access"), "a comped account reads the tester line and has no subscription to manage");
     assert!(member.contains("set-portal") && member.contains(".hidden"), "the tester has no Manage subscription");
+}
+
+/// v0.4.1 T4 (note D9, D1): the plan words are the two keys billing writes, `four_weekly` and `yearly`, and the
+/// retired `monthly` and `academic_year` have none, so a row carrying one reads as no plan (`drawMember`).
+#[test]
+fn plan_words_cover_every_plan_billing_can_write() {
+    let js = js();
+    let words = js.split("var PLAN_WORDS = {").nth(1).and_then(|s| s.split("};").next()).expect("settings.js needs `var PLAN_WORDS = { … };`");
+    for (key, said) in [("four_weekly", "Every 4 weeks"), ("yearly", "Yearly")] {
+        assert!(words.contains(&format!("{key}: \"{said}\"")), "PLAN_WORDS: {key} reads {said}");
+    }
+    for retired in ["monthly", "academic_year"] {
+        assert!(!words.split(',').any(|w| w.trim().starts_with(&format!("{retired}:"))), "PLAN_WORDS: the retired {retired} has no word");
+    }
+    let member = fn_body(&js, "function drawMember(");
+    assert!(member.contains("Object.prototype.hasOwnProperty.call(PLAN_WORDS, a.plan)"), "a plan without a word reads as none");
 }
 
 /// Review I1, I2: Membership says only what `account_status` carries. Every status the cloud can answer has its words

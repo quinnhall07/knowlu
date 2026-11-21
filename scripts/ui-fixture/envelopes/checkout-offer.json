@@ -1,0 +1,22 @@
+{
+ "error": null,
+ "note": "Plus tax where it applies.",
+ "ok": true,
+ "plans": [
+  {
+   "amount_cents": 12831,
+   "lines": [
+    "$9.87 every 4 weeks, billed $128.31 once a year. Renews yearly."
+   ],
+   "plan": "yearly"
+  },
+  {
+   "amount_cents": 123,
+   "lines": [
+    "$1.23 every 4 weeks."
+   ],
+   "plan": "four_weekly"
+  }
+ ],
+ "terms_version": "2026-01-15"
+}

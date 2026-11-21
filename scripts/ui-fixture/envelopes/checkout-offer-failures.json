@@ -1,0 +1,31 @@
+{
+ "no-four-weekly": {
+  "error": null,
+  "note": "Plus tax where it applies.",
+  "ok": true,
+  "plans": [
+   {
+    "amount_cents": 12831,
+    "lines": [
+     "$9.87 every 4 weeks, billed $128.31 once a year. Renews yearly."
+    ],
+    "plan": "yearly"
+   }
+  ],
+  "terms_version": "2026-01-15"
+ },
+ "refused": {
+  "error": "The example account service is resting. Come back in an hour.",
+  "note": null,
+  "ok": false,
+  "plans": null,
+  "terms_version": null
+ },
+ "unreachable": {
+  "error": "the account service could not be reached (example: the connection was refused)",
+  "note": null,
+  "ok": false,
+  "plans": null,
+  "terms_version": null
+ }
+}

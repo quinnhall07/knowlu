@@ -29,7 +29,8 @@
   /* account_status's status, as the cloud answers it (entitlement/handler.ts); a word not here reads neutral, never
      Active. trialing reads Active: Settings names no trial (A2). */
   var STATUS_WORDS = { active: "Active", trialing: "Active", none: "No subscription", past_due: "Payment due", unpaid: "Payment due", canceled: "Ended", incomplete: "Not finished", incomplete_expired: "Ended", paused: "Paused" };
-  var PLAN_WORDS = { monthly: "Monthly", academic_year: "Academic year", yearly: "Yearly" };
+  /* the two plan keys billing writes (v0.4.1 note D1, D9); a retired key has no word and reads as no plan */
+  var PLAN_WORDS = { four_weekly: "Every 4 weeks", yearly: "Yearly" };
   var INT_KEYS = ["strong", "mild", "never", "clubs"];
 
   var ROOT = null;       /* the page's element while Settings shows */

@@ -7,8 +7,8 @@
    The wizard runs under run_shell, which has no state, ui_event or mark_seen: it calls only shell commands, through
    its own invoke() over KnowluData.call, and reaches no shared helper that sends a console command (ev(), KnowluKit,
    the router). Nothing reaches this machine's disk until Finish, except the account (which is not this machine) and
-   the coursework credentials, written the moment the student leaves the logins panel. No price, trial or trial
-   length is shown (A2): the payment page in the browser shows the price. */
+   the coursework credentials, written the moment the student leaves the logins panel. The wizard holds no price
+   (v0.4.1 note D9): the subscribe step shows the offer checkout_offer answers, as text, and names no trial. */
 (function () {
   "use strict";
 
@@ -30,8 +30,11 @@
     '<p class="meta" id="wiz-account-note" aria-live="polite"></p>' +
     '</div>' +
     '<div class="wiz-panel" id="wiz-subscribe" hidden><h2 tabindex="-1">Subscribe</h2>' +
-    '<p class="lede">Pick a plan. The payment page opens in your browser and shows the price. Cancel any time in Settings.</p>' +
-    '<div class="wiz-row"><button class="ibtn" type="button" id="wiz-sub-month">Monthly</button><button class="wbtn" type="button" id="wiz-sub-year">Academic year</button></div>' +
+    '<p class="lede">Pick a plan. The payment page opens in your browser. Cancel any time in Settings.</p>' +
+    '<div class="wiz-row"><button class="ibtn" type="button" id="wiz-sub-year" disabled>Yearly</button><span class="meta" id="wiz-sub-year-lines"></span></div>' +
+    '<div class="wiz-row"><button class="wbtn" type="button" id="wiz-sub-month" disabled>Every 4 weeks</button><span class="meta" id="wiz-sub-month-lines"></span></div>' +
+    '<p class="meta" id="wiz-sub-offer-note"></p>' +
+    '<div class="wiz-row" id="wiz-sub-wait" hidden><span class="meta" id="wiz-sub-why" aria-live="polite"></span><button class="wbtn" type="button" id="wiz-sub-retry">Try again</button></div>' +
     '<p class="meta" id="wiz-sub-note" aria-live="polite"></p>' +
     '</div>' +
     '<div class="wiz-panel" id="wiz-mail" hidden><h2 tabindex="-1">Next: connect your school email</h2>' +
@@ -106,6 +109,10 @@
   // One string, two languages: account::UNREACHABLE is the first clause of every transport failure the Rust side
   // emits, and this is the page's copy (ui_wizard.rs pins the two together).
   var UNREACHABLE = "the account service could not be reached";
+  // Why the plan buttons wait (v0.4.1 note D9): no answer from the service, or an answer without both plans this build
+  // knows. Any other refusal is the command's own sentence, said as given.
+  var NO_CONNECTION = "Prices could not be loaded. Check your connection, then try again.";
+  var UPDATE_KNOWLU = "Prices could not be loaded. Update Knowlu, then try again.";
   // The site's privacy sentence, byte for byte (ui_wizard.rs reads site/privacy.html).
   var PRIVACY = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
   var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
@@ -120,6 +127,11 @@
               // the plan the entitlement answer carried, null until it has answered, so the tester form is never
               // drawn on a guess; entryCheck is true while the on-entry ask is out.
               plan: null, entryCheck: false,
+              // the server's offer while the step holds one (checkout_offer's answer, its plans keyed by plan),
+              // null until it answers and again on each entry; offerWhy says why there is none; offerSeq drops a late answer.
+              offer: null, offerWhy: "", offerSeq: 0,
+              // true from a plan press until open_checkout answers: one payment page at a time.
+              checkoutBusy: false,
               busy: false, accountNote: "",
               ics: "", icsNote: "", cal: "", calNote: "",
               // what the paste or capture said about the link it checked: { url, stored } when it validated, null
@@ -217,6 +229,15 @@
     EL("wiz-sub-year").hidden = WIZ.entitled || WIZ.entryCheck;
     document.querySelector("#wiz-subscribe .lede").hidden = tester || WIZ.entryCheck;
     document.querySelector("#wiz-subscribe h2").textContent = tester ? "You're all set" : "Subscribe";
+    // The offer, as text: until one is held both plan buttons wait, and the reason sits beside Try again.
+    var offer = WIZ.offer, plansOff = WIZ.entitled || WIZ.entryCheck;
+    EL("wiz-sub-year").disabled = !WIZ.offer || WIZ.checkoutBusy;
+    EL("wiz-sub-month").disabled = !WIZ.offer || WIZ.checkoutBusy;
+    EL("wiz-sub-year-lines").textContent = offer && !plansOff ? offer.plans.yearly.lines.join(" ") : "";
+    EL("wiz-sub-month-lines").textContent = offer && !plansOff ? offer.plans.four_weekly.lines.join(" ") : "";
+    EL("wiz-sub-offer-note").textContent = offer && !plansOff ? String(offer.note || "") : "";
+    EL("wiz-sub-why").textContent = WIZ.offerWhy;
+    EL("wiz-sub-wait").hidden = plansOff || !WIZ.offerWhy;
     EL("wiz-vault-path").textContent = dest() ? "Your files will be at " + dest() : "";
     EL("wiz-lms-state").textContent = WIZ.icsNote;
     // The capture is a second press, and only exists once a window is open.
@@ -381,18 +402,57 @@
         });
       });
     }
-    // On entering the subscribe step, ask status and plan first, so a granted account sees the nothing-to-pay form.
+    // On entering the subscribe step, ask status and plan first, so a granted account sees the nothing-to-pay form;
+    // a not-entitled answer then asks for the offer, afresh on every entry (nothing is cached).
     if (WIZ.step === 2 && leaving !== 2 && !WIZ.entitled) {
       WIZ.entryCheck = true;
+      WIZ.offer = null;
+      WIZ.offerWhy = "";
       renderWizard();
       return checkEntitlement().then(function (r) {
         WIZ.entryCheck = false;
-        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; }
-        renderWizard();
+        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); return; }
+        return askOffer();
       });
     }
     renderWizard();
     return Promise.resolve();
+  }
+
+  // checkout_offer's answer as the step holds it: { offer, why }. The offer keeps the two plans this build sells, each
+  // with its whole cents and its lines as text; without both there is no offer and the step asks for an update. A
+  // refusal that starts with UNREACHABLE's clause asks for the connection; any other is said as given.
+  function offerFrom(r) {
+    if (!r || !r.ok) {
+      var e = String((r && r.error) || "");
+      return { offer: null, why: !e || e.indexOf(UNREACHABLE) === 0 ? NO_CONNECTION : e };
+    }
+    var plans = {};
+    (Array.isArray(r.plans) ? r.plans : []).forEach(function (p) {
+      if (p && (p.plan === "yearly" || p.plan === "four_weekly") && Number.isInteger(p.amount_cents) &&
+          Array.isArray(p.lines) && p.lines.length > 0 && p.lines.every(function (l) { return typeof l === "string"; })) {
+        plans[p.plan] = p;
+      }
+    });
+    if (!plans.yearly || !plans.four_weekly || typeof r.terms_version !== "string") { return { offer: null, why: UPDATE_KNOWLU }; }
+    // The answer as it came, its plans keyed by plan: the cents and the terms version go back unchanged.
+    return { offer: Object.assign({}, r, { plans: plans }), why: "" };
+  }
+
+  // Ask the service for its offer: the plan buttons wait until it answers, and only the newest answer is drawn.
+  function askOffer() {
+    var seq = (WIZ.offerSeq += 1);
+    WIZ.offer = null;
+    WIZ.offerWhy = "";
+    renderWizard();
+    return invoke("checkout_offer").then(offerFrom).catch(function () {
+      return { offer: null, why: NO_CONNECTION };
+    }).then(function (got) {
+      if (seq !== WIZ.offerSeq) { return; }
+      WIZ.offer = got.offer;
+      WIZ.offerWhy = got.why;
+      renderWizard();
+    });
   }
 
   function wizRegister(plan) {
@@ -638,18 +698,31 @@
         invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
         return;
       }
+      if (e.target.closest("#wiz-sub-retry")) { askOffer(); return; }
       if (e.target.closest("#wiz-sub-month") || e.target.closest("#wiz-sub-year")) {
-        var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
+        var which = e.target.closest("#wiz-sub-year") ? "yearly" : "four_weekly";
+        // The plan, its cents and the terms version all come from the offer on screen. No offer, or a press already in
+        // flight, no checkout: the buttons are disabled then; this is the backstop.
+        var offer = WIZ.offer;
+        if (!offer || WIZ.checkoutBusy) { return; }
+        // One press at a time: two payment pages opened before either is paid could both be paid, so both plan
+        // buttons wait until open_checkout answers.
+        WIZ.checkoutBusy = true;
+        renderWizard();
         // Ask before opening a second payment page: an entitled account goes straight on.
         checkEntitlement().then(function (r) {
-          if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
-          return invoke("open_checkout", { plan: which }).then(function (r) {
-            if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
+          if (r.entitled) { WIZ.checkoutBusy = false; WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
+          return invoke("open_checkout", { plan: which, amountCents: offer.plans[which].amount_cents, termsVersion: offer.terms_version }).then(function (r) {
+            WIZ.checkoutBusy = false;
+            // A refusal (the prices changed, an old build) is the server's sentence, and the offer is asked again.
+            if (!r.ok) { WIZ.error = r.error; renderWizard(); askOffer(); return; }
+            // An earlier refusal no longer stands once the payment page is open.
+            WIZ.error = "";
             WIZ.checkoutOpened = true;
             renderWizard();
             pollEntitlement();
           });
-        }).catch(function () {});
+        }).catch(function () { WIZ.checkoutBusy = false; WIZ.error = UNREACHABLE; renderWizard(); });
         return;
       }
       if (e.target.closest("#wiz-lms-open")) {

@@ -14,8 +14,14 @@ Checks, for every size (820x600, 1280x800) x theme x text size: no horizontal sc
   upgrade (Home, no account): the sheet "Knowlu now needs an account" is up and names #sheet (review M9), Google before
     the email field, two policy links, Not now, no price; the email field's fill differs from the sheet's in both
     themes (review M1); at 1280x800 light and 820x600 dark larger: Continue with Google with the boxes unticked
-    says why and sends nothing; ticked, it sends google_sign_in {ageAttested: true}, asks entitlement_now and shows
-    Subscribe; a policy link sends open_policy; Escape dismisses it and it stays down across a route change.
+    says why and sends nothing; ticked, it sends google_sign_in {ageAttested: true}, asks entitlement_now, shows
+    #up-subscribe and asks checkout_offer (v0.4.1 note D9). With each failing answer in
+    envelopes/checkout-offer-failures.json (a refusal, the service unreachable, an offer missing four_weekly) both plan
+    buttons are disabled beside Try again and #up-sub-why says that failure's sentence; Try again asks again; with
+    envelopes/checkout-offer.json: Yearly before Every 4 weeks, each with exactly the envelope's lines, the note below
+    both; a click on the lines starts nothing;
+    Yearly sends open_checkout with its plan, cents and the offer's terms version, and a refusal is said and asks
+    for the offer again; a policy link sends open_policy; Escape dismisses it and it stays down across a route change.
   upgrade-settings (Settings, no account): the sheet waits while Settings is the route; leaving Settings raises it.
   reconsent (Home, signed in, privacy owed): the panel is in #layer with line 1 from the reply's current, in a polite
     live region (review M4), the shipped sentence after the policy link (M3), Accept, Settings and the policy link, and no
@@ -40,6 +46,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import t16  # noqa: E402
 from t16 import FULL, calls, dump, go, run, shown, text_of  # noqa: E402,F401
+from t21 import FAIL_SAYS, OFFER, OFFER_FAILS, lines_of, stage  # noqa: E402
 
 OUT = t16.OUT
 NOT_ENTITLED = {"ok": True, "error": None, "status": None, "plan": None, "current_period_end": None}
@@ -47,6 +54,13 @@ SIGNED_IN = {"ok": True, "error": None, "account_id": "acct_f1x7ure01", "email":
 PREVIEW = ("Knowlu 0.4.0 on Windows\nview: today\nlast slot: ok\nwarnings: 0\nmail: [email]\n\nWhat went wrong:\n")
 EDIT = "The Today list did not refresh after a sync."
 PREVIEW_FAILED = "the report could not be read from this computer"
+# Re-review N1: the entitlement says yes at the press, then attaching the account fails (account.rs's attach_account).
+ENTITLED = {"ok": True, "error": None, "status": "active", "plan": "yearly", "current_period_end": "2026-09-24T00:00:00Z"}
+ATTACH_REFUSED = {"ok": False, "error": "This vault could not be attached to your account just now."}
+# The sheet's failures, in the order the review asked for (M5), each with the sentence the wizard's check expects.
+SHEET_FAILS = ["refused", "unreachable", "no-four-weekly"]
+# billing-checkout's refusal of an offer that is no longer the catalog's (D3), as open_checkout passes it on.
+CHECKOUT_REFUSED = {"ok": False, "error": "Knowlu's prices or terms have changed. Look them over again, then subscribe."}
 SETTINGS_READS = {"get_settings": t16.SETTINGS, "settings_context": t16.CONTEXT, "grades_status": t16.GRADES, "profile": t16.PROFILE,
                   "mail_status": t16.MAIL_NONE}
 
@@ -107,12 +121,62 @@ def check_upgrade(page, full, need):
     need(pol == [{"which": "terms"}], "a policy link sends open_policy: %s" % pol)
     page.check("#up-18")
     page.check("#up-terms")
+    stage(page, "checkout_offer", OFFER_FAILS[SHEET_FAILS[0]])
+    stage(page, "open_checkout", CHECKOUT_REFUSED)
     page.click("#up-google")
     page.wait_for_timeout(300)
     gs = [c["args"] for c in calls(page, "google_sign_in")]
     need(gs == [{"ageAttested": True}], "google_sign_in {ageAttested: true}: %s" % gs)
     need(len(calls(page, "entitlement_now")) == 1, "the entitlement is asked after the sign-in")
     need(shown(page, "#up-subscribe"), "a not-entitled answer shows Subscribe")
+    # No offer (review M5): each failure leaves both buttons disabled beside Try again, with that failure's sentence.
+    says_for = dict(FAIL_SAYS)
+    for i, name in enumerate(SHEET_FAILS):
+        if i:
+            stage(page, "checkout_offer", OFFER_FAILS[name])
+            page.click("#up-sub-retry")
+        page.wait_for_function("(n) => window.__fixture.calls.filter(c => c.cmd === 'checkout_offer').length === n", arg=i + 1, timeout=5000)
+        page.wait_for_function("(s) => document.getElementById('up-sub-why').textContent === s", arg=says_for[name], timeout=5000)
+        need(page.is_disabled("#up-sub-year") and page.is_disabled("#up-sub-month"), "%s: the sheet's plan buttons wait" % name)
+        need(shown(page, "#up-sub-retry"), "%s: Try again is offered" % name)
+        need(text_of(page, "#up-sub-why") == says_for[name], "%s: the sheet says %r" % (name, text_of(page, "#up-sub-why")))
+        need("$" not in (text_of(page, "#sheet") or ""), "%s: a price shows with no offer" % name)
+    # The offer, where Subscribe was: Yearly before Every 4 weeks, with exactly the envelope's lines.
+    asked = len(calls(page, "checkout_offer"))
+    stage(page, "checkout_offer", OFFER)
+    page.click("#up-sub-retry")
+    page.wait_for_function("() => !document.getElementById('up-sub-year').disabled && !document.getElementById('up-sub-month').disabled", timeout=5000)
+    need(len(calls(page, "checkout_offer")) == asked + 1 and all(c["args"] == {} for c in calls(page, "checkout_offer")), "the sheet asks checkout_offer, with no arguments")
+    inside = page.evaluate("() => { const w = document.getElementById('up-subscribe'); return ['up-sub-year', 'up-sub-month', 'up-sub-retry'].every(id => w.contains(document.getElementById(id))); }")
+    need(inside, "the plan buttons and Try again are inside #up-subscribe")
+    first = page.evaluate("() => !!(document.getElementById('up-sub-year').compareDocumentPosition(document.getElementById('up-sub-month')) & Node.DOCUMENT_POSITION_FOLLOWING)")
+    need(first and text_of(page, "#up-sub-year") == "Yearly" and text_of(page, "#up-sub-month") == "Every 4 weeks",
+         "Yearly before Every 4 weeks: %r / %r" % (text_of(page, "#up-sub-year"), text_of(page, "#up-sub-month")))
+    need(text_of(page, "#up-sub-year-lines") == lines_of(OFFER, "yearly"), "the Yearly lines: %r" % text_of(page, "#up-sub-year-lines"))
+    need(text_of(page, "#up-sub-month-lines") == lines_of(OFFER, "four_weekly"), "the Every 4 weeks lines: %r" % text_of(page, "#up-sub-month-lines"))
+    need(text_of(page, "#up-sub-note") == OFFER["note"], "the note: %r" % text_of(page, "#up-sub-note"))
+    need(not shown(page, "#up-sub-retry"), "no Try again once the offer is held")
+    # Only the two buttons start a checkout: a click on the lines does nothing.
+    page.click("#up-sub-year-lines")
+    page.wait_for_timeout(200)
+    need(not calls(page, "open_checkout"), "a click on the lines starts a checkout")
+    # Yearly: its plan, its cents, the offer's terms version; the refusal is said and the offer asked again.
+    page.click("#up-sub-year")
+    page.wait_for_function("(n) => window.__fixture.calls.filter(c => c.cmd === 'checkout_offer').length === n", arg=asked + 2, timeout=5000)
+    sent = [c["args"] for c in calls(page, "open_checkout")]
+    cents = {x["plan"]: x["amount_cents"] for x in OFFER["plans"]}
+    need(sent == [{"plan": "yearly", "amountCents": cents["yearly"], "termsVersion": OFFER["terms_version"]}], "open_checkout sent %s" % sent)
+    need(text_of(page, "#up-error") == CHECKOUT_REFUSED["error"], "a refused checkout says the server's sentence: %r" % text_of(page, "#up-error"))
+    # Re-review N1: entitled at the press, then attach_account fails: the sentence shows and both buttons come back.
+    page.wait_for_function("() => !document.getElementById('up-sub-year').disabled && !document.getElementById('up-sub-month').disabled", timeout=5000)
+    stage(page, "entitlement_now", ENTITLED)
+    stage(page, "attach_account", ATTACH_REFUSED)
+    page.click("#up-sub-year")
+    page.wait_for_function("() => window.__fixture.calls.some(c => c.cmd === 'attach_account')", timeout=5000)
+    page.wait_for_timeout(200)
+    need(len(calls(page, "open_checkout")) == 1, "an entitled press opens no payment page")
+    need(text_of(page, "#up-error") == ATTACH_REFUSED["error"], "a failed attach says why: %r" % text_of(page, "#up-error"))
+    need(sheet_up(page) and not page.is_disabled("#up-sub-year") and not page.is_disabled("#up-sub-month"), "after a failed attach both plan buttons come back")
     page.keyboard.press("Escape")
     page.wait_for_timeout(200)
     need(not sheet_up(page), "Escape dismisses the sheet")

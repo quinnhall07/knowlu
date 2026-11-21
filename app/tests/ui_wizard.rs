@@ -429,7 +429,8 @@ fn dq(s: &str) -> String { s.replace('\'', "\"") }
 
 /// L8 S5t: the subscribe step asks status and plan on entry, and a comped account never sees a payment
 /// prompt. Changed (A2, plan §7): no price for anyone now, so the "a tester sees no price" half holds for
-/// every account (`the_wizard_states_no_price_or_trial`); the tester rules stay. And (owners' split) the
+/// every account (now `the_wizard_holds_no_price_and_renders_the_offer`: v0.4.1 shows only the server's offer);
+/// the tester rules stay. And (owners' split) the
 /// plain `checkEntitled()` the upgrade overlay calls is T20's: wizard.js needs only the status-and-plan helper.
 #[test]
 fn the_subscribe_step_asks_status_and_plan_and_a_tester_sees_no_price() {
@@ -578,41 +579,172 @@ fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
 
 // ---- new pins (note §6, A2; Quinn's M8) ------------------------------------------------------------
 
-/// A2, pin 13's half: the wizard states no price figure, no trial and no trial length to anyone. Every
-/// string the wizard and the picker can show is read; the one exception is the status word `"trialing"`
-/// the entitlement test compares (it is never shown). Stripe's checkout page shows the price.
-#[test]
-fn the_wizard_states_no_price_or_trial() {
-    for f in ["js/wizard.js", "js/picker.js"] {
-        let strings = string_literals(&read(f));
-        assert!(!strings.is_empty(), "{f} has strings to read");
-        for s in strings {
-            let low = s.to_lowercase();
-            assert!(!s.contains('$'), "{f} shows a price: {s:?}");
-            if s != "trialing" { assert!(!low.contains("trial"), "{f} names a trial: {s:?}"); }
-            for bad in ["7-day", "7 day", "seven day", "per month", "/month", "a month", "per year", "a year", "9.99", "69.99", "free first"] {
-                assert!(!low.contains(bad), "{f} names a price or a trial length ({bad}): {s:?}");
-            }
+/// The words no string of a file may carry, lower-cased (v0.4.1 note D9: the app holds no price, so no figure,
+/// cadence-with-a-price or trial length is written into it). "every 4 weeks" is checked apart, case-sensitively,
+/// because "Every 4 weeks" is a plan word, and "pell" apart, as a word, because `spellcheck` is markup.
+const PRICE_WORDS: [&str; 18] = [
+    "9.99", "12.99", "84.37", "6.49", "69.99", "a year", "per year", "7-day", "7 day", "seven day", "14-day", "14 days",
+    "fourteen", "per month", "/month", "a month", "/mo", "free first",
+];
+
+/// True when `s` holds a decimal money figure: digits, a dot, then exactly two digits.
+fn has_money_figure(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..b.len()).any(|i| {
+        b[i] == b'.' && b[i - 1].is_ascii_digit()
+            && b.get(i + 1).is_some_and(u8::is_ascii_digit) && b.get(i + 2).is_some_and(u8::is_ascii_digit)
+            && !b.get(i + 3).is_some_and(u8::is_ascii_digit)
+    })
+}
+
+/// The literal rule (v0.4.1 note D9, r4): no string literal of `f` names a price, a figure, a cadence with a
+/// price or a trial; the status word `"trialing"` is the one exception to the trial ban (it is compared, never
+/// shown), and "Every 4 weeks" appears in the file exactly `labels` times, each as the button label `label_html`.
+fn holds_no_price(f: &str, labels: usize, label_html: &str) {
+    let text = read(f);
+    let strings = string_literals(&text);
+    assert!(!strings.is_empty(), "{f} has strings to read");
+    for s in &strings {
+        let low = s.to_lowercase();
+        assert!(!s.contains('$'), "{f} shows a price: {s:?}");
+        assert!(!has_money_figure(s), "{f} holds a money figure: {s:?}");
+        if s != "trialing" { assert!(!low.contains("trial"), "{f} names a trial: {s:?}"); }
+        for bad in PRICE_WORDS {
+            assert!(!low.contains(bad), "{f} names a price or a trial length ({bad}): {s:?}");
         }
+        for (i, _) in low.match_indices("pell") {
+            assert!(i > 0 && low.as_bytes()[i - 1].is_ascii_alphabetic(), "{f} names Pell: {s:?}");
+        }
+        assert!(!s.contains("every 4 weeks"), "{f} names a cadence as words (only the label \"Every 4 weeks\" may): {s:?}");
     }
+    let code = strip_comments(&text);
+    assert_eq!(code.matches("Every 4 weeks").count(), labels, "{f}: \"Every 4 weeks\" is a plan word, the button label only");
+    assert_eq!(code.matches(label_html).count(), labels, "{f}: each \"Every 4 weeks\" is the label {label_html}");
+}
+
+/// v0.4.1 T4 (note D9, r4), replacing `the_wizard_states_no_price_or_trial`: the wizard holds no price and
+/// renders the server's offer. Every string the wizard and the picker can show is read; the subscribe step asks
+/// `checkout_offer` on entering, after the entitlement check answers not entitled, and writes the offer's lines
+/// as text; the panel's markup carries no price line, only its heading and its lede.
+#[test]
+fn the_wizard_holds_no_price_and_renders_the_offer() {
+    holds_no_price("js/wizard.js", 1, ">Every 4 weeks</button>");
+    holds_no_price("js/picker.js", 0, ">Every 4 weeks</button>");
     let html = html();
     let sub = panel(&html, "wiz-subscribe", "wiz-mail");
     assert!(sub.contains("<h2 tabindex=\"-1\">Subscribe</h2>") && sub.contains("class=\"lede\""), "the subscribe step keeps its heading and a lede that names the action");
+    assert!(sub.contains("<p class=\"lede\">Pick a plan. The payment page opens in your browser. Cancel any time in Settings.</p>"), "the lede drops \"and shows the price\"");
+    for empty in ["id=\"wiz-sub-year-lines\"></span>", "id=\"wiz-sub-month-lines\"></span>", "id=\"wiz-sub-offer-note\"></p>"] {
+        assert!(sub.contains(empty), "the markup carries no price line: {empty}");
+    }
     assert!(!panel(&html, "wiz-welcome", "wiz-account").contains("costs"), "the welcome panel's price line is gone");
+    let js = code();
+    let step = fn_body(&js, "function wizStep(");
+    let entry = step.find("WIZ.entryCheck = true").expect("the on-entry entitlement check");
+    let check = step[entry..].find("checkEntitlement(").map(|i| i + entry).expect("it asks the entitlement");
+    let ask = step[check..].find("askOffer()").map(|i| i + check).expect("wizStep asks for the offer after the entry check");
+    assert!(step[check..ask].contains("if (r.entitled)"), "the offer is asked once the entitlement has answered");
+    let asker = fn_body(&js, "function askOffer(");
+    assert!(asker.contains("invoke(\"checkout_offer\")"), "the offer comes from checkout_offer, with no arguments");
+    let render = fn_body(&js, "function renderWizard(");
+    for to in ["EL(\"wiz-sub-year-lines\").textContent = ", "EL(\"wiz-sub-month-lines\").textContent = ", "EL(\"wiz-sub-offer-note\").textContent = "] {
+        assert!(render.contains(to), "renderWizard writes the offer as text: {to}");
+    }
+    assert!(render.contains("offer.plans.yearly.lines") && render.contains("offer.plans.four_weekly.lines") && render.contains("offer.note"), "the lines and the note are the offer's");
+    for line in js.lines().filter(|l| l.contains("innerHTML")) {
+        for field in ["offer", ".lines", "amount_cents", "terms_version"] {
+            assert!(!line.contains(field), "an innerHTML takes an offer field ({field}): {}", line.trim());
+        }
+    }
 }
 
-/// Note §6, A2: the two buttons stay, labelled by plan name only, each sending the `plan` it sends today;
-/// the billing function still takes exactly those two names, so the command and billing are unchanged.
+/// v0.4.1 T4 (note D9; the amendment's ruling 2): Yearly comes first and red (`ibtn`), Every 4 weeks second
+/// (`wbtn`); each sends its signed plan key, that plan's `amount_cents` from the offer and the offer's
+/// `terms_version`, which billing-checkout checks against its catalog. The retired keys are gone from the page.
 #[test]
-fn the_subscribe_buttons_send_todays_plans_by_name() {
+fn the_subscribe_buttons_send_the_signed_plans() {
     let html = html();
-    assert!(html.contains("id=\"wiz-sub-month\">Monthly</button>"), "the monthly button says Monthly");
-    assert!(html.contains("id=\"wiz-sub-year\">Academic year</button>"), "the yearly button says Academic year");
+    let sub = panel(&html, "wiz-subscribe", "wiz-mail");
+    let year = sub.find("<button class=\"ibtn\" type=\"button\" id=\"wiz-sub-year\" disabled>Yearly</button>").expect("Yearly is the red button (ibtn)");
+    let month = sub.find("<button class=\"wbtn\" type=\"button\" id=\"wiz-sub-month\" disabled>Every 4 weeks</button>").expect("Every 4 weeks is the second fill (wbtn)");
+    assert!(year < month, "Yearly comes before Every 4 weeks");
     let js = code();
-    assert!(js.contains("var which = e.target.closest(\"#wiz-sub-year\") ? \"academic_year\" : \"monthly\";"), "each button sends today's plan");
-    assert!(js.contains("invoke(\"open_checkout\", { plan: which })"), "through open_checkout, unchanged");
+    assert!(js.contains("var which = e.target.closest(\"#wiz-sub-year\") ? \"yearly\" : \"four_weekly\";"), "each button sends its signed plan");
+    assert!(js.contains("invoke(\"open_checkout\", { plan: which, amountCents: offer.plans[which].amount_cents, termsVersion: offer.terms_version })"), "with that plan's cents and the offer's terms version");
+    assert!(!raw().contains("\"monthly\"") && !raw().contains("\"academic_year\""), "the retired plan keys are gone from the wizard");
     let billing = fs::read_to_string(app_dir().join("../cloud/supabase/functions/billing-checkout/handler.ts")).expect("billing-checkout/handler.ts");
-    assert!(billing.contains("const PLANS: readonly Plan[] = [\"monthly\", \"academic_year\"];"), "billing still takes exactly these two plans");
+    assert!(billing.contains("export const PLANS: readonly Plan[] = [\"yearly\", \"four_weekly\"];"), "billing takes exactly these two plans");
+}
+
+/// v0.4.1 T4 (note D9, r5: m1): until an offer is held both plan buttons are disabled, beside a Try again that
+/// asks again, and the sentence says why: an unreachable service (account.rs's UNREACHABLE clause) asks for the
+/// connection, any other refusal is the command's own sentence, and an answer without both plans asks for an
+/// update. Nothing is kept: no storage, no saving command, and each entry asks again. A refused checkout says
+/// the server's sentence and asks for the offer again.
+#[test]
+fn without_an_offer_the_plan_buttons_wait() {
+    let html = html();
+    let sub = panel(&html, "wiz-subscribe", "wiz-mail");
+    assert!(sub.contains("id=\"wiz-sub-retry\">Try again</button>"), "a Try again button in the panel");
+    assert!(sub.contains("id=\"wiz-sub-why\""), "the sentence beside it");
+    let js = code();
+    assert!(js.contains("var NO_CONNECTION = \"Prices could not be loaded. Check your connection, then try again.\";"), "the unreachable sentence");
+    assert!(js.contains("var UPDATE_KNOWLU = \"Prices could not be loaded. Update Knowlu, then try again.\";"), "the missing-plan sentence");
+    let render = fn_body(&js, "function renderWizard(");
+    assert!(render.contains("EL(\"wiz-sub-year\").disabled = !WIZ.offer || WIZ.checkoutBusy;") && render.contains("EL(\"wiz-sub-month\").disabled = !WIZ.offer || WIZ.checkoutBusy;"), "both buttons wait for an offer, and while a press is in flight");
+    assert!(render.contains("EL(\"wiz-sub-why\").textContent = WIZ.offerWhy;"), "the reason is written as text");
+    assert!(render.contains("EL(\"wiz-sub-wait\").hidden = "), "the Try again row shows only with a reason");
+    let from = fn_body(&js, "function offerFrom(");
+    assert!(from.contains("indexOf(UNREACHABLE) === 0") && from.contains("? NO_CONNECTION : e"), "an unreachable service asks for the connection; any other refusal is said as given");
+    assert!(from.contains("!plans.yearly || !plans.four_weekly") && from.contains("UPDATE_KNOWLU"), "an answer without both plans asks for an update");
+    // Review M4: a plan with no line is not offered (no offer, no figure), so it reads as the update case.
+    assert!(from.contains("Array.isArray(p.lines) && p.lines.length > 0 &&"), "a plan without a line is not offered");
+    assert!(commands_sent(from).is_empty(), "reading the answer sends nothing");
+    let asker = fn_body(&js, "function askOffer(");
+    assert!(asker.contains("WIZ.offer = null;"), "each ask starts with no offer held: nothing is cached");
+    assert!(asker.contains(".catch(") && asker.contains("NO_CONNECTION"), "a host that does not answer is the connection sentence");
+    assert_eq!(commands_sent(asker), vec!["checkout_offer".to_string()], "the ask sends checkout_offer and nothing else");
+    let listener = fn_body(&js, "EL(\"wizard\").addEventListener(\"click\"");
+    let retry = listener.split("e.target.closest(\"#wiz-sub-retry\")").nth(1).expect("the Try again handler");
+    assert!(retry[..retry.find("return").unwrap_or(retry.len())].contains("askOffer()"), "Try again asks again");
+    let sub_handler = listener.split("e.target.closest(\"#wiz-sub-month\") || e.target.closest(\"#wiz-sub-year\")").nth(1).and_then(|s| s.split("if (e.target.closest(\"#wiz-lms-open\")").next()).expect("the plan buttons' handler");
+    assert!(sub_handler.contains("if (!r.ok) { WIZ.error = r.error; renderWizard(); askOffer(); return; }"), "a refused checkout says the server's sentence and asks for the offer again");
+    for kept in ["localStorage", "sessionStorage"] {
+        assert!(!js.contains(kept), "the wizard keeps nothing in {kept}");
+    }
+}
+
+/// T4 review M1-M3: a plan press is one at a time and always ends in words. A second press while the first is in
+/// flight would open a second payment page, and two sessions made before either is paid are both payable, so a busy
+/// flag holds both plan buttons disabled until `open_checkout` answers (or the call is rejected). A rejected call says
+/// the unreachable clause instead of nothing, and a press that opens the payment page clears an earlier refusal.
+#[test]
+fn a_plan_press_is_one_at_a_time_and_always_says_why() {
+    let js = code();
+    let wiz_decl = &js[js.find("var WIZ = {").expect("WIZ")..];
+    let wiz_decl = &wiz_decl[..wiz_decl.find("};").unwrap()];
+    assert!(wiz_decl.contains("checkoutBusy: false"), "WIZ carries the press in flight, clear at the start");
+    let listener = fn_body(&js, "EL(\"wizard\").addEventListener(\"click\"");
+    let h = listener.split("e.target.closest(\"#wiz-sub-month\") || e.target.closest(\"#wiz-sub-year\")").nth(1).and_then(|s| s.split("if (e.target.closest(\"#wiz-lms-open\")").next()).expect("the plan buttons' handler");
+    assert!(h.contains("if (!offer || WIZ.checkoutBusy) { return; }"), "a press while one is in flight does nothing (the buttons are disabled then; this is the backstop)");
+    let busy = h.find("WIZ.checkoutBusy = true;").expect("the press is marked in flight");
+    let ask = h.find("checkEntitlement(").expect("the entitlement ask");
+    assert!(busy < ask, "the press is marked before the first await");
+    assert!(h.contains("if (r.entitled) { WIZ.checkoutBusy = false;"), "an entitled answer ends the press");
+    // Re-review N1, checked here too: every way out of a press draws the buttons back (renderWizard reads the flag),
+    // and the entitled one then leaves the step.
+    let entitled = h.find("if (r.entitled) { WIZ.checkoutBusy = false;").unwrap();
+    let entitled_line = &h[entitled..entitled + h[entitled..].find('\n').unwrap_or(h.len() - entitled)];
+    assert!(entitled_line.contains("renderWizard(); wizGo(3); return; }"), "an entitled press draws the step, then leaves it: {entitled_line}");
+    assert!(h.contains("WIZ.checkoutOpened = true;\n            renderWizard();"), "a payment page that opened draws the buttons back");
+    let open = h.find("invoke(\"open_checkout\"").expect("open_checkout");
+    let answered = h[open..].find("WIZ.checkoutBusy = false;").map(|i| i + open).expect("open_checkout's answer ends the press");
+    let refused = h.find("if (!r.ok) { WIZ.error = r.error; renderWizard(); askOffer(); return; }").expect("the refusal");
+    assert!(answered < refused, "the press ends before the refusal or the success is drawn");
+    assert!(h.contains(".catch(function () { WIZ.checkoutBusy = false; WIZ.error = UNREACHABLE; renderWizard(); });"), "a rejected call ends the press and says the unreachable clause");
+    assert!(!h.contains(".catch(function () {});"), "a rejected press is never swallowed");
+    let opened = h.find("WIZ.checkoutOpened = true;").expect("the payment page opened");
+    assert!(h[refused..opened].contains("WIZ.error = \"\";"), "an earlier refusal is cleared once the payment page opens");
 }
 
 /// M8 (Quinn's ruling): the wizard and the picker run under `run_shell`, which has no `ui_event`, `state` or
