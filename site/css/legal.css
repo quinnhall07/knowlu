@@ -1,0 +1,102 @@
+/* Legal pages: the privacy policy, the terms and the pilot privacy statement. Long-form reading on the site's own
+   tokens and base: one column of about 68 characters, Zilla Slab running text, PT Serif Caption headings, a quiet date
+   line, definition entries and the forwarded-mail table. These pages carry no script, so the nav stays solid (it never
+   goes clear over a hero) and the theme follows prefers-color-scheme through tokens.css's dark roles. The red is for
+   links and focus only. Every color comes from tokens.css. */
+
+.lg-body .nav { position: sticky; top: 0; }
+
+.lg { max-width: var(--page); margin: 0 auto; padding: clamp(56px, 8vw, 112px) var(--gut) 0; }
+.lg-doc { max-width: 68ch; margin: 0 auto; font: 400 var(--t-body)/1.62 var(--serif); color: var(--ink); }
+
+/* ---------- the top: title, the quiet date lines, the way to the short version ---------- */
+.lg-doc h1 { font: 400 clamp(44px, 6vw, 80px)/1.02 var(--display); letter-spacing: -.02em; text-wrap: balance; }
+.lg-doc .date { font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-3); }
+.lg-doc .date strong { font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+.lg-short { font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-3); }
+.lg-short a { color: var(--ink); font-weight: 500; }
+.lg-lede { font-size: var(--t-lead); line-height: 1.5; color: var(--ink-2); }
+
+/* ---------- running text ---------- */
+.lg-doc > * + *, .lg-doc section > * + * { margin-top: 1em; }
+.lg-doc > h1 + * { margin-top: 28px; }
+.lg-doc > .date + .date { margin-top: 2px; }
+.lg-doc > .date + .lg-short { margin-top: 12px; }
+.lg-doc > .date + p:not(.date):not(.lg-short):not(.notice), .lg-doc > .lg-short + p { margin-top: 44px; }
+
+/* the notice under the date lines: quiet, a tinted box on the page's own second ground and line, never the red */
+.lg-doc .notice {
+  padding: 14px 18px; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r);
+  font: 400 var(--t-small)/1.55 var(--sans); color: var(--ink-2);
+}
+.lg-doc .notice strong { color: var(--ink); }
+.lg-doc > .date + .notice { margin-top: 20px; }
+.lg-doc > .notice + .lg-short { margin-top: 16px; }
+
+.lg-doc h2 {
+  margin-top: clamp(56px, 6vw, 80px); padding-top: 22px; border-top: 1px solid var(--line);
+  font-size: clamp(27px, 2.4vw, 34px); line-height: 1.15; letter-spacing: -.01em;
+}
+.lg-doc h2 + * { margin-top: 18px; }
+
+.lg-doc strong { font-weight: 600; }
+.lg-doc a { color: var(--ink); text-decoration-color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.lg-doc a:hover { color: var(--accent); }
+.lg-doc code {
+  font: .84em/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere;
+  padding: .08em .34em; background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--r);
+}
+
+.lg-doc ul { padding-left: 1.3em; list-style: disc; }
+.lg-doc li::marker { color: var(--ink-3); }
+.lg-doc li + li { margin-top: .7em; }
+
+/* ---------- definition entries (what we collect) ---------- */
+.lg-doc dl { margin-bottom: 0; }
+.lg-doc dt { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line-2); font: 600 19px/1.35 var(--serif); color: var(--ink); }
+.lg-doc dt:first-child { margin-top: 8px; }
+.lg-doc dd { margin: 8px 0 0; }
+
+/* ---------- the forwarded-mail table: rows on a wide screen, labelled cards on a phone ---------- */
+.lg-doc > .lg-table { margin-top: 28px; }
+.lg-table { width: 100%; border-collapse: collapse; font: 400 var(--t-small)/1.5 var(--sans); color: var(--ink-2); }
+.lg-table th { padding: 0 14px 10px 0; text-align: left; vertical-align: bottom; font-weight: 600; color: var(--ink); border-bottom: 1px solid var(--ink); }
+.lg-table td { padding: 12px 14px 12px 0; vertical-align: top; border-bottom: 1px solid var(--line); }
+.lg-table td:first-child { color: var(--ink); width: 40%; }
+.lg-table td:nth-child(2) { width: 27%; }
+.lg-table th:last-child, .lg-table td:last-child { padding-right: 0; }
+
+@media (max-width: 640px) {
+  .lg-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .lg-table, .lg-table tbody, .lg-table tr, .lg-table td { display: block; width: auto; }
+  .lg-table { border-top: 1px solid var(--ink); }
+  .lg-table tr { padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .lg-table td, .lg-table td:first-child, .lg-table td:nth-child(2) { width: auto; display: grid; grid-template-columns: 5.6em minmax(0, 1fr); gap: 12px; padding: 3px 0; border: 0; }
+  .lg-table td::before { content: attr(data-label); font-weight: 600; color: var(--ink-3); }
+  .lg-table td:first-child { color: var(--ink); font-weight: 500; }
+}
+
+/* ---------- the short version: each point under its own small heading ---------- */
+.lg-plain section { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--line); }
+.lg-plain > .lg-lede + section { margin-top: 48px; }
+.lg-plain h2 { margin-top: 0; padding-top: 0; border-top: 0; font-size: clamp(23px, 2vw, 28px); }
+.lg-plain h2 + * { margin-top: 10px; }
+.lg-doc > .lg-ask { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--ink-2); }
+
+/* the terms' closing date line */
+.lg-doc > .lg-end { margin-top: 56px; }
+
+/* ---------- footer: the page you are on ---------- */
+.lg-body .ft-nav a[aria-current="page"] { text-decoration-color: var(--field-line); }
+
+@media (max-width: 520px) {
+  .lg-doc { font-size: 17px; }
+  .lg-doc h1 { font-size: clamp(38px, 11vw, 44px); }
+  .lg-doc dt { font-size: 18px; }
+}
+
+@media print {
+  .skip, .nav, .ft { display: none; }
+  .lg { padding: 0; }
+  .lg-doc { max-width: none; }
+}
