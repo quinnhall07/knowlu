@@ -55,11 +55,12 @@ on the command line. 1 means the fetch failed, including a redirect the tool ref
   event, gradableitem, gradebook, ics, instructure, item, lms, moodle, platform, quiz, todo, uid.
   Every other word becomes `<w>`, digit runs become `#`, and UUIDs and runs of 8 or more hex
   characters become `<hex>`.
-- **Property names** are shown only when they look like one: letters, digits and `-`. A line
-  inside an item that is not a property line counts as `(not a property line)`, and its text is
-  not kept. That line is usually text broken across lines without escaping. If such text begins
-  with one word and a colon (for example `Reading: chapter 4`), it reads as a property, and that
-  one word shows as a name (`READING`).
+- **Property names** come from a fixed rule. A line counts as a property only if its name is
+  registered in RFC 5545 or RFC 7986 (in any case), or starts with `X-` and is written entirely
+  in uppercase letters, digits and `-` (as generated extension properties are). Any other line
+  inside an item counts as `(not a property line)`, and its text is not kept. That line is
+  usually text broken across lines without escaping, such as `Reading: chapter 4` or
+  `X-ray: results`. The site markers read only the `X-` properties this rule accepts.
 - A name match (for example the word "mastering") is a hint, not proof. A count of 0 does not prove
   a site is absent: its items may carry no marker.
 

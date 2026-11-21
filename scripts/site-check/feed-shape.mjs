@@ -73,12 +73,35 @@ function splitTextList(raw) {
   return parts.map((p) => unescapeText(p).trim()).filter((p) => p !== "");
 }
 
-// A property name is an iana-token or x-name (RFC 5545 3.1). A line whose "name" is anything else
-// (for example the rest of a text value after an unescaped line break) is not a property line: it
-// is counted, and its text is never kept.
-const PROPERTY_NAME = /^[A-Za-z0-9-]+$/;
+// A line counts as a property only if its name is registered in RFC 5545 or RFC 7986 (any case), or
+// is BEGIN or END (any case), or starts "X-" and is written entirely in uppercase letters, digits
+// and hyphens (generated extension properties are; a broken line of prose such as "X-ray: ..." is
+// not). Any other line (for example the rest of a text value after an unescaped line break) is not
+// a property line: it is counted, and its text is never kept. Site markers read only the X- names
+// this rule accepts.
+export const REGISTERED_PROPERTIES = new Set([
+  // RFC 5545, 3.7 and 3.8
+  "CALSCALE", "METHOD", "PRODID", "VERSION",
+  "ATTACH", "CATEGORIES", "CLASS", "COMMENT", "DESCRIPTION", "GEO", "LOCATION", "PERCENT-COMPLETE",
+  "PRIORITY", "RESOURCES", "STATUS", "SUMMARY",
+  "COMPLETED", "DTEND", "DUE", "DTSTART", "DURATION", "FREEBUSY", "TRANSP",
+  "TZID", "TZNAME", "TZOFFSETFROM", "TZOFFSETTO", "TZURL",
+  "ATTENDEE", "CONTACT", "ORGANIZER", "RECURRENCE-ID", "RELATED-TO", "URL", "UID",
+  "EXDATE", "RDATE", "RRULE",
+  "ACTION", "REPEAT", "TRIGGER",
+  "CREATED", "DTSTAMP", "LAST-MODIFIED", "SEQUENCE", "REQUEST-STATUS",
+  // RFC 7986, 5
+  "NAME", "REFRESH-INTERVAL", "SOURCE", "COLOR", "IMAGE", "CONFERENCE",
+]);
+const STRUCTURAL = new Set(["BEGIN", "END"]);
+const X_NAME = /^X-[A-Z0-9-]+$/;
 const NOT_A_PROPERTY = { notProperty: true };
 export const NOT_A_PROPERTY_LABEL = "(not a property line)";
+
+function isPropertyName(rawName) {
+  const upper = rawName.toUpperCase();
+  return REGISTERED_PROPERTIES.has(upper) || STRUCTURAL.has(upper) || X_NAME.test(rawName);
+}
 
 function parseLine(line) {
   const n = line.length;
@@ -86,7 +109,7 @@ function parseLine(line) {
   while (i < n && line[i] !== ";" && line[i] !== ":") i++;
   if (i >= n) return NOT_A_PROPERTY;
   const rawName = line.slice(0, i).trim();
-  if (!PROPERTY_NAME.test(rawName)) return NOT_A_PROPERTY;
+  if (!isPropertyName(rawName)) return NOT_A_PROPERTY;
   const name = rawName.toUpperCase();
   const params = {};
   while (line[i] === ";") {

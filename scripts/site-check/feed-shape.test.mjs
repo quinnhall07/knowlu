@@ -560,3 +560,45 @@ test("the same items in another order give the same default report", () => {
   assert.equal(report(cal(BASIC)), report(cal(reversed)));
   assert.equal(renderJson(summarise(parse(cal(BASIC)), { now: NOW })), renderJson(summarise(parse(cal(reversed)), { now: NOW })));
 });
+
+// --- Review round 2 -------------------------------------------------------------------------
+
+test("only registered names and uppercase X- names count as properties", () => {
+  const text = cal([
+    "BEGIN:VEVENT",
+    "UID:r-1",
+    "DTSTART:20261101T080000Z",
+    "summary:Lab 3 - Due",
+    "DESCRIPTION:Bring the following",
+    "Reading: chapter 4",
+    "X-ray: results webassign",
+    "X-Lms-Mixed:webassign",
+    "X-WR-CALNAME:Made Up Calendar",
+    "X-LMS-TYPE:quiz",
+    "END:VEVENT",
+  ]);
+  const c = parse(text);
+  assert.equal(c.items[0].notProperty, 3);
+  const s = summarise(c, { now: NOW });
+  const out = renderText(s) + renderJson(s);
+  assert.ok(!/READING/i.test(out), "READING");
+  assert.ok(!/X-RAY/i.test(out), "X-RAY");
+  assert.ok(!/X-LMS-MIXED/i.test(out), "a mixed-case X- name");
+  assert.deepEqual(s.properties.find((p) => p.name === "(not a property line)"), { name: "(not a property line)", count: 1 });
+  const names = s.properties.map((p) => p.name);
+  for (const n of ["SUMMARY", "X-WR-CALNAME", "X-LMS-TYPE"]) assert.ok(names.includes(n), n);
+  assert.ok(renderText(s).includes("X-WR-CALNAME") && renderText(s).includes("X-LMS-TYPE"));
+  assert.equal(s.sites.find((x) => x.site === "WebAssign").items, 0, "a line that is not a property is never a marker field");
+  assert.equal(s.endings.phrases.find((p) => p.phrase === "due").count, 1, "a lowercase registered name is accepted");
+});
+
+test("an uppercase X- name is still read for site markers", () => {
+  assert.equal(siteCounts(["X-LMS-LINK:https://www.webassign.net/x"])["WebAssign"], 1);
+});
+
+test("structural lines are accepted in any case", () => {
+  const c = parse(["begin:vcalendar", "begin:vevent", "uid:x-1", "end:vevent", "end:vcalendar", ""].join("\n"));
+  assert.equal(c.isCalendar, true);
+  assert.equal(c.items.length, 1);
+  assert.equal(c.items[0].notProperty, 0);
+});
