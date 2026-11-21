@@ -73,12 +73,21 @@ function splitTextList(raw) {
   return parts.map((p) => unescapeText(p).trim()).filter((p) => p !== "");
 }
 
+// A property name is an iana-token or x-name (RFC 5545 3.1). A line whose "name" is anything else
+// (for example the rest of a text value after an unescaped line break) is not a property line: it
+// is counted, and its text is never kept.
+const PROPERTY_NAME = /^[A-Za-z0-9-]+$/;
+const NOT_A_PROPERTY = { notProperty: true };
+export const NOT_A_PROPERTY_LABEL = "(not a property line)";
+
 function parseLine(line) {
   const n = line.length;
   let i = 0;
   while (i < n && line[i] !== ";" && line[i] !== ":") i++;
-  if (i >= n) return null;
-  const name = line.slice(0, i).trim().toUpperCase();
+  if (i >= n) return NOT_A_PROPERTY;
+  const rawName = line.slice(0, i).trim();
+  if (!PROPERTY_NAME.test(rawName)) return NOT_A_PROPERTY;
+  const name = rawName.toUpperCase();
   const params = {};
   while (line[i] === ";") {
     i++;
@@ -115,16 +124,16 @@ function parseLine(line) {
     }
     if (pname) params[pname] = vals.join(",");
   }
-  if (line[i] !== ":") return null;
+  if (line[i] !== ":") return NOT_A_PROPERTY;
   const raw = line.slice(i + 1);
   return { name, params, raw, value: unescapeText(raw) };
 }
 
 // Returns { isCalendar, items }, items being the VEVENT and VTODO components in input order, each
-// { type, props: [{ name, params, raw, value }] }. Properties of nested components (VALARM) are not
-// the item's.
+// { type, props: [{ name, params, raw, value }], notProperty }, notProperty counting the lines in it
+// that are not property lines. Properties of nested components (VALARM) are not the item's.
 export function parse(text) {
-  const physical = String(text).replace(/^﻿/, "").split(/\r\n|\n|\r/);
+  const physical = String(text).replace(/^\uFEFF/, "").split(/\r\n|\n|\r/);
   const lines = [];
   for (const l of physical) {
     if ((l.startsWith(" ") || l.startsWith("\t")) && lines.length > 0) lines[lines.length - 1] += l.slice(1);
@@ -136,11 +145,14 @@ export function parse(text) {
   for (const line of lines) {
     if (line.trim() === "") continue;
     const p = parseLine(line);
-    if (!p) continue;
+    if (p.notProperty) {
+      if (stack.length > 0) stack[stack.length - 1].notProperty++;
+      continue;
+    }
     if (p.name === "BEGIN") {
       const type = p.value.trim().toUpperCase();
       if (type === "VCALENDAR") isCalendar = true;
-      stack.push({ type, props: [] });
+      stack.push({ type, props: [], notProperty: 0 });
     } else if (p.name === "END") {
       const type = p.value.trim().toUpperCase();
       let idx = stack.length - 1;
@@ -181,12 +193,35 @@ function addDays(ymd, days) {
   return `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
 }
 
-export function uidShape(uid) {
-  return uid
+// The tool's own structural words: the only words a UID shape keeps (compared case-insensitively,
+// kept as written). Every other run of letters becomes <w>.
+export const UID_WORDS = new Set([
+  "assignment", "blackboard", "brightspace", "calendar", "canvas", "course", "d2l", "discussion",
+  "due", "event", "gradableitem", "gradebook", "ics", "instructure", "item", "lms", "moodle",
+  "platform", "quiz", "todo", "uid",
+]);
+const PLAIN_HOST = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+
+function maskUidPart(s) {
+  return s
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "\u0000")
-    .replace(/[0-9a-f]{8,}/gi, (m) => (/^\d+$/.test(m) ? m : "\u0000"))
-    .replace(/\d+/g, "#")
+    .replace(/[\p{L}\p{N}]+/gu, (tok) => (UID_WORDS.has(tok.toLowerCase())
+      ? tok
+      : tok
+        .replace(/[0-9a-f]{8,}/gi, (m) => (/^\d+$/.test(m) ? m : "\u0000"))
+        .replace(/\p{N}+/gu, "#")
+        .replace(/\p{L}+/gu, (w) => (UID_WORDS.has(w.toLowerCase()) ? w : "<w>"))))
     .replace(/\u0000/g, "<hex>");
+}
+
+// UUIDs and runs of 8+ hex characters become <hex>, digit runs #, and other words <w> unless they
+// are in UID_WORDS. Punctuation stays. The part after the last "@" is kept as written when it is a
+// plain host name, and masked like the rest when it is not.
+export function uidShape(uid) {
+  const at = uid.lastIndexOf("@");
+  if (at < 0) return maskUidPart(uid);
+  const host = uid.slice(at + 1);
+  return `${maskUidPart(uid.slice(0, at))}@${PLAIN_HOST.test(host) ? host : maskUidPart(host)}`;
 }
 
 function countsSorted(map, keyName) {
@@ -203,15 +238,19 @@ function oneLine(s) {
   return s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// A host fragment matches only at a host boundary: not preceded or followed by a letter, digit,
+// "_" or "-" (so "praktiv.com" is not "aktiv.com"). A name matches only as a whole word, any
+// Unicode letter or digit being a word character (so "émastering" is not "mastering").
 const SITE_MATCHERS = SITES.map((s) => ({
   site: s.site,
-  hosts: s.hosts.map((h) => h.toLowerCase()),
-  names: s.names.map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i")),
+  hosts: s.hosts.map((h) => new RegExp(`(?<![\\p{L}\\p{N}_-])${escapeRe(h)}(?![\\p{L}\\p{N}_-])`, "iu")),
+  names: s.names.map((n) => new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRe(n)}(?![\\p{L}\\p{N}_])`, "iu")),
 }));
 
 function siteMatches(m, text) {
-  const lower = text.toLowerCase();
-  return m.hosts.some((h) => lower.includes(h)) || m.names.some((re) => re.test(text));
+  return m.hosts.some((re) => re.test(text)) || m.names.some((re) => re.test(text));
 }
 
 function fieldOrder(a, b) {
@@ -288,6 +327,7 @@ export function summarise(cal, { now, showTitles = false } = {}) {
     if (end && (!start || end.value.trim() !== start.value.trim())) totals.dtendDiffers++;
 
     for (const name of new Set(item.props.map((p) => p.name))) bump(propCounts, name);
+    if (item.notProperty > 0) bump(propCounts, NOT_A_PROPERTY_LABEL);
 
     const uid = first(item, "UID");
     bump(shapes, uid ? uidShape(uid.value.trim()) : "(no UID)");
@@ -382,7 +422,7 @@ export function renderText(s) {
   L.push("== Properties on items (items carrying each) ==");
   for (const p of s.properties) L.push(`${p.name}  ${p.count}`);
   L.push("");
-  L.push(`== UID shapes (digits as #, hex runs as <hex>; top ${TOP_UID_SHAPES}) ==`);
+  L.push(`== UID shapes (digits as #, hex runs as <hex>, other words as <w>; top ${TOP_UID_SHAPES}) ==`);
   for (const u of s.uidShapes) L.push(`${u.count}  ${u.shape}`);
   L.push("");
   L.push("== Classes (CATEGORIES) ==");
@@ -445,17 +485,40 @@ function failureKind(e, timeoutMs) {
   return "network error";
 }
 
+export const MAX_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+// Redirects are followed by hand, at most MAX_REDIRECTS of them, and only to https: a redirect to
+// any other scheme is refused, so the link and the feed never cross the network in cleartext. The
+// one timeout covers the whole chain and the body. A refused redirect is a failed fetch (exit 1).
 export async function fetchFeed(url, fetchFn, { timeoutMs = TIMEOUT_MS, maxBytes = MAX_BYTES } = {}) {
   const tooLarge = { ok: false, kind: `the feed is too large (over ${sizeLabel(maxBytes)})` };
+  const signal = AbortSignal.timeout(timeoutMs);
+  let current = url;
   let res;
-  try {
-    res = await fetchFn(url, {
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: "follow",
-      headers: { accept: "text/calendar, */*" },
-    });
-  } catch (e) {
-    return { ok: false, kind: failureKind(e, timeoutMs) };
+  for (let hops = 0; ; hops++) {
+    try {
+      res = await fetchFn(current, { signal, redirect: "manual", headers: { accept: "text/calendar, */*" } });
+    } catch (e) {
+      return { ok: false, kind: failureKind(e, timeoutMs) };
+    }
+    if (!REDIRECT_STATUSES.has(res.status)) break;
+    try {
+      if (res.body && res.body.cancel) res.body.cancel().catch(() => {});
+    } catch {
+      // the redirect's body is not needed
+    }
+    if (hops >= MAX_REDIRECTS) return { ok: false, kind: `too many redirects (over ${MAX_REDIRECTS})` };
+    const location = res.headers && res.headers.get ? res.headers.get("location") : null;
+    if (!location) return { ok: false, kind: "a redirect gave no location" };
+    let next;
+    try {
+      next = new URL(location, current);
+    } catch {
+      return { ok: false, kind: "a redirect gave a location that cannot be read" };
+    }
+    if (next.protocol !== "https:") return { ok: false, kind: "refused a redirect to a non-https address" };
+    current = next.href;
   }
   if (!res.ok) return { ok: false, kind: `HTTP ${res.status}` };
   const declared = Number(res.headers && res.headers.get ? res.headers.get("content-length") : NaN);
@@ -500,8 +563,14 @@ With no --file it asks for the link on stdin (paste, then Enter). The link is ne
   --now <date>     the day the before/after counts use (default: today)
   --show-titles    also show item titles and class names: for eyes at the sitting only
   --json           print the summary as one JSON object
-Exit codes: 0 report printed, 2 bad input or refused link, 1 fetch failed.
+Never put the link on the command line: it would land in your shell history, and it is refused.
+Exit codes: 0 report printed, 2 bad input or refused link, 1 fetch failed (a refused redirect included).
 `;
+
+const LINK_ON_COMMAND_LINE =
+  "that looks like a link, so it was not used and is not shown. A link typed on the command line is now in " +
+  "your shell history: reset the feed link in your school's site, then run this again with no link and " +
+  "paste the new one when asked";
 
 function parseArgs(argv) {
   const o = { file: null, now: null, showTitles: false, json: false, help: false };
@@ -531,6 +600,10 @@ function parseArgs(argv) {
 // main(argv, io) -> exit code. io: { stdout(s), stderr(s), readLine(), readFile(path), fetch,
 // today(), timeoutMs?, maxBytes? }.
 export async function main(argv, io) {
+  if (argv.some((a) => /^(https?|webcal):/i.test(a))) {
+    io.stderr(`feed-shape: ${LINK_ON_COMMAND_LINE}\n`);
+    return 2;
+  }
   const o = parseArgs(argv);
   if (o.error) {
     io.stderr(`feed-shape: ${o.error}\n`);

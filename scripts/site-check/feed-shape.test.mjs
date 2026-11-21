@@ -1,7 +1,8 @@
-// Tests for feed-shape.mjs. Run: node --test scripts/site-check/
+// Tests for feed-shape.mjs. Run: node --test scripts/site-check/feed-shape.test.mjs
 // Every feed here is made up. No test opens a socket: fetch is always a fake.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   parse,
   summarise,
@@ -341,11 +342,221 @@ test("a body over the size cap gives exit 1", async () => {
 
 test("an unknown argument is refused without echoing it", async () => {
   const { out, io: x } = io();
-  assert.equal(await main([`https://${LINK_HOST}/feed/${LINK_TOKEN}.ics`], x), 2);
-  assertNoLink(out.stdout + out.stderr);
+  assert.equal(await main(["--frobnicate-zqxarg"], x), 2);
+  assert.ok(!out.stderr.includes("zqxarg"));
 });
 
 test("a bad --now is refused", async () => {
   const { io: x } = io();
   assert.equal(await main(["--file", "f.ics", "--now", "21/11/2026"], x), 2);
+});
+
+// --- Review round 1 -------------------------------------------------------------------------
+
+test("a line inside an item that is not a property line is counted, its text never kept", async () => {
+  const text = cal([
+    "BEGIN:VEVENT",
+    "UID:n-1",
+    "DTSTART:20261101T080000Z",
+    "SUMMARY:Essay 2 - Due",
+    "DESCRIPTION:Bring the following",
+    "Note from Prof ZQXPROF: ZQXLEAK see me",
+    "X-ray results: ZQXXRAY webassign",
+    "Reading list ZQXNOCOLON",
+    "END:VEVENT",
+  ]);
+  const s = summarise(parse(text), { now: NOW });
+  assert.ok(!/zqx/i.test(renderText(s)), "text report");
+  assert.ok(!/zqx/i.test(renderJson(s)), "JSON report");
+  assert.deepEqual(s.properties.find((p) => p.name === "(not a property line)"), { name: "(not a property line)", count: 1 });
+  assert.ok(!s.properties.some((p) => /NOTE|X-RAY|READING/.test(p.name)));
+  assert.equal(s.sites.find((x) => x.site === "WebAssign").items, 0, "a non-property line is not a marker field");
+  const shown = renderText(summarise(parse(text), { now: NOW, showTitles: true }));
+  assert.ok(!/zqx/i.test(shown), "not even with --show-titles");
+});
+
+test("UID shapes mask words except the tool's structural words, and keep a plain host", () => {
+  assert.equal(uidShape("photosynthesis-lab-writeup-zqxuser@lms.example"), "<w>-<w>-<w>-<w>@lms.example");
+  assert.equal(uidShape("_12345_1-gradableitem-blackboard@school.example"), "_#_#-gradableitem-blackboard@school.example");
+  assert.equal(uidShape("Event-d2l-Assignment-77@host.example"), "Event-d2l-Assignment-#@host.example");
+  assert.equal(uidShape("event-ab12cd34ef56@x.example"), "event-<hex>@x.example");
+  assert.equal(uidShape("0f8fad5b-d9cb-469f-a165-70867728950e"), "<hex>");
+  assert.equal(uidShape("uid-123-deadbeefcafe"), "uid-#-<hex>");
+  assert.equal(uidShape("assignment12345"), "assignment#");
+  assert.equal(uidShape("café-ñandú@x.example"), "<w>-<w>@x.example");
+  assert.equal(uidShape("a1@zqx host!"), "<w>#@<w> <w>!", "a host that is not a plain host name is masked too");
+  assert.equal(uidShape("one@two@lms.example"), "<w>@<w>@lms.example");
+  const text = cal(["BEGIN:VEVENT", "UID:zqxsentinel-essay-draft@lms.example", "DTSTART:20261101T080000Z", "END:VEVENT"]);
+  const s = summarise(parse(text), { now: NOW });
+  assert.ok(!/zqxsentinel|essay|draft/i.test(renderText(s) + renderJson(s)));
+});
+
+const redirectTo = (status, location) =>
+  new Response(null, { status, headers: location === undefined ? {} : { location } });
+
+function chainFetch(responses, calls) {
+  return async (url, init) => {
+    calls.push({ url, redirect: init && init.redirect });
+    const next = responses.shift();
+    if (!next) throw new Error("unexpected extra fetch");
+    return next;
+  };
+}
+
+test("an https to http redirect is refused (exit 1), with no second fetch and no URL in the message", async () => {
+  const calls = [];
+  const { out, io: x } = io({
+    readLine: async () => LINK,
+    fetch: chainFetch([redirectTo(302, `http://${LINK_HOST}/feed/${LINK_TOKEN}.ics`)], calls),
+  });
+  assert.equal(await main([], x), 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].redirect, "manual");
+  assert.match(out.stderr, /non-https/);
+  assertNoLink(out.stdout + out.stderr);
+});
+
+test("a chain of 6 redirects is refused (exit 1); chains of 2 and 5 are followed", async () => {
+  const hop = (n) => redirectTo(302, `https://hop${n}.example/${LINK_TOKEN}`);
+  {
+    const calls = [];
+    const { out, io: x } = io({ readLine: async () => LINK, fetch: chainFetch([1, 2, 3, 4, 5, 6].map(hop), calls) });
+    assert.equal(await main([], x), 1);
+    assert.equal(calls.length, 6);
+    assert.match(out.stderr, /too many redirects/);
+    assert.ok(!out.stderr.includes("hop"));
+    assertNoLink(out.stdout + out.stderr);
+  }
+  {
+    const calls = [];
+    const fetch = chainFetch([redirectTo(301, "https://other.example/x.ics"), redirectTo(307, "/y.ics"), new Response(cal(BASIC))], calls);
+    const { out, io: x } = io({ readLine: async () => LINK, fetch });
+    assert.equal(await main(["--now", NOW], x), 0);
+    assert.deepEqual(calls.map((c) => c.url), [`https://${LINK_HOST}/feed/${LINK_TOKEN}.ics`, "https://other.example/x.ics", "https://other.example/y.ics"]);
+    assert.ok(out.stdout.includes("items: 4"));
+  }
+  {
+    const calls = [];
+    const { io: x } = io({ readLine: async () => LINK, fetch: chainFetch([...[1, 2, 3, 4, 5].map(hop), new Response(cal(BASIC))], calls) });
+    assert.equal(await main([], x), 0);
+    assert.equal(calls.length, 6);
+  }
+});
+
+test("a redirect with a missing or unreadable Location is refused (exit 1)", async () => {
+  for (const [res, re] of [[redirectTo(302), /no location/], [redirectTo(302, "https://[zqxbad"), /cannot be read/]]) {
+    const { out, io: x } = io({ readLine: async () => LINK, fetch: chainFetch([res], []) });
+    assert.equal(await main([], x), 1);
+    assert.match(out.stderr, re);
+    assert.ok(!out.stderr.includes("zqxbad"));
+    assertNoLink(out.stdout + out.stderr);
+  }
+});
+
+test("a feed that starts with a BOM parses", async () => {
+  const bom = String.fromCharCode(0xfeff);
+  const c = parse(bom + cal(BASIC));
+  assert.equal(c.isCalendar, true);
+  assert.equal(c.items.length, 4);
+  const { out, io: x } = io({ readFile: async () => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(cal(BASIC))]) });
+  assert.equal(await main(["--file", "f.ics"], x), 0);
+  assert.ok(out.stdout.includes("items: 4"));
+});
+
+test("the tool's source holds no invisible or control characters", () => {
+  for (const name of ["./feed-shape.mjs", "./feed-shape.test.mjs", "./README.md"]) {
+    const src = readFileSync(new URL(name, import.meta.url), "utf8");
+    const bad = [...src].filter((ch) => {
+      const c = ch.codePointAt(0);
+      return (c < 0x20 && c !== 0x0a) || c === 0x7f || (c >= 0x80 && c < 0xa0) || c === 0xfeff || (c >= 0x200b && c <= 0x200f);
+    });
+    assert.deepEqual(bad.map((ch) => ch.codePointAt(0).toString(16)), [], name);
+  }
+});
+
+test("a quoted parameter value may hold ':' and ';'", () => {
+  const text = cal(["BEGIN:VEVENT", "UID:q-1", 'ATTENDEE;CN="Doe: J; Z";ROLE=REQ-PARTICIPANT:mailto:someone@example.org', "END:VEVENT"]);
+  const p = parse(text).items[0].props.find((q) => q.name === "ATTENDEE");
+  assert.equal(p.params.CN, "Doe: J; Z");
+  assert.equal(p.params.ROLE, "REQ-PARTICIPANT");
+  assert.equal(p.value, "mailto:someone@example.org");
+});
+
+test("a very long line parses", () => {
+  const long = "a".repeat(5 * 1024 * 1024);
+  const text = cal(["BEGIN:VEVENT", "UID:l-1", "DTSTART:20261101T080000Z", `DESCRIPTION:${long}`, "SUMMARY:Lab 1 - Due", "END:VEVENT"]);
+  const c = parse(text);
+  assert.equal(c.items[0].props.find((p) => p.name === "DESCRIPTION").value.length, long.length);
+  assert.equal(summarise(c, { now: NOW }).endings.phrases[0].count, 1);
+});
+
+test("a declared content-length over the cap is refused before the body is read", async () => {
+  const res = {
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-length": String(10_000_000) }),
+    get body() { throw new Error("body must not be read"); },
+  };
+  const { out, io: x } = io({ readLine: async () => LINK, fetch: async () => res, maxBytes: 1000 });
+  assert.equal(await main([], x), 1);
+  assert.match(out.stderr, /too large/);
+});
+
+test("an empty file is not a calendar", async () => {
+  const { out, io: x } = io({ readFile: async () => Buffer.alloc(0) });
+  assert.equal(await main(["--file", "f.ics"], x), 2);
+  assert.match(out.stderr, /not a calendar/);
+});
+
+function siteCounts(props) {
+  const s = summarise(parse(cal(["BEGIN:VEVENT", "UID:m-1", ...props, "END:VEVENT"])), { now: NOW });
+  return Object.fromEntries(s.sites.map((x) => [x.site, x.items]));
+}
+
+test("host fragments match only at a host boundary", () => {
+  assert.equal(siteCounts(["DESCRIPTION:see https://praktiv.com/x"])["Aktiv"], 0);
+  assert.equal(siteCounts(["URL:https://101edu.com.example/x"])["Aktiv"], 0);
+  // McGraw Hill's host does not contain its name, so only the host pattern can fire here.
+  assert.equal(siteCounts(["URL:https://my-mheducation.com/x"])["McGraw Hill Connect"], 0);
+  assert.equal(siteCounts(["URL:https://connect.mheducation.com/x"])["McGraw Hill Connect"], 1);
+  assert.equal(siteCounts(["URL:https://app.101edu.co/x"])["Aktiv"], 1);
+  assert.equal(siteCounts(["DESCRIPTION:go to aktiv.com, then log in"])["Aktiv"], 1);
+  assert.equal(siteCounts(["X-LINK:user@webassign.net"])["WebAssign"], 1);
+});
+
+test("names match as whole words, any Unicode letter being a word character", () => {
+  const p = "Pearson (MyLab, Mastering, Revel)";
+  assert.equal(siteCounts(["SUMMARY:émastering set"])[p], 0);
+  assert.equal(siteCounts(["SUMMARY:masteringé set"])[p], 0);
+  assert.equal(siteCounts(["SUMMARY:Mastering Physics set 3"])[p], 1);
+  assert.equal(siteCounts(["SUMMARY:(Mastering) set 3"])[p], 1);
+  assert.equal(siteCounts(["LOCATION:Nortonville Hall"])["Smartwork (Norton)"], 0);
+});
+
+test("a link on the command line is refused, not repeated, and the student told to reset it", async () => {
+  for (const argv of [
+    ["--file", `https://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    ["--file", `HTTP://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    [`webcal://${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+    ["--json", `https:${LINK_HOST}/feed/${LINK_TOKEN}.ics`],
+  ]) {
+    const { out, io: x } = io();
+    assert.equal(await main(argv, x), 2, argv.join(" "));
+    assert.match(out.stderr, /shell history/);
+    assert.match(out.stderr, /reset the feed link/);
+    assertNoLink(out.stdout + out.stderr);
+  }
+});
+
+test("the same items in another order give the same default report", () => {
+  const blocks = [];
+  let cur = [];
+  for (const l of BASIC) {
+    cur.push(l);
+    if (l === "END:VEVENT" || l === "END:VTODO") { blocks.push(cur); cur = []; }
+  }
+  assert.equal(blocks.length, 4);
+  const reversed = blocks.slice().reverse().flat();
+  assert.equal(report(cal(BASIC)), report(cal(reversed)));
+  assert.equal(renderJson(summarise(parse(cal(BASIC)), { now: NOW })), renderJson(summarise(parse(cal(reversed)), { now: NOW })));
 });
