@@ -18,3 +18,5 @@ bab96a83790db27c5287ad016cd6ad523f64db36:cloud/supabase/functions/ingest-calenda
 cd612faedaf452d0fa2992a6cef639053c17f598:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:237
 cd612faedaf452d0fa2992a6cef639053c17f598:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:238
 cd612faedaf452d0fa2992a6cef639053c17f598:cloud/supabase/functions/_shared/scrub_test.ts:jwt:215
+# Reviewed 2026-11-21: a made-up feed-link token in the feed-shape tests (scripts/site-check).
+36e986c6139b7c71a542673057eacc9908d32ad5:scripts/site-check/feed-shape.test.mjs:generic-api-key:267
