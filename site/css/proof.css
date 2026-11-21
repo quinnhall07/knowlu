@@ -17,8 +17,9 @@
   display: grid; gap: clamp(18px, 2.4vw, 28px);
 }
 
+/* sized off the narrower side of the screen, so a phone on its side or a tablet never fills with it */
 .pf-n {
-  font: 400 clamp(96px, 30vw, 232px)/.86 var(--display);
+  font: 400 clamp(88px, 30vmin, 232px)/.86 var(--display);
   letter-spacing: -.035em; font-variant-numeric: lining-nums;
   text-wrap: balance;
 }
@@ -32,12 +33,15 @@
 .pf-src a { padding-block: 14px; }
 .pf-copy .draft-note { margin-top: 4px; }
 
-/* wide: the figure on the left at its own width, the words beside it on its baseline */
-@media (min-width: 1000px) {
-  .pf-in { grid-template-columns: auto minmax(0, 1fr); column-gap: clamp(40px, 5vw, 88px); align-items: end; }
-  .pf-n { font-size: clamp(160px, 15vw, 248px); }
+/* a tablet and wider: the figure on the left at its own width, the words beside it on its baseline */
+@media (min-width: 760px) {
+  .pf-in { grid-template-columns: auto minmax(0, 1fr); column-gap: clamp(32px, 5vw, 88px); align-items: end; }
+  .pf-n { font-size: clamp(104px, min(15vw, 21vmin), 248px); }
   .pf-copy { padding-bottom: .4em; }
   .pf-src { font-size: 15px; }
+}
+@media (min-width: 1180px) {
+  .pf-n { font-size: clamp(160px, 15vw, 248px); }
 }
 
 /* building on scroll: the figure comes up first, then the sentence, the source and the note */
@@ -50,4 +54,11 @@
   .pf-copy > :nth-child(3) { transition-delay: 320ms; }
   .js .proof[data-build]:not(.is-in) .pf-n { opacity: 0; transform: translateY(.14em); }
   .js .proof[data-build]:not(.is-in) .pf-copy > * { opacity: 0; transform: translateY(18px); }
+}
+
+/* ---------- small portrait: what we leave out ----------
+   A phone held upright (below 760px) shows less, step by step; a phone on its side still shows everything. The
+   figure stays at every size. Here only the room above and below it is a third less, as everywhere on the page. */
+@media (max-width: 759.98px) and (orientation: portrait) {
+  .pf-in { padding-block: 44px 40px; }
 }

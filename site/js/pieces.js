@@ -16,6 +16,22 @@
   function text(el) { return el ? el.textContent.replace(/\s+/g, ' ').trim() : ''; }
   function px(n) { return Math.round(n * 10) / 10 + 'px'; }
 
+  // The captions under the windows are written for a mouse and keyboard. On a touch screen (pointer: coarse) each
+  // caption with a data-touch line says that instead: Tap for Choose and Press, and no sentence about arrow keys.
+  // data-hold and data-touch-hold are the week's caption while a block is picked up. It follows the screen if a
+  // keyboard and mouse come or go.
+  var touchQ = window.matchMedia ? window.matchMedia('(pointer: coarse)') : null;
+  function touch() { return !!(touchQ && touchQ.matches); }
+  function hintText(el, hold) {
+    if (hold) return (touch() && el.getAttribute('data-touch-hold')) || el.getAttribute('data-hold') || hintText(el);
+    return (touch() && el.getAttribute('data-touch')) || el._klIdle;
+  }
+  var hints = all(root, '.pc-hint');
+  hints.forEach(function (el) { el._klIdle = text(el); });
+  function captions() { hints.forEach(function (el) { if (!el._klBusy) el.textContent = hintText(el); }); }
+  captions();
+  if (touchQ && touchQ.addEventListener) touchQ.addEventListener('change', captions);
+
   // a polite line for screen readers; cleared first so the same words are read again
   function say(piece, words) {
     var el = one(piece, '[data-say]');
@@ -267,7 +283,7 @@
   function ahead(piece) {
     var week = one(piece, '[data-week]'), hint = one(piece, '[data-hint]');
     if (!week || !hint) return null;
-    var days = all(week, '.pc-day'), idle = text(hint), holding = hint.getAttribute('data-hold') || idle;
+    var days = all(week, '.pc-day');
     var held = null, drag = null, skip = false;
 
     function label(day) { return text(one(day, '.pc-dh')); }
@@ -309,7 +325,8 @@
         drop.setAttribute('aria-disabled', w ? 'true' : 'false');
         drop.setAttribute('aria-label', w || (here ? 'Keep it on ' + label(d) : 'Move it to ' + label(d)));
       });
-      hint.textContent = holding;
+      hint._klBusy = true;
+      hint.textContent = hintText(hint, true);
       say(piece, 'Picked up ' + what(b) + ', ' + label(dayOf(b)) + '. Choose a day, or press Escape to put it back.');
     }
     function release() {
@@ -318,7 +335,8 @@
       held = null;
       week.classList.remove('is-holding');
       days.forEach(function (d) { d.classList.remove('is-no', 'is-here', 'is-over'); });
-      hint.textContent = idle;
+      hint._klBusy = false;
+      hint.textContent = hintText(hint);
     }
     function move(b, day) {
       if (day === dayOf(b)) {

@@ -32,7 +32,7 @@
   .lt-sign { margin-top: 40px; font-size: 48px; }
   .lt-words { grid-area: words; }
 }
-@media (min-width: 1000px) {
+@media (min-width: 760px) {
   .letter { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(32px, 6vw, 104px); }
   .lt-ph { position: sticky; top: calc(var(--nav-h) + 40px); }
   .lt-h { max-width: 9em; }

@@ -23,7 +23,7 @@
 .hero-in {
   justify-self: center; align-self: center; width: 100%; max-width: var(--page);
   display: grid; justify-items: center; grid-template-areas: "lock" "today" "go";
-  padding: calc(var(--nav-h) + clamp(40px, 7svh, 80px)) var(--gut) clamp(56px, 8svh, 88px);
+  padding: calc(var(--nav-h) + var(--safe-t) + clamp(40px, 7svh, 80px)) var(--gut) clamp(56px, 8svh, 88px);
   /* pressing and holding gathers the dots; that should not select the words */
   user-select: none; -webkit-user-select: none;
 }
@@ -76,8 +76,9 @@
 .ht-then .ht-mk { grid-area: mk; }
 .ht-t2 { grid-area: t; min-width: 0; font: 400 1.1em/1.2 var(--display); letter-spacing: -.006em; color: var(--ink); }
 .ht-then .ht-m { grid-area: m; margin: 0; color: var(--ink-3); white-space: nowrap; }
-/* a narrow sheet: the class and time go under the item's name */
-@container hts (max-width: 290px) {
+/* a narrow sheet (about 290px at the usual 15px): the class and time go under the item's name. In em, so a sheet set
+   smaller for a short screen keeps them on one line for as long as they fit. */
+@container hts (max-width: 19.3em) {
   .ht-then li { grid-template-areas: "mk t" ". m"; grid-template-columns: .72em minmax(0, 1fr); row-gap: .15em; }
   .ht-then .ht-mk { align-self: center; }
 }
@@ -89,28 +90,70 @@
 .hero-go-btn { height: 60px; padding: 0 32px; font-size: 18px; }
 .hero-go-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .hero-go-note { font: 400 var(--t-body)/1.5 var(--serif); color: var(--ink-2); text-align: center; text-wrap: balance; text-shadow: var(--hero-halo); }
+/* the short fine print is for an upright phone only (below) */
+.hero-go-short { display: none; }
 
-/* ---------- a wide screen: lockup and button on the left, the list on the right ---------- */
-@media (min-width: 1000px) {
+/* ---------- a tablet, or a phone on its side: lockup and button on the left, the list on the right ----------
+   Every size here is a share of the screen's width, so the three always fit inside the gutters: the list takes up
+   to 46% of the width, the gap 5%, and the wordmark (3.96em wide) the 41% that is left at most. The words under the
+   button wrap to the room the list leaves them. */
+@media (min-width: 760px), (min-width: 600px) and (orientation: landscape) and (max-height: 520px) {
   .hero-in {
-    grid-template-columns: max-content minmax(0, 27em); grid-template-rows: auto auto;
+    grid-template-columns: minmax(0, max-content) auto; grid-template-rows: auto auto;
     grid-template-areas: "lock today" "go today";
-    justify-content: center; justify-items: start; column-gap: clamp(72px, 7vw, 128px);
-    padding-block: calc(var(--nav-h) + 32px) 56px;
+    justify-content: center; justify-items: start; column-gap: clamp(32px, 5vw, 72px);
+    padding-block: calc(var(--nav-h) + var(--safe-t) + 32px) 56px;
   }
-  .lockup { font-size: clamp(112px, 10.6vw, 172px); align-self: end; }
-  .hero-today { align-self: center; margin: 0; width: clamp(25em, 30vw, 27em); }
+  .lockup { font-size: clamp(56px, 9.6vw, 112px); align-self: end; }
+  .hero-today { align-self: center; margin: 0; width: min(46vw, 27em); }
   .ht-cap { text-align: left; }
-  .hero-go { align-self: start; justify-items: start; margin-top: clamp(32px, 4.4svh, 48px); }
-  .hero-go-note { text-align: left; }
+  .hero-go { align-self: start; justify-items: start; margin-top: clamp(24px, 4svh, 40px); }
+  .hero-go-note { text-align: left; font-size: 17px; }
+}
+/* ---------- a wide screen: the same, at the desktop's sizes ---------- */
+@media (min-width: 1180px) {
+  .hero-in { grid-template-columns: max-content minmax(0, 27em); column-gap: clamp(72px, 7vw, 128px); }
+  .lockup { font-size: clamp(112px, 10.6vw, 172px); }
+  .hero-today { width: clamp(25em, 30vw, 27em); }
+  .hero-go { margin-top: clamp(32px, 4.4svh, 48px); }
+  .hero-go-note { font-size: var(--t-body); }
+}
+/* a short screen (a phone on its side): the hero fits in one screen, with a lower bar, less room above and below,
+   and a smaller lockup and list */
+@media (orientation: landscape) and (max-height: 560px) and (max-width: 1179.98px) {
+  :root { --nav-h: 60px; }
+  .hero { min-height: 100svh; }
+  .hero-in { padding-block: calc(var(--nav-h) + var(--safe-t) + 14px) 18px; }
+  .lockup { font-size: clamp(52px, 8vw, 84px); }
+  .hero-today { font-size: 13px; }
+  .ht-sheet { padding: .9em 1.2em .2em; }
+  .ht-next { padding: .8em 0 1em; }
+  .ht-then li { padding: .6em 0; }
+  .ht-cap { margin-top: 8px; font-size: 13px; }
+  .hero-go { margin-top: 16px; gap: 8px; }
+  .hero-go-btn { height: 52px; padding: 0 26px; font-size: 17px; }
+  .hero-go-note { font-size: 15px; line-height: 1.4; }
 }
 
 /* a phone: the words sit in the middle of the paper, and the hero is as tall as they need */
 @media (max-width: 520px) {
   .hero { min-height: calc(100svh - 96px); }
-  .hero-in { padding-top: calc(var(--nav-h) + 32px); padding-bottom: 48px; }
+  .hero-in { padding-top: calc(var(--nav-h) + var(--safe-t) + 32px); padding-bottom: 48px; }
   .hero-today { margin-top: 28px; font-size: 15px; }
   .ht-sheet { padding-inline: 1.15em; }
   .hero-go { margin-top: 28px; }
   .hero-go-note { font-size: 17px; }
+}
+
+/* ---------- small portrait: what we leave out ----------
+   A phone held upright (the stacked layout, below the 760px two-column width) shows less, step by step. Hidden with
+   CSS only, so the markup, the tablet and the desktop are unchanged; a phone on its side still shows everything.
+   Here: the example list for today and its caption, and the long fine print, which gives way to the short one. The
+   hero is then the lockup, the button and one line under it, with more room between lockup and button so the paper
+   reads as space, not as a gap. */
+@media (max-width: 759.98px) and (orientation: portrait) {
+  .hero-today, .hero-go-long { display: none; }
+  .hero-go-short { display: block; }
+  .hero-in { padding-bottom: 32px; }
+  .hero-go { margin-top: clamp(40px, 7svh, 64px); }
 }

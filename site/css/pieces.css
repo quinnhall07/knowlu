@@ -6,7 +6,7 @@
 .pieces:not(.pc-on) .pc-js { display: none; }
 
 .pc { display: grid; gap: clamp(28px, 4vw, 48px); }
-.pc + .pc { margin-top: clamp(96px, 10vw, 176px); }
+.pc + .pc { margin-top: clamp(72px, 10vw, 176px); }
 .pc-copy h2 {
   margin: 0; font: 400 var(--t-h2)/1.02 var(--display); letter-spacing: -.022em; color: var(--ink);
   max-width: 10em; text-wrap: balance;
@@ -28,13 +28,23 @@
 /* the source's link is one line of small text: room above and below it makes it 44px to tap without moving a line */
 .pc-fact small a { padding-block: 14px; }
 .pc-hint { margin: 14px 0 0; font: 400 var(--t-small)/1.45 var(--sans); color: var(--ink-3); max-width: 40em; }
-.pc-foot { margin: clamp(72px, 7vw, 120px) 0 0; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-3); }
+.pc-foot { margin: clamp(40px, 7vw, 120px) 0 0; font: 400 var(--t-small)/1.4 var(--sans); color: var(--ink-3); }
 
-@media (min-width: 1000px) {
-  .pc { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(48px, 5.5vw, 104px); align-items: center; }
+/* a tablet and wider: the words and the window side by side, the window in the wider column */
+@media (min-width: 760px) {
+  .pc { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); column-gap: clamp(36px, 5.5vw, 104px); align-items: center; }
   .pc:nth-of-type(even) { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
   .pc:nth-of-type(even) .pc-copy { order: 2; }
   .pc-side { max-width: none; }
+}
+/* The week needs about 600px to show its eight days side by side, more than a tablet's wider column has. Until the
+   screen is wide enough for that, it takes the full width under its words, and the words take two columns above it:
+   the heading and its line on the left, the number on the right. */
+@media (min-width: 760px) and (max-width: 1179.98px) {
+  .pc.pc-ahead { grid-template-columns: minmax(0, 1fr); }
+  .pc-ahead .pc-copy { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); grid-template-rows: auto 1fr; column-gap: clamp(36px, 5.5vw, 104px); align-items: start; }
+  .pc-ahead .pc-copy > :not(.pc-fact) { grid-column: 1; }
+  .pc-ahead .pc-copy p.pc-fact { grid-column: 2; grid-row: 1 / span 2; margin-top: 0; }
 }
 
 /* ---------- the window: an ink hairline, a small bar with the wordmark and a clock, square corners ---------- */
@@ -71,13 +81,13 @@
   display: inline-flex; align-items: center; justify-content: center; padding: 0 1.3em; background: var(--btn-bg); color: var(--btn-fg);
   transition: background-color var(--fast) var(--ease), transform var(--fast) var(--ease);
 }
-.pc-b:hover { background: var(--red-deep); }
+@media (hover: hover) { .pc-b:hover { background: var(--red-deep); } }
 .pc-l {
   padding: 0 .55em; background: none; color: var(--ink-2); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: .28em;
   transition: color var(--fast) var(--ease), text-decoration-color var(--fast) var(--ease), transform var(--fast) var(--ease);
 }
 .pc-acts .pc-l { margin-left: -.55em; }
-.pc-l:hover { color: var(--ink); text-decoration-thickness: 2px; }
+@media (hover: hover) { .pc-l:hover { color: var(--ink); text-decoration-thickness: 2px; } }
 .pc-b:active, .pc-l:active { transform: translateY(1px); }
 .pc-b:focus-visible, .pc-l:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -160,7 +170,7 @@
 .pc-evs { display: flex; flex-wrap: wrap; align-items: center; gap: .4em; min-width: 0; }
 .pc-ev {
   position: relative; display: inline-grid; grid-template-columns: auto auto; justify-content: start; align-content: center; column-gap: .35em;
-  min-height: 44px; margin: 0; padding: .3em .65em; border: 0; border-radius: var(--r); background: var(--cc); color: var(--on-cc);
+  min-height: 44px; min-width: 44px; margin: 0; padding: .3em .65em; border: 0; border-radius: var(--r); background: var(--cc); color: var(--on-cc);
   font: 400 .8em/1.2 var(--sans); text-align: left;
 }
 .pc-ev b { font-weight: 600; }
@@ -170,7 +180,9 @@
 .pc-mark .pc-mk { flex: none; width: .7em; height: .7em; }
 
 button.pc-ev { cursor: grab; transition: transform var(--fast) var(--ease), box-shadow var(--fast) var(--ease); }
-button.pc-ev:hover, button.pc-ev:focus-visible { transform: translateY(-2px); box-shadow: 0 8px 14px -8px color-mix(in srgb, var(--shadow) 50%, transparent); }
+/* the lift says a block can be picked up: on hover where there is a pointer, on focus everywhere */
+button.pc-ev:focus-visible { transform: translateY(-2px); box-shadow: 0 8px 14px -8px color-mix(in srgb, var(--shadow) 50%, transparent); }
+@media (hover: hover) { button.pc-ev:hover { transform: translateY(-2px); box-shadow: 0 8px 14px -8px color-mix(in srgb, var(--shadow) 50%, transparent); } }
 button.pc-ev:active { transform: translateY(1px); box-shadow: none; }
 button.pc-ev:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button.pc-ev[aria-pressed="true"] { z-index: 3; transform: translateY(-3px); box-shadow: 0 12px 20px -10px color-mix(in srgb, var(--shadow) 55%, transparent); outline: 2px solid var(--ink); outline-offset: 2px; }
@@ -183,9 +195,9 @@ button.pc-ev.is-drag { z-index: 4; cursor: grabbing; transition: none; box-shado
 }
 .pc-week.is-holding .pc-drop { display: block; }
 .pc-week.is-holding .pc-day:not(.is-no):not(.is-here) .pc-drop { outline: 1px dashed var(--ink-3); outline-offset: -4px; }
-.pc-week.is-holding .pc-day:not(.is-no) .pc-drop:hover,
 .pc-week.is-holding .pc-day.is-over .pc-drop,
 .pc-drop:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; }
+@media (hover: hover) { .pc-week.is-holding .pc-day:not(.is-no) .pc-drop:hover { outline: 2px solid var(--ink); outline-offset: -3px; } }
 .pc-day.is-no .pc-drop { cursor: not-allowed; }
 .pc-day.is-no .pc-drop:focus-visible { outline-color: var(--ink-3); }
 .pc-day > :not(.pc-drop) { transition: opacity var(--fast) var(--ease); }
@@ -214,4 +226,16 @@ button.pc-ev.is-drag { z-index: 4; cursor: grabbing; transition: none; box-shado
   .pc-ask, .pc-after { transform: none; }
   button.pc-ev:hover, button.pc-ev:focus-visible, button.pc-ev:active, button.pc-ev[aria-pressed="true"],
   .pc-b:active, .pc-l:active, .pc-row:hover .pc-mk, .pc-then .pc-it:hover .pc-mk { transform: none; }
+}
+
+/* ---------- small portrait: what we leave out ----------
+   A phone held upright (below 760px) shows less, step by step, hidden with CSS only so the markup, the tablet and the
+   desktop are unchanged; a phone on its side still shows everything. Here: the sourced number under each piece's
+   words, and the captions under the first two windows (the week keeps its own, which says how to move a block).
+   Each piece keeps its heading, its sentence and its window, and the pieces sit closer, as one scroll. */
+@media (max-width: 759.98px) and (orientation: portrait) {
+  .pc-copy p.pc-fact, .pc-miss .pc-hint, .pc-now .pc-hint { display: none; }
+  .pc { gap: 24px; }
+  .pc + .pc { margin-top: 48px; }
+  .pc-foot { margin-top: 24px; }
 }
