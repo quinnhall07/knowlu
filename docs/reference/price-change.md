@@ -58,12 +58,16 @@ Create a Price for the new amount, with the key's cadence and tax behaviour **ex
 ### 2. One Contract PR
 
 - The catalog, `price_catalog.ts`: the new `SELLING` entry; the old one moved to `KEPT` with its rule;
-  `TERMS_VERSION`.
+  `TERMS_VERSION`. The new version is the date the PR merges (UTC), never a later one: `TOS_VERSION`
+  takes the same date, and the account function refuses a sign-up version later than tomorrow
+  (`cloud/supabase/functions/account/handler.ts`), so a future-dated version would stop new accounts.
 - `site/terms.html`: the figures and the version, and anything the amendment adds for kept subscribers.
 - `TOS_VERSION` in `app/src/account.rs`, by `contract-engineer`.
-- The one test that names the selling amounts, `the_catalog_sells_two_plans_yearly_first` in
-  `cloud/supabase/functions/_shared/price_catalog_test.ts` (the catalog's first pin), so the change is
-  seen in a test diff too. The handlers' tests build their own catalogs and do not change.
+- The two tests that name the selling amounts, so the change is seen in a test diff too:
+  `the_catalog_sells_two_plans_yearly_first` in
+  `cloud/supabase/functions/_shared/price_catalog_test.ts` (the catalog's first pin), and
+  `the_terms_state_the_signed_prices` in `engine/tests/site.rs` (the figures the terms page must
+  carry). The handlers' tests build their own catalogs and do not change.
 
 CI ties the catalog, the page and `TOS_VERSION`, and finds any `$` figure, decimal money figure or
 `STRIPE_PRICE_` name left in the billing code outside the catalog. It does not scan bare cents such as
@@ -125,7 +129,9 @@ On Quinn's word, in this order, with no pause between:
    `<the PROD ref>` in place of the staging one, all three together.
 
 Page first. In the minutes between, a checkout records the old version with the old price, a matched
-pair, and never a version that is not yet published.
+pair, and never a version that is not yet published. **If the `site` run fails or refuses, stop: do not
+deploy the functions.** A deploy without the page would record a terms version nobody can read. Fix what
+the run named, publish, and only then deploy.
 
 `site.yml` stops, as a failed run, if: it is not on `main`; a `v*` tag sorts after the latest Release's
 (a release is in flight or has failed); a `release.yml` run is not completed; or `site/privacy.html`
