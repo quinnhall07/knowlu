@@ -678,7 +678,11 @@ buttons are per key, and a build whose offer lacks one of its keys can sell noth
    the offer, both buttons and Stripe's test page show the new figure, and an offer from before the change
    is refused with D3's sentence. For `move`, rehearse one notice and one change on a test subscription
    (as S2 did).
-4. **Live mode:** Quinn creates the live Price; the main session sets the production variable.
+4. **Live mode:** Quinn creates the live Price; the main session sets the production variable. **The reuse
+   rule of step 1 holds in live mode too** (r6, found by the runbook's review, 2026-11-21): if the key has
+   been sold at this amount before, Quinn unarchives that live Price and its variable keeps the same id.
+   Never a second live Price at the same key and cents: subscribers kept on the first would stop being
+   recognised (`stripe-webhook/handler.ts` writes `plan: null` for a price id the catalog does not resolve).
 5. **Merge, then go live back to back:** publish the page with `site.yml`, then deploy the three billing
    functions from the merge SHA. Page first: in the minutes between, a checkout records the old version with
    the old price, a matched pair, and never a version that is not yet published.
