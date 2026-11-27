@@ -3,7 +3,7 @@ import { sha256Hex } from "../_shared/crypto.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { CATALOG, resolveCatalog } from "../_shared/price_catalog.ts";
 import { stripeGetFrom, stripePostFrom } from "../_shared/stripe.ts";
-import { handle } from "./handler.ts";
+import { handle, openCheckoutsPath, unloggedRefusals } from "./handler.ts";
 
 function env(name: string): string {
   const v = Deno.env.get(name);
@@ -57,6 +57,15 @@ Deno.serve(async (req) => {
       },
       // D4: through the pinned GET helper. The id is the catalog's, from this project's environment.
       getPrice: (id) => stripeGetFrom(stripeKey, globalThis.fetch)(`/v1/prices/${encodeURIComponent(id)}`),
+      // T1b: this customer's open Checkout Sessions, from the start each round, through the same GET helper.
+      listOpenCheckouts: (customer) =>
+        stripeGetFrom(stripeKey, globalThis.fetch)(openCheckoutsPath(customer)),
+      // T1b: the path carries the session id, so a refusal is thrown before `stripePostFrom` logs it.
+      expireCheckout: (id) =>
+        stripePostFrom(stripeKey, unloggedRefusals(globalThis.fetch, "an expire"))(
+          `/v1/checkout/sessions/${encodeURIComponent(id)}/expire`,
+          {},
+        ),
       saveCustomerId: (id, cid) =>
         restPatch(rest, "accounts", `id=eq.${encodeURIComponent(id)}`, { stripe_customer_id: cid }),
       recordConsent: async (c) => {

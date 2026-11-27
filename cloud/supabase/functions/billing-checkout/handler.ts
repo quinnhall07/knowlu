@@ -10,6 +10,9 @@
  * California's ARL want a record of the consent that was shown — and a customer who abandons the
  * page still saw it. A duplicate row from a second attempt is harmless; a missing one is not.
  *
+ * Before either, every Checkout Session the customer still has open is expired (T1b), so of the pages
+ * one account opens at most one can ever be paid.
+ *
  * Every amount, price variable and terms version comes from the price catalog
  * (`_shared/price_catalog.ts`, note D13), handed in resolved through `Deps`.
  */
@@ -39,6 +42,123 @@ export const TRIAL_DAYS = 14;
 /** D5: a subscription in one of these states is still live, so a second one is refused. */
 const LIVE_STATUSES: readonly string[] = ["active", "trialing", "past_due", "unpaid"];
 
+/** T1b: the open Checkout Sessions asked for in one list call (Stripe's largest page). */
+export const OPEN_PAGE_SIZE = 100;
+
+/** T1b: the most rounds (list from the start, expire what is new in it) one checkout runs before it
+ * refuses, so a list that stays full cannot loop. Each press makes one page, so a real account needs
+ * one list call: a list holding fewer than `OPEN_PAGE_SIZE` sessions is the end. Five rounds clear up
+ * to 499 open pages (four full lists, then a fifth that comes back short); more is reached only by a
+ * wrong reply or by an account opening pages on purpose, and refusing either one is the safe answer. */
+export const OPEN_ROUND_BOUND = 5;
+
+/** T1b: the list call's path, this customer's open Checkout Sessions from the start. There is no
+ * cursor: a later round lists from the start again and skips what this request already expired. The
+ * id is encoded, so it cannot add a parameter of its own. */
+export function openCheckoutsPath(customer: string): string {
+  return `/v1/checkout/sessions?customer=${encodeURIComponent(customer)}&status=open&limit=${OPEN_PAGE_SIZE}`;
+}
+
+/** T1b's three refusals: the payment provider's 502, in the shape of `_shared/stripe.ts`'s own. */
+const LIST_REFUSED = "the payment provider did not list this account's open checkout pages";
+const EXPIRE_REFUSED = "the payment provider did not close an earlier checkout page";
+const LIST_UNENDING = "the payment provider's list of open checkout pages did not end";
+
+/**
+ * T1b: a `fetch` for `stripePostFrom` when the path carries an id that must not be logged.
+ * `stripePostFrom` logs the path and Stripe's body of a refused call, and `_shared/stripe.ts` does not
+ * change in this lane (note D7), so a non-2xx is thrown here, before that helper reads it, and logged
+ * by its status alone. A 2xx passes through untouched.
+ */
+export function unloggedRefusals(fetchImpl: typeof fetch, label: string): typeof fetch {
+  return async (input, init) => {
+    const res = await fetchImpl(input, init);
+    if (res.ok) return res;
+    await res.body?.cancel();
+    console.error(`billing-checkout: ${label} answered ${res.status}`);
+    throw new Error(`${label} was refused`);
+  };
+}
+
+/** Review M5: the shape of a Checkout Session id, checked before one goes into a URL path. `.` and
+ * `..` survive `encodeURIComponent`, and the URL parser would resolve them as path segments. */
+const SESSION_ID = /^cs_[A-Za-z0-9_]+$/;
+
+/**
+ * One list, checked whole before any of it is acted on: how many sessions it held, and the ids of
+ * this customer's open sessions that this request has not already expired (`fresh`, each once).
+ * `null` for anything else, including an id not shaped like a Checkout Session's and a session of
+ * another customer (a reply that ignored the filter must never expire a stranger's page). A session
+ * this request already expired may still be listed, as `open` or as `expired`, by a list that has not
+ * caught up; it is skipped. `has_more` is not read.
+ */
+function openSessions(
+  list: Record<string, unknown> | null,
+  customer: string,
+  expired: ReadonlySet<string>,
+): { held: number; fresh: string[] } | null {
+  if (!list || !Array.isArray(list.data)) return null;
+  const fresh: string[] = [];
+  for (const item of list.data) {
+    const s = (item ?? {}) as Record<string, unknown>;
+    if (typeof s.id !== "string" || !SESSION_ID.test(s.id) || s.customer !== customer) return null;
+    if (expired.has(s.id)) {
+      if (s.status !== "open" && s.status !== "expired") return null;
+      continue;
+    }
+    if (s.status !== "open") return null;
+    if (!fresh.includes(s.id)) fresh.push(s.id);
+  }
+  return { held: list.data.length, fresh };
+}
+
+/**
+ * T1b (the v0.4.1 cloud review, finding 6): expire every Checkout Session this customer still has
+ * open, so that of all the pages an account ever opens at most one can be completed. Each round lists
+ * from the start and expires what is new in it. A list holding fewer than `OPEN_PAGE_SIZE` sessions
+ * is the end, so the ordinary case is one list call and never waits on Stripe's list catching up. A
+ * full list is listed again; a full list with nothing new in it (the list is not catching up, and
+ * what lies past it cannot be seen) is refused, as is a list still full after `OPEN_ROUND_BOUND`
+ * rounds. Any failure is a 502 thrown before
+ * the consent row and the session; the student presses again, and by then the webhook has recorded a
+ * page that was completed and D5's own check answers. Nothing about a session, the customer or the
+ * account is logged or returned: an error from a dependency can carry its URL, so its message is
+ * never read.
+ */
+async function expireOpenCheckouts(deps: Deps, customer: string): Promise<void> {
+  const expired = new Set<string>();
+  for (let round = 0; round < OPEN_ROUND_BOUND; round++) {
+    let list: Record<string, unknown> | null;
+    try {
+      list = await deps.listOpenCheckouts(customer);
+    } catch {
+      list = null;
+    }
+    const listed = openSessions(list, customer, expired);
+    if (!listed) {
+      console.error("billing-checkout: the open checkout pages could not be listed");
+      throw fail(502, LIST_REFUSED);
+    }
+    const full = listed.held >= OPEN_PAGE_SIZE;
+    if (full && listed.fresh.length === 0) {
+      console.error("billing-checkout: a full list of open checkout pages held nothing new");
+      throw fail(502, LIST_UNENDING);
+    }
+    for (const id of listed.fresh) {
+      try {
+        await deps.expireCheckout(id);
+      } catch {
+        console.error("billing-checkout: an open checkout page could not be expired");
+        throw fail(502, EXPIRE_REFUSED);
+      }
+      expired.add(id);
+    }
+    if (!full) return;
+  }
+  console.error(`billing-checkout: the open checkout pages were still full after ${OPEN_ROUND_BOUND} rounds`);
+  throw fail(502, LIST_UNENDING);
+}
+
 export interface ConsentRecord {
   account_id: string;
   subject_email: string;
@@ -62,6 +182,11 @@ export interface Deps {
   ) => Promise<{ stripe_subscription_id: string | null; status: string | null } | null>;
   /** D4: the Stripe Price, read through `stripeGetFrom`; `null` when Stripe would not hand it back. */
   getPrice: (priceId: string) => Promise<Record<string, unknown> | null>;
+  /** T1b: this customer's open Checkout Sessions, listed from the start (one page of them), read
+   * through `stripeGetFrom`; `null` when Stripe answered anything but a 2xx. */
+  listOpenCheckouts: (customerId: string) => Promise<Record<string, unknown> | null>;
+  /** T1b: expire one open Checkout Session, through `stripePostFrom`; throws when Stripe refuses. */
+  expireCheckout: (sessionId: string) => Promise<unknown>;
   saveCustomerId: (accountId: string, customerId: string) => Promise<void>;
   recordConsent: (c: ConsentRecord) => Promise<void>;
   stripe: StripePost;
@@ -229,6 +354,10 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     if (typeof created.id !== "string") throw fail(502, "the payment provider returned no customer id");
     customer = created.id;
     await deps.saveCustomerId(user.id, customer);
+  } else {
+    // T1b: after every refusal above, before the consent row and the session. A customer made just
+    // now has no pages, so it is never listed.
+    await expireOpenCheckouts(deps, customer);
   }
 
   // The catalog's cents and terms version, which equal what the app showed (D3).

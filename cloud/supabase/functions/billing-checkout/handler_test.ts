@@ -1,5 +1,16 @@
 import { assert, assertEquals } from "@std/assert";
-import { checkoutForm, type ConsentRecord, type Deps, handle, renewalTerms } from "./handler.ts";
+import {
+  checkoutForm,
+  type ConsentRecord,
+  type Deps,
+  handle,
+  OPEN_PAGE_SIZE,
+  OPEN_ROUND_BOUND,
+  openCheckoutsPath,
+  renewalTerms,
+  unloggedRefusals,
+} from "./handler.ts";
+import { stripePostFrom } from "../_shared/stripe.ts";
 import { CASES } from "../../migrations/testers_cases.ts";
 import {
   type CatalogDef,
@@ -46,6 +57,9 @@ function goodPrice(c: ResolvedCatalog, id: string): Record<string, unknown> | nu
   };
 }
 
+/** T1b: Stripe's list of a customer's open Checkout Sessions, when there are none. */
+const NOTHING_OPEN: Record<string, unknown> = { object: "list", data: [], has_more: false };
+
 interface Seen {
   calls: string[];
   consents: ConsentRecord[];
@@ -69,6 +83,9 @@ function fakes(over: Partial<Deps> = {}): { deps: Deps; seen: Seen } {
     isTester: () => (seen.calls.push("isTester"), Promise.resolve(false)),
     subscriptionState: () => (seen.calls.push("subscriptionState"), Promise.resolve(null)),
     getPrice: (id) => (seen.calls.push(`getPrice:${id}`), Promise.resolve(goodPrice(catalog, id))),
+    // T1b: nothing open, unless a test says otherwise. Not recorded, so every order above is today's.
+    listOpenCheckouts: () => Promise.resolve(NOTHING_OPEN),
+    expireCheckout: (id) => (seen.calls.push(`expire:${id}`), Promise.resolve({ id, status: "expired" })),
     saveCustomerId: () => (seen.calls.push("saveCustomerId"), Promise.resolve()),
     recordConsent: (c) => {
       seen.calls.push("recordConsent");
@@ -618,6 +635,8 @@ function testerDeps(caseId: string, seen: string[]): Deps {
     },
     subscriptionState: () => Promise.resolve(null),
     getPrice: (id) => Promise.resolve(goodPrice(catalog, id)),
+    listOpenCheckouts: () => (seen.push("listOpenCheckouts"), Promise.resolve(NOTHING_OPEN)),
+    expireCheckout: () => (seen.push("expireCheckout"), Promise.resolve({})),
     saveCustomerId: () => (seen.push("saveCustomerId"), Promise.resolve()),
     recordConsent: () => (seen.push("recordConsent"), Promise.resolve()),
     stripe: (path) => {
@@ -703,4 +722,463 @@ Deno.test("index.ts resolves the catalog from Deno.env.get and holds no cents ma
   // `getPrice` reads through the pinned GET helper.
   assert(/getPrice: \(id\) =>\s*stripeGetFrom\(/.test(text), "getPrice goes through stripeGetFrom");
   assert(text.includes("`/v1/prices/${encodeURIComponent(id)}`"), "one price, path-encoded");
+});
+
+// T1b (the v0.4.1 cloud review, finding 6): before a new Checkout Session is made, every page this
+// customer still has open is expired, so two pages opened together can never both be paid. Any failure
+// on the way is a 502 in the payment provider's words, with no consent row and no session; the student
+// presses again, and by then the webhook has recorded a completed page and D5's check answers.
+
+const LIST_REFUSED = "the payment provider did not list this account's open checkout pages";
+const EXPIRE_REFUSED = "the payment provider did not close an earlier checkout page";
+const LIST_UNENDING = "the payment provider's list of open checkout pages did not end";
+
+/** One open Checkout Session, as Stripe lists it: only the fields the handler reads. */
+const openSession = (id: string, customer = "cus_1", status = "open") => ({
+  id,
+  object: "checkout.session",
+  customer,
+  status,
+});
+
+/** One page of Stripe's list of `cus_1`'s open sessions. */
+const openList = (ids: string[], hasMore = false): Record<string, unknown> => ({
+  object: "list",
+  data: ids.map((id) => openSession(id)),
+  has_more: hasMore,
+});
+
+/** The purchase's calls up to the price check, then `step`. */
+const upToThePrice = (plan: string, step: string[]) => [
+  "getAccount",
+  "isTester",
+  "subscriptionState",
+  `getPrice:${PRICE_ID[plan]}`,
+  ...step,
+];
+
+/** The whole purchase, with `step` between the price check and the consent row. */
+const withExpiry = (plan: string, step: string[]) => [
+  ...upToThePrice(plan, step),
+  "recordConsent",
+  "/v1/checkout/sessions",
+];
+
+/** `console.error`, captured for the length of one body. */
+async function capturingLogs<T>(body: (logged: string[]) => Promise<T>): Promise<T> {
+  const logged: string[] = [];
+  const original = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+  try {
+    return await body(logged);
+  } finally {
+    console.error = original;
+  }
+}
+
+/** Neither a refusal nor a log line names a session, the customer, the account or the address. */
+function namesNobody(text: string, what: string) {
+  for (const id of ["cs_open", "cus_", "acc-1", "example.invalid"]) {
+    assert(!text.includes(id), `${what} names ${id}: ${text}`);
+  }
+}
+
+Deno.test("open_checkout_pages_are_expired_before_a_new_one", async () => {
+  // One open page, and two. The fake answers the same list on every call, as a list that has not
+  // caught up with the expires would: a short list is the end, so it is asked for exactly once.
+  for (
+    const [plan, open] of [
+      ["four_weekly", ["cs_open_a"]],
+      ["yearly", ["cs_open_a"]],
+      ["four_weekly", ["cs_open_a", "cs_open_b"]],
+      ["yearly", ["cs_open_a", "cs_open_b"]],
+    ] as const
+  ) {
+    const { deps, seen } = fakes({
+      listOpenCheckouts: (
+        customer,
+      ) => (seen.calls.push(`list:${customer}`), Promise.resolve(openList([...open]))),
+    });
+    const res = await run(buy(plan), deps);
+    assertEquals(res.status, 200, `${plan}, ${open.length} open`);
+    assertEquals(await res.json(), { url: "https://checkout.stripe.com/c/cs_1" });
+    assertEquals(
+      seen.calls,
+      withExpiry(plan, ["list:cus_1", ...open.map((id) => `expire:${id}`)]),
+      `${plan}, ${open.length} open: one list call, each page expired, then the consent row and the session`,
+    );
+    // The new page is today's: the same form and the same consent row.
+    assertEquals(seen.forms, [checkoutForm({
+      price: PRICE_ID[plan],
+      customer: "cus_1",
+      accountId: "acc-1",
+      successUrl: "https://knowlu.com/subscribed.html",
+      cancelUrl: "https://knowlu.com/index.html",
+      trial: true,
+      customText: renewalTerms(plan, true, WORDS),
+    })]);
+    assertEquals(seen.consents.length, 1);
+    assertEquals(seen.consents[0].price_cents, OFFERED[plan]);
+  }
+});
+
+Deno.test("a_new_customer_has_no_pages_to_expire", async () => {
+  const { deps, seen } = fakes({
+    getAccount: () => {
+      seen.calls.push("getAccount");
+      return Promise.resolve({
+        email: "a@example.invalid",
+        stripe_customer_id: null,
+        age_attested_at: "2026-09-17T12:00:00Z",
+      });
+    },
+    listOpenCheckouts: (customer) => (
+      seen.calls.push(`list:${customer}`), Promise.resolve(openList(["cs_open_a"]))
+    ),
+  });
+  const res = await run(buy("four_weekly"), deps);
+  assertEquals(res.status, 200);
+  assertEquals(
+    seen.calls,
+    withExpiry("four_weekly", ["/v1/customers", "saveCustomerId"]),
+    "a customer made in this request has no pages: no list call, nothing expired",
+  );
+  assertEquals(seen.forms[0]["customer"], "cus_new");
+});
+
+Deno.test("a_page_that_cannot_be_expired_stops_the_checkout", async () => {
+  const cases: {
+    name: string;
+    list: () => Promise<Record<string, unknown> | null>;
+    expire?: (id: string) => Promise<unknown>;
+    error: string;
+    step: string[];
+  }[] = [
+    {
+      // What `stripePostFrom` throws when Stripe refuses, as it does when the page was completed a
+      // moment ago and is no longer open.
+      name: "an expire Stripe refuses",
+      list: () => Promise.resolve(openList(["cs_open_a", "cs_open_b"])),
+      expire: () =>
+        Promise.reject(Response.json({ error: "the payment provider refused the request" }, { status: 502 })),
+      error: EXPIRE_REFUSED,
+      step: ["list:cus_1", "expire:cs_open_a"],
+    },
+    {
+      // A network failure: Deno's message carries the URL, so the handler must not log it.
+      name: "an expire that never reached Stripe",
+      list: () => Promise.resolve(openList(["cs_open_a", "cs_open_b"])),
+      expire: (id) =>
+        Promise.reject(new Error(`error sending request for url (/v1/checkout/sessions/${id}/expire)`)),
+      error: EXPIRE_REFUSED,
+      step: ["list:cus_1", "expire:cs_open_a"],
+    },
+    {
+      name: "a list Stripe refuses (`stripeGetFrom` answers null on any non-2xx)",
+      list: () => Promise.resolve(null),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+    {
+      name: "a list call that never reached Stripe",
+      list: () =>
+        Promise.reject(new Error("error sending request for url (/v1/checkout/sessions?customer=cus_1)")),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+    {
+      name: "a list with no data",
+      list: () => Promise.resolve({ object: "list", has_more: false }),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+    {
+      name: "a listed session with no id",
+      list: () =>
+        Promise.resolve({ object: "list", data: [{ object: "checkout.session" }], has_more: false }),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+    {
+      // Review M3: an id, but no customer at all.
+      name: "a listed session with an id and no customer",
+      list: () =>
+        Promise.resolve({
+          object: "list",
+          data: [{ id: "cs_open_a", object: "checkout.session", status: "open" }],
+          has_more: false,
+        }),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+    // Review M5: an id goes into a URL path, so it must look like a Checkout Session's before it is
+    // used. `.` and `..` survive `encodeURIComponent` and the URL parser would resolve them as path
+    // segments. Each sits beside a good session, and nothing on the list is expired.
+    ...([["..", "a dot-dot id"], [".", "a dot id"], ["", "an empty id"], [42, "a number for an id"], [
+      "pi_open_a",
+      "an id that is not a Checkout Session's",
+    ], ["cs_open/a", "an id with a slash"]] as const).map(([id, name]) => ({
+      name,
+      list: () =>
+        Promise.resolve({
+          object: "list",
+          data: [openSession("cs_open_a"), {
+            id,
+            object: "checkout.session",
+            customer: "cus_1",
+            status: "open",
+          }],
+          has_more: false,
+        }),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    })),
+    {
+      // A reply that ignored the customer filter must never expire a stranger's page: nothing on the
+      // page is expired, not even the first session, which is this customer's.
+      name: "a listed session of another customer",
+      list: () =>
+        Promise.resolve({
+          object: "list",
+          data: [openSession("cs_open_a"), openSession("cs_open_x", "cus_other")],
+          has_more: false,
+        }),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+    {
+      name: "a listed session that is not open",
+      list: () =>
+        Promise.resolve({
+          object: "list",
+          data: [openSession("cs_open_a", "cus_1", "complete")],
+          has_more: false,
+        }),
+      error: LIST_REFUSED,
+      step: ["list:cus_1"],
+    },
+  ];
+  for (const c of cases) {
+    await capturingLogs(async (logged) => {
+      const { deps, seen } = fakes({
+        listOpenCheckouts: (customer) => (seen.calls.push(`list:${customer}`), c.list()),
+        ...(c.expire
+          ? { expireCheckout: (id: string) => (seen.calls.push(`expire:${id}`), c.expire!(id)) }
+          : {}),
+      });
+      const res = await run(buy("yearly"), deps);
+      assertEquals(res.status, 502, c.name);
+      const text = await res.text();
+      assertEquals(JSON.parse(text), { error: c.error }, c.name);
+      assertEquals(
+        seen.calls,
+        upToThePrice("yearly", c.step),
+        `${c.name}: nothing after the failure is called`,
+      );
+      assertEquals(seen.consents, [], `${c.name}: no consent row`);
+      assertEquals(seen.forms, [], `${c.name}: no session`);
+      assert(logged.length > 0, `${c.name}: the failure is logged`);
+      namesNobody(text, `${c.name}: the refusal`);
+      namesNobody(logged.join("\n"), `${c.name}: the log`);
+    });
+  }
+});
+
+Deno.test("a_short_list_ends_it_and_a_full_one_is_listed_again", async () => {
+  /** `count` invented session ids, from `cs_open_<from>`. */
+  const ids = (from: number, count: number) => Array.from({ length: count }, (_, i) => `cs_open_${from + i}`);
+  /** A list call as recorded: the customer, and anything else it was ever handed (a cursor, say). */
+  const listed = (customer: string, rest: unknown[]) =>
+    rest.length === 0 ? `list:${customer}` : `list:${customer}:${rest.join(",")}`;
+  /** A purchase against a list whose `n`th call (from 0) answers `reply(n)`. */
+  const against = (reply: (n: number) => Record<string, unknown>) =>
+    capturingLogs(async (logged) => {
+      let n = 0;
+      const { deps, seen } = fakes({
+        listOpenCheckouts: (customer, ...rest) => (
+          seen.calls.push(listed(customer, rest)), Promise.resolve(reply(n++))
+        ),
+      });
+      const res = await run(buy("four_weekly"), deps);
+      const text = await res.text();
+      assert(!seen.calls.some((x) => x.startsWith("list:cus_1:")), "no list call carries a cursor");
+      namesNobody(text, "the answer");
+      namesNobody(logged.join("\n"), "the log");
+      return { status: res.status, text, seen };
+    });
+  /** What a list call past the expected last one would find: a page no test expects to see expired. */
+  const UNEXPECTED = openList(["cs_open_unexpected"]);
+  const lists = (calls: string[]) => calls.filter((x) => x.startsWith("list:")).length;
+  const expires = (calls: string[]) => calls.filter((x) => x.startsWith("expire:"));
+
+  // 100, then 1: a full list is listed again from the start, and the short one ends it. `has_more`
+  // steers nothing (the first list says more follow).
+  {
+    const { status, seen } = await against((n) =>
+      [openList(ids(1, 100), true), openList(ids(101, 1))][n] ?? UNEXPECTED
+    );
+    assertEquals(status, 200);
+    assertEquals(
+      seen.calls,
+      withExpiry("four_weekly", [
+        "list:cus_1",
+        ...ids(1, 100).map((id) => `expire:${id}`),
+        "list:cus_1",
+        "expire:cs_open_101",
+      ]),
+      "two list calls, 101 expires, no third list",
+    );
+    assertEquals(seen.forms.length, 1);
+  }
+  // A lagging list: the second round still shows sessions this request expired in the first. Those
+  // are skipped, the new one is expired, and a short list ends it. (A `limit=100` list holds at most
+  // 100, so the lag shown is the last 50 of round one's 100 beside the one new session.)
+  {
+    const { status, seen } = await against((n) =>
+      [openList(ids(1, 100)), openList([...ids(51, 50), "cs_open_101"])][n] ?? UNEXPECTED
+    );
+    assertEquals(status, 200);
+    assertEquals(
+      seen.calls,
+      withExpiry("four_weekly", [
+        "list:cus_1",
+        ...ids(1, 100).map((id) => `expire:${id}`),
+        "list:cus_1",
+        "expire:cs_open_101",
+      ]),
+      "the 100 are not expired twice, the new one is, and it ends there",
+    );
+  }
+  // The same lag, with the list already calling those 50 `expired`: still this request's own, still
+  // skipped. A session this request did not expire must be `open` (`a listed session that is not open`).
+  {
+    const lagging = {
+      object: "list",
+      data: [...ids(51, 50).map((id) => openSession(id, "cus_1", "expired")), openSession("cs_open_101")],
+      has_more: false,
+    };
+    const { status, seen } = await against((n) => [openList(ids(1, 100)), lagging][n] ?? UNEXPECTED);
+    assertEquals(status, 200);
+    assertEquals(expires(seen.calls), [...ids(1, 100), "cs_open_101"].map((id) => `expire:${id}`));
+    assertEquals(lists(seen.calls), 2);
+  }
+  // A full round with nothing new to expire: the list is not catching up, and what lies past it cannot
+  // be seen, so it is the refusal, with nothing written.
+  {
+    const { status, text, seen } = await against((n) => n < 2 ? openList(ids(1, 100)) : UNEXPECTED);
+    assertEquals(status, 502);
+    assertEquals(JSON.parse(text), { error: LIST_UNENDING });
+    assertEquals(lists(seen.calls), 2);
+    assertEquals(expires(seen.calls), ids(1, 100).map((id) => `expire:${id}`), "each expired once");
+    assertEquals(seen.consents, []);
+    assertEquals(seen.forms, []);
+  }
+  // The bound's far edge (review M2): four full lists of new sessions, then a short one, is the most
+  // the rounds clear, and it is a 200 with every one of the 401 expired.
+  {
+    const { status, seen } = await against((n) =>
+      n < 4 ? openList(ids(n * 100 + 1, 100)) : n === 4 ? openList(["cs_open_401"]) : UNEXPECTED
+    );
+    assertEquals(status, 200);
+    assertEquals(lists(seen.calls), 5);
+    assertEquals(expires(seen.calls), ids(1, 401).map((id) => `expire:${id}`));
+    assertEquals(seen.forms.length, 1);
+  }
+  // The bound: a list that is full of new sessions every round ends in the refusal after
+  // OPEN_ROUND_BOUND rounds, not in a loop, with nothing written. The fake gives out after twice the
+  // bound (review M2), so code that lost its bound fails here at once rather than hanging the suite.
+  {
+    assertEquals(OPEN_ROUND_BOUND, 5);
+    const { status, text, seen } = await against((n) => {
+      if (n >= 2 * OPEN_ROUND_BOUND) throw new Error("the list was asked for past twice the bound");
+      return openList(ids(n * 100 + 1, 100));
+    });
+    assertEquals(status, 502);
+    assertEquals(JSON.parse(text), { error: LIST_UNENDING });
+    assertEquals(lists(seen.calls), OPEN_ROUND_BOUND);
+    assertEquals(expires(seen.calls).length, OPEN_ROUND_BOUND * 100);
+    assertEquals(seen.consents, []);
+    assertEquals(seen.forms, []);
+  }
+});
+
+// Review M3: an existing customer with nothing open costs exactly one list call, and nothing else.
+Deno.test("nothing_open_costs_one_list_call", async () => {
+  const { deps, seen } = fakes({
+    listOpenCheckouts: (customer) => (seen.calls.push(`list:${customer}`), Promise.resolve(NOTHING_OPEN)),
+  });
+  const res = await run(buy("yearly"), deps);
+  assertEquals(res.status, 200);
+  assertEquals(seen.calls, withExpiry("yearly", ["list:cus_1"]));
+});
+
+// Review M3: one list naming the same session twice expires it once; a second expire of the same
+// session would be refused, and a harmless duplicate would become a 502.
+Deno.test("a_session_listed_twice_is_expired_once", async () => {
+  const { deps, seen } = fakes({
+    listOpenCheckouts: (customer) => (
+      seen.calls.push(`list:${customer}`), Promise.resolve(openList(["cs_open_a", "cs_open_b", "cs_open_a"]))
+    ),
+  });
+  const res = await run(buy("four_weekly"), deps);
+  assertEquals(res.status, 200);
+  assertEquals(seen.calls, withExpiry("four_weekly", ["list:cus_1", "expire:cs_open_a", "expire:cs_open_b"]));
+});
+
+// `stripePostFrom` logs the path and Stripe's body of a refused call, and an expire's path carries the
+// session id; `_shared/stripe.ts` does not change in this lane (note D7), so the expire's `fetch` turns
+// a refusal into a throw before that helper reads it. Driven with a fetch that serves itself.
+Deno.test("an_expire_refusal_logs_no_session_id", async () => {
+  const asked: string[] = [];
+  const stripeFetch = (status: number): typeof fetch => (input, init) => {
+    asked.push(`${init?.method} ${String(input)}`);
+    const body = status === 200
+      ? { id: "cs_open_a", object: "checkout.session", status: "expired" }
+      : { error: { message: "This Checkout Session cs_open_a is not open; its customer is cus_1." } };
+    return Promise.resolve(Response.json(body, { status }));
+  };
+  const path = "/v1/checkout/sessions/cs_open_a/expire";
+  await capturingLogs(async (logged) => {
+    const post = stripePostFrom("sk_test_invented", unloggedRefusals(stripeFetch(400), "an expire"));
+    let threw = false;
+    try {
+      await post(path, {});
+    } catch {
+      threw = true;
+    }
+    assert(threw, "a refused expire throws");
+    assert(logged.some((l) => l.includes("400")), `the status is logged: ${logged}`);
+    namesNobody(logged.join("\n"), "the log");
+  });
+  const post = stripePostFrom("sk_test_invented", unloggedRefusals(stripeFetch(200), "an expire"));
+  assertEquals(await post(path, {}), { id: "cs_open_a", object: "checkout.session", status: "expired" });
+  assertEquals(asked, [`POST https://api.stripe.com${path}`, `POST https://api.stripe.com${path}`]);
+});
+
+Deno.test("index.ts lists and expires the open pages through the pinned helpers, ids encoded", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(
+    /listOpenCheckouts: \(customer\) =>\s*stripeGetFrom\(stripeKey, globalThis\.fetch\)\(openCheckoutsPath\(customer\)\)/
+      .test(text),
+    "the list goes through stripeGetFrom, on the handler's path, with no cursor",
+  );
+  assert(!text.includes("starting_after"), "no cursor is wired");
+  assert(
+    /expireCheckout: \(id\) =>\s*stripePostFrom\(stripeKey, unloggedRefusals\(globalThis\.fetch, "an expire"\)\)\(/
+      .test(text),
+    "the expire goes through stripePostFrom, its refusals unlogged",
+  );
+  assert(
+    /`\/v1\/checkout\/sessions\/\$\{encodeURIComponent\(id\)\}\/expire`,\s*\{\},?\s*\)/.test(text),
+    "one session, encoded, an empty form",
+  );
+  // The list's path, on values: this customer's open sessions from the start, a full page, no cursor,
+  // the id encoded so it cannot add a parameter of its own.
+  assertEquals(OPEN_PAGE_SIZE, 100, "Stripe's largest page");
+  assertEquals(openCheckoutsPath("cus_1"), "/v1/checkout/sessions?customer=cus_1&status=open&limit=100");
+  assertEquals(
+    openCheckoutsPath("cus_1&status=complete&starting_after=cs_open_b"),
+    "/v1/checkout/sessions?customer=cus_1%26status%3Dcomplete%26starting_after%3Dcs_open_b" +
+      "&status=open&limit=100",
+  );
 });
