@@ -1,7 +1,7 @@
 # Changing a price
 
 The step list for raising or lowering a price. It follows `docs/specs/2026-11-19-v041-pricing-design.md`
-D16, and D13 to D15 behind it. A price is changed in test mode on staging first, then live, and **every
+D16, and D13 to D15 behind it. A price is changed on staging first (in Stripe's test mode; for staging that is the account's separate sandbox, see the last section), then live, and **every
 live step is taken on Quinn's word**. A raise and a cut follow the same steps; only the amendment's rule
 differs.
 
@@ -43,7 +43,7 @@ in one file, `cloud/supabase/functions/_shared/price_catalog.ts`, and nowhere el
   `cloud/supabase/functions/billing-jobs/handler.ts` (today: a `trialing` subscription is not moved to a
   dearer price until it is active; a cut moves it).
 
-### 1. Stripe, test mode
+### 1. Stripe, test mode (for staging, the account's sandbox)
 
 Create a Price for the new amount, with the key's cadence and tax behaviour **exclusive**.
 
@@ -189,3 +189,35 @@ knowlu.com.
 
 **Never re-run a tag's `publish` job.** It deploys that tag's `site/`, whose terms page is the old one
 after a price change, and its artifact is kept 7 days only (`release.yml`, `retention-days`).
+
+## What the 2026-11-27 rehearsal taught
+
+Source: `docs/reports/2026-11-27-v041-s1-managed-payments.md`, S2. An invented higher 4-week price was
+created in the staging sandbox and the catalog changed on a scratch branch (now deleted); every result
+below is from that run.
+
+- **Run the job by hand with the cron job's own SQL command.** `billing-jobs` is called from the
+  database, so its address and token stayed in the database's vault. The reply carries `reminded`,
+  `moved` and `failed` counts: a `stay` run and a `move` run on a trial answered 0, 0, 0 and sent no
+  mail; the `move` run on a paid period answered `moved` 1 and sent one mail, "Your Knowlu price is
+  changing", naming both amounts and the renewal date. A second run answered 0, 0, 0 and sent no
+  second mail.
+- **Staging's Stripe objects live in the account's separate sandbox; the account's own test mode is
+  empty.** Check which one the CLI is using before reading or creating a price.
+- **Stripe CLI commands that change state needed `--confirm`.**
+- **Ending a trial by hand sends a reminder with the old date.** Stripe sent its trial-ending event at
+  once when a trial was ended from the Dashboard or the CLI, and Knowlu mailed "Your first charge is
+  on <the old date>" seconds after the card was charged. It takes a staff action to cause it, so end a
+  trial by hand only on an account whose mail can be discarded; the report lists it as open.
+- **A Stripe list that names an unknown customer answered HTTP 400, code `resource_missing`.** Only
+  `DELETE /account` treats that as nothing to cancel (since task T1d). `billing-checkout`'s list of a
+  customer's open pages stops with a 502 on any list failure, so a checkout for a customer Stripe does
+  not know is refused.
+- **Three invoice reads showed the move did what it should.** On the paid subscription, after the move:
+  1. the paid invoice was unchanged (the old amount paid, 0 credit notes);
+  2. there was no proration line and 0 pending invoice items;
+  3. the upcoming invoice was at the new amount, one line, on the same renewal date.
+  The notice mark was in the subscription's metadata, beside the account's own. If any of the three
+  differs in a rehearsal, stop: a move must never change a paid period.
+- **Put it back.** The run cancelled the test subscriptions, archived the invented price and unset its
+  variable, redeployed the functions, and read the offer, which answered the two signed amounts.

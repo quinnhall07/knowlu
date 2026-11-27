@@ -1,7 +1,7 @@
 # `app/` — the Knowlu desktop shell
 
-**Status: Knowlu plan 4a, Tasks 1–11 (2026-09-06) — the shell now installs, onboards, configures
-and updates itself.** It stopped being a window that needs a `--vault` on the command line: a first
+**Status: v0.4.x (version 0.4.1 in `tauri.conf.json`); where the work stands is `HANDOFF.md`.** The shell
+installs, onboards, configures and updates itself (plan 4a, 2026-09-06, built that). It stopped being a window that needs a `--vault` on the command line: a first
 launch runs a wizard, a machine with several vaults gets a picker, and settings are a panel rather
 than a file to hand-edit. (Plan 1 Tasks 7–15 made it the way the system is *operated* rather than
 viewed; that half is unchanged.) The product is called **Knowlu** wherever a user sees it (window title, tray tooltip,

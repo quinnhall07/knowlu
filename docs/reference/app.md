@@ -320,12 +320,16 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 
 - The authority is `docs/specs/2026-09-09-knowlu-cloud-design.md`: its §1 decisions D1–D12 are
   Quinn's and signed; §11's recommendations are ruled (R3: the academic-year price and the June–August
-  pause both stay). Where an older spec or note disagrees with it, the cloud design wins.
+  pause both stay; **superseded** by Amendments 2026-11-10 and 2026-11-17: no academic-year plan, no
+  summer pause). Where an older spec or note disagrees with it, the cloud design wins.
 - In one line: **accounts + $9.99/month, no free tier; every judgment runs in our cloud (Supabase +
   Cloudflare + Stripe, an open-weights model per kind through OpenRouter, pinned to a zero-retention
   host); CI builds and signs every release; the vault stays plain text on the student's machine and
   is created by the app; portal credentials never leave the device — fetch on device, think in the
   cloud.**
+  *(Note, 2026-11-27: the price in that line was amended 2026-11-10 and 2026-11-17 to $12.99 every 4 weeks or
+  $84.37 a year, with 14 days free and no free tier; `CLAUDE.md`'s Direction line still names $9.99 a
+  month.)*
 - The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
   telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
   llama.cpp runtime. C4 is no longer a phase: the Pilot's runtime-removal lane (L6; Amendment
