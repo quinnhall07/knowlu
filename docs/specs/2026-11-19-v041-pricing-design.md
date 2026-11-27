@@ -220,7 +220,8 @@ and creates no session. A customer created in this request has no pages and is n
 
 *Known limits:* a deleted account's address can trial again on a new account. Two requests in the same
 instant, or a second checkout opened in the seconds between paying and the webhook's write, can still give
-two subscriptions; closing that needs a guard in the webhook, which is not built.
+two subscriptions; closing that needs a guard in the webhook, which is not built. A checkout page still open when an account is deleted is
+not expired by the delete; a payment completed on it afterwards needs a refund by hand (added 2026-11-27).
 
 **D6. The reminder is Knowlu's own email, sent by the webhook** on Stripe's
 `customer.subscription.trial_will_end` event. Stripe sends that event three days before a trial ends

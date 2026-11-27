@@ -163,6 +163,11 @@ Order, per project:
   that customer still has open, so two pages opened before either is paid cannot both be paid. A failure
   there answers 502 and writes nothing: no consent row, no session. It does not cover two requests in the
   same instant, or a page paid seconds before the webhook records it (design note D5).
+- **Deleting an account.** `DELETE /account` asks Stripe before it deletes anything. It reads the stored subscription and
+  lists the customer's subscriptions, sets every one that can still charge to cancel at its period's end, and treats a
+  subscription that has ended, or one Stripe does not know, as nothing to cancel. Any other answer from Stripe stops the
+  delete with a 502 and nothing is deleted: nobody is charged after their account is gone. A checkout page still open at
+  that moment is not expired.
 - **The price check.** Before a session is created, checkout reads the selling entry's Stripe Price and
   requires it active, USD, the catalog's amount, the key's interval and count, and tax behaviour
   `exclusive` (`priceProblems`); anything else is a 500 and a log line, never a charge at the wrong price.
