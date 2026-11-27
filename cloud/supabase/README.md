@@ -159,6 +159,10 @@ Order, per project:
   `academic_year`): "Update Knowlu"; an amount or terms version that differs from the catalog's: prices
   or terms have changed, look again; an account that already has a live subscription (`active`,
   `trialing`, `past_due`, `unpaid`); and a free tester account.
+- **One open page.** Before it creates a session, `POST /billing-checkout` expires every Checkout Session
+  that customer still has open, so two pages opened before either is paid cannot both be paid. A failure
+  there answers 502 and writes nothing: no consent row, no session. It does not cover two requests in the
+  same instant, or a page paid seconds before the webhook records it (design note D5).
 - **The price check.** Before a session is created, checkout reads the selling entry's Stripe Price and
   requires it active, USD, the catalog's amount, the key's interval and count, and tax behaviour
   `exclusive` (`priceProblems`); anything else is a 500 and a log line, never a charge at the wrong price.

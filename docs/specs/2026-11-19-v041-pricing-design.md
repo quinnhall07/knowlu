@@ -202,6 +202,13 @@ the old price's id. A selling variable that is unset answers the same 500. The c
 - **No row with a subscription id:** the session asks for `subscription_data[trial_period_days]` = 14.
 - **Any other row with a subscription id** (`canceled`, `incomplete_expired`, and so on): no trial.
 
+**Open pages are expired first (added 2026-11-27, on the founder's yes).** The row above is written only
+when a checkout completes, so two pages opened before either is paid would both pass these checks. Once the
+customer is known, and before the consent row, the checkout lists that customer's open Checkout Sessions and
+expires each one. A list shorter than 100 ends it; a full list is read again, skipping ids already expired;
+five rounds, or a full round with nothing new, is a refusal. Any failure answers 502, writes no consent row
+and creates no session. A customer created in this request has no pages and is not listed.
+
 `payment_method_collection: always` stays (`handler.ts:60`), for the reason its test gives
 (`handler_test.ts:22-25`).
 
@@ -211,7 +218,9 @@ the old price's id. A selling variable that is unset answers the same 500. The c
   only the one stored id to cancel at period end (`account/handler.ts:88-94`), so the second would bill a
   deleted account. The app asks before opening checkout; this is the server's backstop.
 
-*Known limit:* a deleted account's address can trial again on a new account.
+*Known limits:* a deleted account's address can trial again on a new account. Two requests in the same
+instant, or a second checkout opened in the seconds between paying and the webhook's write, can still give
+two subscriptions; closing that needs a guard in the webhook, which is not built.
 
 **D6. The reminder is Knowlu's own email, sent by the webhook** on Stripe's
 `customer.subscription.trial_will_end` event. Stripe sends that event three days before a trial ends
