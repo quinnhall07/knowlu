@@ -98,3 +98,28 @@ The job was run by hand with the cron job's own SQL command, so its address and 
 Staging holds two of this proof's scratch accounts with no live subscription (their removal needs a confirmed SQL
 statement). The sandbox holds this proof's cancelled subscriptions, the archived invented price, and the older test objects
 it already had. The machine holds nothing: scratch profiles, vaults and credentials are gone.
+
+## Addendum, 2026-11-28: the subscribe confirmation (T1e)
+
+Finding 10 went to the founder, who ruled that Knowlu sends its own confirmation. T1e built it (the design note's D6b). It
+was proven on staging the same night through the API: scratch accounts signed in by emailed code (no app profile), each
+checkout page paid headless with the test card.
+
+| Step | What was done | Result |
+|---|---|---|
+| a | Every-4-weeks checkout, the account's first subscription | pass: entitlement four_weekly, trialing; one mail, "Your Knowlu free trial has started", with the plan, the price, the tax phrase, the first charge's date and how to cancel |
+| b | That subscription cancelled; a yearly checkout with a 100%-off sandbox promotion code | pass: no trial offered; total due $0.00 with the card still asked for; entitlement yearly, active; one mail, "Your Knowlu subscription has started", with the next charge's date, the promotion-code line and the yearly guarantee |
+| c | Cancelled again; an every-4-weeks checkout on the first fix build | pass: one mail, with no promotion line and no guarantee line |
+| d | A second scratch account; an every-4-weeks checkout on the final build | pass: entitlement four_weekly, trialing; one mail |
+| e | `DELETE /account` for both accounts, each holding a live subscription | pass: 200; the subscription set to cancel at its period's end; account rows and logins gone |
+
+Observed:
+- The mail's date is the charge's date in UTC-10 (D6's rule), so for a checkout late in the evening it is one calendar day
+  earlier than the date on Stripe's page.
+- A promotion code applied on Stripe's page reaches the subscription as one entry in `discounts`, which is what the mail's
+  promotion line reads.
+- Stripe's yearly page words the price as a monthly figure "billed annually". That text is Stripe's.
+- The scratch addresses received Knowlu's mails only (the sign-in code and the confirmations).
+
+Left behind by the addendum: nothing on the machine and no account on staging; the sandbox holds the cancelled
+subscriptions and a switched-off promotion code.

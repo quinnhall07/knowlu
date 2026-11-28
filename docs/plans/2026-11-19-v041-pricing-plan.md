@@ -1007,7 +1007,8 @@ rests on S1, a proof, a review or Quinn.
       required.
 - [ ] **8.** The PR merges. Record the SHA.
 - [ ] **9.** Quinn's live-mode checklist. Quinn reads back the live endpoint's enabled events, and the main
-      session records whether `customer.subscription.trial_will_end` is present.
+      session records whether `customer.subscription.trial_will_end` is present. *Added 2026-11-28 (T1e):* and
+      whether `checkout.session.completed` is present: the subscribe confirmation rides on it (the note's D6b).
 - [ ] **10.** Set `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437` on production, and deploy
       the three functions (and `account`, if T5b ran) from the merge SHA. Quinn reads the endpoint's
       deliveries since the deploy: every one is 2xx.
@@ -1026,6 +1027,8 @@ rests on S1, a proof, a review or Quinn.
     Nothing is paid.
   - **If Q11 is agreed**, the reminder round trip:
     1. Quinn completes `four_weekly` under the trial with their own card. There is no charge at checkout.
+       *Added 2026-11-28 (T1e):* the confirmation "Your Knowlu free trial has started" arrives at the scratch
+       address within a few minutes; record what Link or Stripe mails beside it.
     2. `entitlements` shows `four_weekly`, `trialing`.
     3. Quinn moves the trial end to **no closer than 24 hours away**, and within 3 days.
     4. Wait for the reminder at the scratch address, for **at most 30 minutes**.

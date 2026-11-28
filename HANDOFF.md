@@ -39,10 +39,10 @@ older under `docs/` is history or design authority from the previous repository 
 - **v0.4.1 is the pricing lane (Contract), built and proven on staging, not released.** Quinn ruled
   2026-11-19 that billing moves in v0.4.1, not v0.5.0. Its note `docs/specs/2026-11-19-v041-pricing-design.md` and
   plan `docs/plans/2026-11-19-v041-pricing-plan.md` are on `main` (PR #87). The lane is draft PR #91, branch
-  `feat/v0.4.1-pricing`; CI was green (15 of 15 checks) at the head of 2026-11-27. Where it stands, 2026-11-27:
-  - **Merged into the lane branch:** every build and review task: T0 to T5b, T6a, T7, T8, T10, T11, T1b, T1c and T1d
-    (T1c: the checkout sends no `custom_text`; T1d: deleting an account reads Stripe first, so a former subscriber
-    can delete). Not done: the rest of this docs pass (T6b) and T9 (the production steps, the pre-tag live proof and
+  `feat/v0.4.1-pricing`; CI was green (15 of 15 checks) at the head of 2026-11-27. Where it stands, 2026-11-28:
+  - **Merged into the lane branch:** every build and review task: T0 to T5b, T6a, T7, T8, T10, T11, T1b, T1c, T1d and
+    T1e (T1c: the checkout sends no `custom_text`; T1d: deleting an account reads Stripe first, so a former
+    subscriber can delete; T1e: the webhook sends Knowlu's own confirmation when someone subscribes). Not done: the rest of this docs pass (T6b) and T9 (the production steps, the pre-tag live proof and
     the tag).
   - **The staging proof passed 2026-11-27** (S1, Managed Payments, and S2, the price-change rehearsal), on a build
     with T1c applied: `docs/reports/2026-11-27-v041-s1-managed-payments.md`. It found that Stripe refuses
@@ -51,18 +51,21 @@ older under `docs/` is history or design authority from the previous repository 
   - **D8 was ruled 2026-11-27.** Managed Payments stays and the checkout sends no `custom_text` (T1c, merged into
     the lane the same day). Stripe's own page states the trial, the price, the first charge's date and "until you
     cancel"; the app's Subscribe step states how to cancel and the yearly guarantee (the note's paragraph under D8).
-  - **What remains, in order:** (1) the rest of this docs pass, which waits on Quinn's answers; (2) Quinn's decision on
-    the subscribe confirmation that `site/terms.html:90` promises ("When you subscribe: a confirmation you can
-    keep"): the report's finding 10 found none sent in the sandbox, from Knowlu or from Stripe. Then the plan's §8 C,
-    each step on Quinn's word: (3) production parity if it is still open, Quinn's own old-price subscriptions and
-    the re-run of T0's counts; (4) the merge of PR #91; (5) Quinn's live-mode Stripe checklist, the two price
-    variables and the functions on production, and the pre-tag live proof on a production scratch account;
-    (6) §8 D, then the tag, whose release run publishes `site/` (until then the live subscribed page still says
-    "seven-day trial" and "the gear"); (7) the checks after the tag, then `site.yml`'s first run.
+  - **The subscribe confirmation was ruled 2026-11-27 and built (T1e, merged 2026-11-28).** The terms promise
+    "When you subscribe: a confirmation you can keep" (`site/terms.html:90`), and neither Knowlu nor Stripe sent
+    one. Knowlu now sends its own on `checkout.session.completed` (the note's D6b). Proven on staging: four sandbox
+    checkouts, one confirmation each, with a promotion-code line when a code applied (the report's addendum).
+  - **What remains, in order:** (1) the rest of this docs pass, which waits on Quinn's answers. Then the plan's
+    §8 C, each step on Quinn's word: (2) production parity if it is still open, Quinn's own old-price
+    subscriptions and the re-run of T0's counts; (3) the merge of PR #91; (4) Quinn's live-mode Stripe checklist
+    (the live endpoint must send `checkout.session.completed` and `customer.subscription.trial_will_end`), the two
+    price variables and the functions on production, and the pre-tag live proof on a production scratch account;
+    (5) §8 D, then the tag, whose release run publishes `site/` (until then the live subscribed page still says
+    "seven-day trial" and "the gear"); (6) the checks after the tag, then `site.yml`'s first run.
   - **Open findings of the report:** 3 (the wrong reminder after a trial is ended by hand), 4 (no way back inside the
     app after a membership ends) and 9 (Stripe's refusals are logged with a request path that holds an id, in the
-    billing functions T1d did not touch). Findings 1 and 2 are fixed by T1c and T1d, 5 and 10 are in "What remains"
-    above, and 6 to 8 are observations.
+    billing functions T1d did not touch). Findings 1, 2 and 10 are fixed by T1c, T1d and T1e, 5 is in "What
+    remains" above, and 6 to 8 are observations.
   - **Production:** read 2026-11-21 (read-only, on Quinn's word): 42 of 42 migrations present, 2 accounts, billing
     functions last deployed 2026-10-20. The lane's ledger records no production deploy since. The lane's production
     steps (§8 C of the plan) have not run.
