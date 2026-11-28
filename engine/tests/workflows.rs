@@ -317,6 +317,173 @@ fn docs_only_changes_still_report_the_three_required_checks() {
     }
 }
 
+/// One step of a job block: from its `      - name: <name>` line (six-space indent, as every step in
+/// these workflows) to the line before the next step at that indent, or the end of the job.
+fn step_block<'a>(job: &'a str, name: &str) -> &'a str {
+    let re = regex::Regex::new(&format!(r"(?m)^      - name: {}\s*$", regex::escape(name))).unwrap();
+    let start = re.find(job).unwrap_or_else(|| panic!("no step named `{name}` in:\n{job}")).start();
+    let end = job[start + 1..].find("\n      - ").map_or(job.len(), |e| start + 1 + e + 1);
+    &job[start..end]
+}
+
+/// The lines that are not YAML comments, so a comment naming a trigger or a secret never satisfies,
+/// nor trips, a check about the workflow's behaviour.
+fn code_lines(text: &str) -> Vec<&str> {
+    text.lines().filter(|l| !l.trim_start().starts_with('#')).collect()
+}
+
+/// The prompt-injection suite plan, section 6: the red-team suite has its own credit-capped OpenRouter key,
+/// `OPENROUTER_REDTEAM_API_KEY`, so its spend is visible, capped and revocable on its own. Its name
+/// appears in exactly two places: once in `ci.yml`, inside the `red-team suite` step (which runs
+/// PR-authored code and so must be the only step holding it), and in `redteam-weekly.yml`, which no
+/// pull request triggers. Never in `release.yml`, `security.yml` or any other step, and in each place
+/// mapped to the env name `judge_provider.ts` reads, never the eval's own staging key. The step runs only
+/// when the `touched` check says the judgment path changed, keyed so a missing `changes` output runs it,
+/// and no expression is spliced into a `run:` line.
+#[test]
+fn the_red_team_key_is_named_only_in_the_red_team_suite_step_and_the_weekly_workflow() {
+    let key = "secrets.OPENROUTER_REDTEAM_API_KEY";
+    let mapped = format!("OPENROUTER_API_KEY: ${{{{ {key} }}}}");
+    let names = all_workflows();
+    assert!(names.iter().any(|n| n == "redteam-weekly.yml"), "redteam-weekly.yml is missing: {names:?}");
+    for name in &names {
+        let text = workflow(name);
+        match name.as_str() {
+            "ci.yml" => {
+                assert_eq!(text.matches(key).count(), 1, "ci.yml names {key} exactly once");
+                let job = job_block(&text, "eval-gate");
+                let step = step_block(job, "red-team suite");
+                assert!(step.contains(&mapped), "the red-team suite step maps the key as `{mapped}`:\n{step}");
+                assert!(!step.contains("secrets.OPENROUTER_API_KEY"), "the red-team suite never spends the eval's key:\n{step}");
+                let eval = step_block(job, "eval suite");
+                assert!(!eval.contains(key), "the eval suite step never holds the red-team key:\n{eval}");
+                // The job's clock covers both suites; the eval keeps its own 20-minute bound inside it.
+                assert!(code_lines(eval).contains(&"        timeout-minutes: 20"), "the eval suite step keeps timeout-minutes: 20:\n{eval}");
+                // `!cancelled()`: the bit still reports on a PR whose eval suite failed.
+                assert!(
+                    step.contains(
+                        "if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && steps.touched.outputs.redteam == 'yes' }}"
+                    ),
+                    "the red-team suite runs on the touched check's `redteam` output, behind `!cancelled()` and `code != 'false'`:\n{step}"
+                );
+                let touched = step_block(job, "does this PR touch a prompt, a schema, the model pins or the red-team suite?");
+                assert!(touched.contains("echo \"redteam=$redteam\" >> \"$GITHUB_OUTPUT\""), "the touched check publishes `redteam`:\n{touched}");
+                assert!(touched.contains("redteam=$run"), "every PR that runs the eval also runs the red-team suite:\n{touched}");
+                for path in [
+                    "_shared/(judge_(prompts|models|validate|pipeline)|scrub|output_policy)",
+                    "^cloud/eval/redteam/",
+                    "mail-process/(model|handler)",
+                    "mail-resolve/handler",
+                    // The TLD lists output_policy.ts and the oracle read, and resolveDue (the email
+                    // `due_not` goal's value).
+                    "_shared/(tlds|judge_due)",
+                ] {
+                    assert!(touched.contains(path), "the touched check names `{path}`:\n{touched}");
+                }
+                assert_red_team_run_lines_splice_nothing(name, step);
+            }
+            "redteam-weekly.yml" => {
+                assert!(text.contains(&mapped), "redteam-weekly.yml maps the key as `{mapped}`");
+                assert!(!text.contains("secrets.OPENROUTER_API_KEY"), "redteam-weekly.yml never spends the eval's key");
+                assert_red_team_run_lines_splice_nothing(name, &text);
+            }
+            _ => assert!(!text.contains(key), "{name} must never name {key}"),
+        }
+    }
+    // The weekly run is the PR step's command, byte for byte: one place to review, no drift.
+    let runner_line = |name: &str, text: &str| -> String {
+        let lines: Vec<String> =
+            code_lines(text).into_iter().filter(|l| l.contains("cloud/eval/redteam/run_redteam.ts")).map(String::from).collect();
+        assert_eq!(lines.len(), 1, "{name}: exactly one line runs the red-team runner: {lines:?}");
+        lines.into_iter().next().unwrap()
+    };
+    let ci = workflow("ci.yml");
+    assert_eq!(
+        runner_line("redteam-weekly.yml", &workflow("redteam-weekly.yml")),
+        runner_line("ci.yml", step_block(job_block(&ci, "eval-gate"), "red-team suite")),
+        "the weekly runner line differs from ci.yml's red-team suite runner line"
+    );
+    // The host the runner may reach is eval-gate's, byte for byte: the weekly run can never point
+    // at another project while the PR step points at staging.
+    let host_line = |name: &str, text: &str| -> String {
+        let lines: Vec<String> = code_lines(text)
+            .into_iter()
+            .filter(|l| l.trim_start().starts_with("STAGING_HOST:"))
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert_eq!(lines.len(), 1, "{name}: exactly one STAGING_HOST line: {lines:?}");
+        lines.into_iter().next().unwrap()
+    };
+    assert_eq!(
+        host_line("redteam-weekly.yml", &workflow("redteam-weekly.yml")),
+        host_line("ci.yml eval-gate", job_block(&ci, "eval-gate")),
+        "the weekly workflow's STAGING_HOST differs from eval-gate's"
+    );
+}
+
+/// A secret reaches a step only by its own name. `toJSON(secrets)` dumps every secret into one value
+/// and `secrets[...]` picks one by a computed name, so neither the key-placement check above nor a
+/// reviewer could see which secret a step holds.
+#[test]
+fn no_workflow_dumps_or_indexes_the_secrets_context() {
+    let dump = regex::Regex::new(r"(?i)tojson\s*\(\s*secrets").unwrap();
+    let index = regex::Regex::new(r"(?i)secrets\s*\[").unwrap();
+    for name in all_workflows() {
+        let text = workflow(&name);
+        assert!(!dump.is_match(&text), "{name}: toJSON(secrets) hands a step every secret");
+        assert!(!index.is_match(&text), "{name}: secrets[...] names a secret no check can read");
+    }
+}
+
+/// Every `run:` line in `text` that runs the red-team runner carries no `${{` and no secret: values
+/// reach it through `env:` only (zizmor's template-injection rule, and the plan's section 6).
+fn assert_red_team_run_lines_splice_nothing(name: &str, text: &str) {
+    let runs: Vec<&str> = code_lines(text).into_iter().filter(|l| l.contains("cloud/eval/redteam/run_redteam.ts")).collect();
+    assert!(!runs.is_empty(), "{name}: no line runs cloud/eval/redteam/run_redteam.ts");
+    for l in runs {
+        assert!(l.trim_start().starts_with("run: deno run "), "{name}: the runner is one `run:` line: {l}");
+        assert!(!l.contains("${{") && !l.contains("secrets."), "{name}: an expression or a secret on the runner's run: line: {l}");
+        assert!(!l.contains("--per-case") && !l.contains("--dry-run"), "{name}: CI passes neither --per-case nor --dry-run: {l}");
+    }
+}
+
+/// The plan's section 6 weekly run (Q4): a pin names a model and an upstream, and the upstream can change how
+/// it serves without a commit here, so the suite also runs on a schedule. It holds the red-team key and
+/// the staging service-role key, so no pull request and no branch update may ever trigger it (that would
+/// run PR-authored code with both), it runs only on `main`'s checkout, and only on GitHub's own runners,
+/// never the `CI_SELF_HOSTED` switch.
+#[test]
+fn the_weekly_red_team_workflow_runs_on_schedule_and_dispatch_only_on_hosted_runners() {
+    let w = workflow("redteam-weekly.yml");
+    let code = code_lines(&w);
+    let on = code.iter().position(|l| *l == "on:").expect("redteam-weekly.yml has a block `on:` key");
+    let triggers: Vec<&str> = code[on + 1..]
+        .iter()
+        .take_while(|l| l.is_empty() || l.starts_with(' '))
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .map(|l| l.trim().trim_end_matches(':'))
+        .collect();
+    assert_eq!(triggers, ["schedule", "workflow_dispatch"], "the weekly run's only triggers");
+    let body = code.join("\n");
+    for banned in ["pull_request", "push", "workflow_run", "workflow_call", "self-hosted", "CI_SELF_HOSTED"] {
+        assert!(!body.contains(banned), "redteam-weekly.yml must not name `{banned}`");
+    }
+    let runs_on: Vec<&str> = code.iter().map(|l| l.trim()).filter(|l| l.starts_with("runs-on:")).collect();
+    assert!(!runs_on.is_empty() && runs_on.iter().all(|l| *l == "runs-on: ubuntu-latest"), "GitHub-hosted only: {runs_on:?}");
+    let permissions: Vec<&str> = code.iter().copied().filter(|l| l.trim_start().starts_with("permissions:")).collect();
+    assert_eq!(permissions, ["permissions: { contents: read }"], "redteam-weekly.yml reads only, granted once at the top");
+    let checkouts: Vec<usize> = code.iter().enumerate().filter(|(_, l)| l.contains("actions/checkout@")).map(|(i, _)| i).collect();
+    assert_eq!(checkouts.len(), 1, "redteam-weekly.yml checks out once");
+    let checkout: Vec<&str> =
+        code[checkouts[0] + 1..].iter().copied().take_while(|l| !l.trim_start().starts_with("- ") && !l.trim().is_empty()).collect();
+    assert!(
+        checkout.iter().any(|l| l.trim() == "with: { persist-credentials: false }"),
+        "the weekly checkout keeps no credential: {checkout:?}"
+    );
+    assert!(body.contains("if: github.ref == 'refs/heads/main'"), "the weekly run runs main's checkout only");
+    assert!(!body.contains("continue-on-error"), "the weekly run blocks nothing, so a red run is the alert, never softened");
+}
+
 /// D18, as Quinn ruled it on 2026-10-04 (session 4): email forwarding may merge to `main` before
 /// privacy bump #1, but no release may ship it until the page discloses it. The guard is
 /// mechanical: `scripts/ci/privacy-guard.ps1` is the build job's first step after checkout, runs

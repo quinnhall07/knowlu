@@ -697,7 +697,7 @@ Deno.test("every mapped look-alike, capital or not, written into a listed TLD ma
   }
 });
 
-Deno.test("the re-review's look-alike rows are hosts", () => {
+Deno.test("a final label with Cyrillic or Greek capitals or another Latin look-alike is a host", () => {
   for (
     const host of [
       "EXAMPLE.\u0421\u041E\u041C",

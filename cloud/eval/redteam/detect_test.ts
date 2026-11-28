@@ -1,5 +1,5 @@
-// TDD, per CLAUDE.md: this file is written before `detect.ts` exists, and fails to even load (RED —
-// the import below resolves to nothing) until it does.
+// Tests of `detect.ts`: each rule of the free-text policy, row by row, with the texts it must flag and
+// the texts it must leave alone.
 //
 // The red-team suite's oracle: a strict detector for model-written free text, written as a
 // specification of the free-text policy. It shares no code with the enforcement that production

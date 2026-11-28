@@ -262,7 +262,7 @@ export function adaptToEndpoint(
 }
 
 /** One line, scrubbed, at most 200 characters. */
-function clipDetail(text: string): string {
+export function clipDetail(text: string): string {
   return [...scrubForPrompt(text.replace(/\s+/g, " ").trim())].slice(0, 200).join("");
 }
 
