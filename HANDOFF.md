@@ -36,27 +36,29 @@ older under `docs/` is history or design authority from the previous repository 
   billing functions still sell the old plans, and "Sold through Link" applies once Managed Payments is in effect
   (it is in effect in the Stripe sandbox, see below). A 4-week charge the student did not mean to make
   is refunded in the four cases of P15.
-- **v0.4.1 is the pricing lane (Contract), built and proven on staging with T1c applied, not released.** Quinn ruled
+- **v0.4.1 is the pricing lane (Contract), built and proven on staging, not released.** Quinn ruled
   2026-11-19 that billing moves in v0.4.1, not v0.5.0. Its note `docs/specs/2026-11-19-v041-pricing-design.md` and
   plan `docs/plans/2026-11-19-v041-pricing-plan.md` are on `main` (PR #87). The lane is draft PR #91, branch
   `feat/v0.4.1-pricing`; CI was green (15 of 15 checks) at the head of 2026-11-27. Where it stands, 2026-11-27:
-  - **Merged into the lane branch:** every build and review task except T1c: T0 to T5b, T6a, T7, T8, T10, T11, T1b and
-    T1d (T1d: deleting an account reads Stripe first, so a former subscriber can delete). Not done: this docs pass
-    (T6b) and T9 (the live run, the rollout and the tag).
-  - **The staging proof passed 2026-11-27 with T1c applied** (S1, Managed Payments, and S2, the price-change
-    rehearsal): `docs/reports/2026-11-27-v041-s1-managed-payments.md`. It found that Stripe refuses `custom_text`
-    under Managed Payments, so on the lane branch without T1c every checkout press is refused.
-  - **T1c is built and reviewed but not in the lane.** It makes the checkout send no `custom_text`. It waits for
-    Quinn's ruling on D8 (the note's sentence cannot be put on Stripe's page).
-  - **What remains, in order:** (1) Quinn's ruling on D8, then T1c's merge into the lane; (2) Quinn's decision on
+  - **Merged into the lane branch:** every build and review task: T0 to T5b, T6a, T7, T8, T10, T11, T1b, T1c and T1d
+    (T1c: the checkout sends no `custom_text`; T1d: deleting an account reads Stripe first, so a former subscriber
+    can delete). Not done: the rest of this docs pass (T6b) and T9 (the production steps, the pre-tag live proof and
+    the tag).
+  - **The staging proof passed 2026-11-27** (S1, Managed Payments, and S2, the price-change rehearsal), on a build
+    with T1c applied: `docs/reports/2026-11-27-v041-s1-managed-payments.md`. It found that Stripe refuses
+    `custom_text` under Managed Payments, which refused every checkout press until T1c. It was driven through the
+    app's DOM on scratch profiles, so it is also the lane's live run of the student journey against staging.
+  - **D8 was ruled 2026-11-27.** Managed Payments stays and the checkout sends no `custom_text` (T1c, merged into
+    the lane the same day). Stripe's own page states the trial, the price, the first charge's date and "until you
+    cancel"; the app's Subscribe step states how to cancel and the yearly guarantee (the note's paragraph under D8).
+  - **What remains, in order:** (1) the rest of this docs pass, which waits on Quinn's answers; (2) Quinn's decision on
     the subscribe confirmation that `site/terms.html:90` promises ("When you subscribe: a confirmation you can
-    keep"): the report's finding 10 found none sent in the sandbox, from Knowlu or from Stripe; (3) the live run of
-    the student journey on a scratch profile against staging, which is the main session's. Then the plan's §8 C,
-    each step on Quinn's word: (4) production parity if it is still open, Quinn's own old-price subscriptions and
-    the re-run of T0's counts; (5) the merge of PR #91; (6) Quinn's live-mode Stripe checklist, the two price
+    keep"): the report's finding 10 found none sent in the sandbox, from Knowlu or from Stripe. Then the plan's §8 C,
+    each step on Quinn's word: (3) production parity if it is still open, Quinn's own old-price subscriptions and
+    the re-run of T0's counts; (4) the merge of PR #91; (5) Quinn's live-mode Stripe checklist, the two price
     variables and the functions on production, and the pre-tag live proof on a production scratch account;
-    (7) §8 D, then the tag, whose release run publishes `site/` (until then the live subscribed page still says
-    "seven-day trial" and "the gear"); (8) the checks after the tag, then `site.yml`'s first run.
+    (6) §8 D, then the tag, whose release run publishes `site/` (until then the live subscribed page still says
+    "seven-day trial" and "the gear"); (7) the checks after the tag, then `site.yml`'s first run.
   - **Open findings of the report:** 3 (the wrong reminder after a trial is ended by hand), 4 (no way back inside the
     app after a membership ends) and 9 (Stripe's refusals are logged with a request path that holds an id, in the
     billing functions T1d did not touch). Findings 1 and 2 are fixed by T1c and T1d, 5 and 10 are in "What remains"

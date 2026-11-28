@@ -294,7 +294,7 @@ refusing them under Managed Payments:
 - `subscription_data[metadata][account_id]` and `client_reference_id`, by which the webhook finds the account
   (`stripe-webhook/handler.ts:92-94`);
 - `custom_text` (D8, P9). *Changed 2026-11-27:* Stripe refuses it in every slot under Managed Payments,
-  so the session no longer sends it; the change waits for the founder's yes (the paragraph under D8).
+  so the session no longer sends it; the founder ruled so the same day (the paragraph under D8).
 
 If Managed Payments refuses any of these, that is a checkpoint B failure for Quinn, with the fallback below.
 
@@ -333,7 +333,8 @@ function of the plan and of whether a trial applies:
 The cadence words are the key's, which never change. The tax phrase and the money-back sentence come from
 the catalog's words (D13), so the two cannot drift from the app's lines (r5: m2).
 
-**Refused by Stripe under Managed Payments (found 2026-11-27 on staging; the change waits for the founder's yes).**
+**Refused by Stripe under Managed Payments (found 2026-11-27 on staging; ruled by the founder the same day: Managed
+Payments stays, and the sentence is not sent).**
 Stripe answers "You cannot use custom_text with Managed Payments." for every `custom_text` slot, so the session no
 longer sets one. What Stripe's own page states without it, as read on the sandbox: "14 days free" on a first
 subscription; "Then $12.99 every 4 weeks starting" or "Then $84.37 per year starting" with the first charge's date;

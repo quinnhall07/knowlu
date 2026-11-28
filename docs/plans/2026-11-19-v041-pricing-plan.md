@@ -186,7 +186,9 @@ answer a quote with its URL and the date read, or "not found"; questions 9-11 ar
    load-bearing ones named first (note D7):
    - `consent_collection[terms_of_service]`, `payment_method_collection`,
      `subscription_data[trial_period_days]`;
-   - `customer`, `subscription_data[metadata][account_id]`, `client_reference_id`, `custom_text`;
+   - `customer`, `subscription_data[metadata][account_id]`, `client_reference_id`, `custom_text`
+     (*Changed 2026-11-27 (T1c):* Stripe refuses `custom_text` under Managed Payments, so the session no longer sends it; the
+     note's D8);
    - then the droppable ones.
 5. **Subscriptions and events.** Whether its subscriptions live in Knowlu's account, keep their metadata and
    send `customer.subscription.*` events to the endpoint.
@@ -397,7 +399,9 @@ price id, the formatter, the offer). Nothing imports it yet. `TERMS_VERSION` is 
   today's tax keys are pinned instead.
 - `stripes_page_states_the_renewal_terms`: D8's sentence, for each plan and trial combination. (r5: m2) With
   an invented catalog whose tax phrase or money-back line differs, the sentence carries the invented words:
-  they come from the catalog, not from `handler.ts`.
+  they come from the catalog, not from `handler.ts`. *Changed 2026-11-27 (T1c):* this test is gone with the sentence; in its
+  place `the_form_sets_no_custom_text_under_managed_payments` pins that no key of the form starts with
+  `custom_text`.
 - The `index.ts` text-read (`handler_test.ts:331-343`) checks:
   - that it imports the catalog and resolves it from `Deno.env.get`, and holds no cents map (the map at
     `index.ts:16-20` goes);
@@ -814,7 +818,7 @@ rests on S1, a proof, a review or Quinn.
 | D7 | load-bearing keys kept; only allowed keys dropped | T1, checkpoint A | `billing-checkout::the_form_keeps_every_load_bearing_key` |
 | D7 ⚑ | reading (i) or (ii); the test-mode gates (a)-(e) | T0r, S1 | T0r's report; the S1 report |
 | D7 | `_shared/stripe.ts` untouched | T1 | T8's diff check |
-| D8 | the renewal sentence; its tax and money-back words from the catalog (r5) | T1 | `billing-checkout::stripes_page_states_the_renewal_terms` (with the invented-words case); S1 (a); step 10b |
+| D8 | the renewal sentence; its tax and money-back words from the catalog (r5) | T1 | `billing-checkout::stripes_page_states_the_renewal_terms` (with the invented-words case); S1 (a); step 10b. *Changed 2026-11-27 (T1c):* the sentence is not sent (Stripe refuses it under Managed Payments); the pin is the test that no key starts with `custom_text`, and S1 (a) and step 10b read Stripe's own renewal lines |
 | D9 | the offer from the server: one catalog, one bundle | T1, T4a | `billing-checkout::the_offer_is_the_catalogs`; `account::checkout_offer_at_reads_the_offer` |
 | D9 | the purchase sends the offer back | T4a, T4 | `account::checkout_url_at_sends_the_offer_it_was_given`; `ui_wizard::the_subscribe_buttons_send_the_signed_plans`; DOM t21 (`:273`) |
 | D9 | the app holds no price and renders what it is sent; order; no trial words | T4 | `ui_wizard::the_wizard_holds_no_price_and_renders_the_offer`; `ui_plans::the_sheet_holds_no_price`; DOM t21 and t20 with the invented envelope |
@@ -851,7 +855,7 @@ rests on S1, a proof, a review or Quinn.
 | §4 ⚑ | the tag publishes the ported site plus T5's pages | T9 | §8 D's `site/` line |
 | §5 | 18+, tester and gate unchanged | T1 | the existing tests, unchanged |
 | §5 | the webhook's guards | T2 | the existing tests, unchanged |
-| §5 | the wording rule | T1a, T1, T3, T4, T5 | the formatter, `custom_text`, reminder, wizard and terms pins; the source scan |
+| §5 | the wording rule | T1a, T1, T3, T4, T5 | the formatter, `custom_text` (dropped 2026-11-27, T1c), reminder, wizard and terms pins; the source scan |
 | §5 ⚑ | rule 1; rule 2; no ids in reports | all | T8; the S1 report's rule (§8 B) |
 
 ## 7. Review checkpoints
@@ -892,7 +896,8 @@ rests on S1, a proof, a review or Quinn.
 - [ ] **S1 (a) and (b), account A** (a fresh scratch account, signed in through the T4 build):
   1. Open `yearly` and `four_weekly` checkouts. A headless read shows:
      - the price, and "every 4 weeks" or the yearly wording;
-     - "14 days", the tax line and D8's sentence;
+     - "14 days", the tax line and D8's sentence (*Changed 2026-11-27 (T1c):* Stripe's own renewal lines instead, as
+       the note lists under D8);
      - "Sold through Link" if Managed Payments is in effect.
   2. Quinn completes `four_weekly` with a test card.
   3. Then, read-only:
@@ -1013,7 +1018,8 @@ rests on S1, a proof, a review or Quinn.
   - (r4) `GET /billing-checkout` answers both plans, Yearly first, with the catalog's lines and the new terms
     version. A `four_weekly` POST with `amount_cents` 1298 answers 409 with the "changed" sentence.
   - `yearly` and `four_weekly` open live pages. A headless read shows:
-    - the figures, "14 days", the tax line and D8's sentence;
+    - the figures, "14 days", the tax line and Stripe's own renewal lines, as the note lists under D8
+      (*Changed 2026-11-27 (T1c):* no `custom_text`, so D8's sentence is not on the page);
     - "Sold through Link" if Managed Payments is in effect;
     - **its absence** if Q10 took the switch-off fallback under reading (ii).
 
@@ -1159,7 +1165,7 @@ Quinn's call.
    read (D5).
 9. **The trial in the app.** P9 does not list it, and only the server knows whether it applies, so the app
    leaves it out and Stripe's page states it.
-10. **"Plus tax where it applies."** This is P9's phrase, used in the app, the emails and `custom_text`. The
+10. **"Plus tax where it applies."** This is P9's phrase, used in the app and the emails (and in `custom_text` until 2026-11-27, T1c). The
     terms keep the legal spec's "Sales tax is added at checkout where it applies".
 11. **Managed Payments "already on."** This is the live account setting of 2026-09-14. Whether it governs
     sessions that do not ask for it is T0r's question 2 (D7's readings). Under reading (ii), Link is
