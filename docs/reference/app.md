@@ -328,8 +328,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   is created by the app; portal credentials never leave the device — fetch on device, think in the
   cloud.**
   *(Note, 2026-11-27: the price in that line was amended 2026-11-10 and 2026-11-17 to $12.99 every 4 weeks or
-  $84.37 a year, with 14 days free and no free tier; `CLAUDE.md`'s Direction line still names $9.99 a
-  month.)*
+  $84.37 a year, with 14 days free and no free tier; `CLAUDE.md`'s Direction line was amended to those
+  prices on 2026-11-27.)*
 - The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
   telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
   llama.cpp runtime. C4 is no longer a phase: the Pilot's runtime-removal lane (L6; Amendment

@@ -196,7 +196,7 @@ them with `model: 'opus'`.
 ## Direction
 
 `VISION.md` states what Knowlu is and must stay; the cloud design is the authority on how. In one line: **accounts
-and $9.99 a month, no free tier; every judgment runs in our cloud; CI builds and signs every release;
+and $12.99 every 4 weeks or $84.37 a year, no free tier; every judgment runs in our cloud; CI builds and signs every release;
 the vault stays plain text on the student's machine and is created by the app; portal credentials
 never leave the device — fetch on device, think in the cloud.** Streams and their order are in
 `HANDOFF.md` §2.

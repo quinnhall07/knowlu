@@ -1185,8 +1185,9 @@ and answered the same day.
 12. **Accept 10b's leftover production records:** consent rows carrying the not-yet-published versions, the
     live Stripe customer, and any record Link keeps. They go in the ledger as counts. Blocks step 10b.
     *Recommend:* accept them.
-13. **VISION's "One edition" line and CLAUDE.md's Direction line, in your words.** Blocks the tag.
-    *Recommend:* yes.
+13. **Answered 2026-11-27: yes, as drafted.** The question was: **VISION's "One edition" line and CLAUDE.md's
+    Direction line, in your words.** Quinn approved both, with VISION's quiet-release sentence ("the regular
+    prices") and its Launch line (no figure); they are amended in this lane.
 14. **Answered 2026-11-21: yes to all three.** The question was: **the price-change design (new in r4).** The amendment's *Reading (7)* leaves to this lane whether a
     change needs an app or a terms release (`:1400-1402`); this is the lane's answer, for you to confirm
     before T5. Three parts, one answer:
