@@ -1,8 +1,8 @@
 import { restFromEnv, restSelect, restUpsert } from "../_shared/db.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { CATALOG, resolveCatalog } from "../_shared/price_catalog.ts";
-import { stripeGetFrom } from "../_shared/stripe.ts";
 import { handle } from "./handler.ts";
+import { subscriptionReader } from "./subscription_read.ts";
 
 function env(name: string): string {
   const v = Deno.env.get(name);
@@ -70,13 +70,13 @@ Deno.serve(async (req) => {
           source: "stripe",
           updated_at: updatedAt,
         }], "account_id"),
-      // **Through `stripeGetFrom`, not a bare `fetch`**: it pins `Stripe-Version` to the version
-      // `entitlementFromSubscription` is written against, which is the same version P2 sets on the
-      // webhook endpoint. The id is path-encoded — it is Stripe's, but it arrives over the wire.
-      fetchSubscription: (id) =>
-        stripeGetFrom(stripeKey, globalThis.fetch)(`/v1/subscriptions/${encodeURIComponent(id)}`),
+      // **Through `stripeGetFrom`, not a bare `fetch`** (inside `subscriptionReader`): it pins
+      // `Stripe-Version` to the version `entitlementFromSubscription` is written against, which is the
+      // same version P2 sets on the webhook endpoint. The id is path-encoded — it is Stripe's, but it
+      // arrives over the wire. Strict: `null` only for Stripe's 404, a throw for any other failure.
+      fetchSubscription: subscriptionReader(stripeKey, globalThis.fetch),
       catalog,
-      // D6: the account's own address, by the account id the event carries; nothing else.
+      // D6, D6b: the account's own address, by the account id the event carries; nothing else.
       accountEmail: async (accountId) => {
         const rows = await restSelect<{ email: string }>(
           rest,
@@ -94,7 +94,7 @@ Deno.serve(async (req) => {
         });
         if (!res.ok) {
           console.error(`email: ${res.status}`);
-          throw fail(502, "the reminder could not be sent");
+          throw fail(502, "the email could not be sent");
         }
       },
     });

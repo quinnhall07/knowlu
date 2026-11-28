@@ -259,6 +259,53 @@ not expired by the delete; a payment completed on it afterwards needs a refund b
 
 If Link or Stripe also sends a notice (S1 records it), Knowlu's still goes.
 
+**D6b. The subscribe confirmation is Knowlu's own email too (added 2026-11-27 on the founder's word).** The webhook
+sends it on `checkout.session.completed`.
+- **Why.** The published terms promise, under *Emails about your subscription*: "When you subscribe: a
+  confirmation you can keep, with the plan, the price, how often it renews and how to cancel." No code sent
+  one, and the staging proof of 2026-11-27 saw none from Stripe's sandbox either. And since D8's sentence is
+  not on Stripe's page, how to cancel is otherwise stated only on the app's Subscribe step.
+- **When it is sent.** Once per event, when the session is a subscription checkout (`mode` is
+  `subscription`, or absent with a subscription id on the session), the subscription the webhook fetches is
+  `trialing` or `active`, and the account still exists and has an address. Never on the
+  `customer.subscription.*` events, `invoice.payment_failed` or `trial_will_end`.
+- **It does not wait behind the stale guard.** The guard exists for the entitlement write only, and
+  `customer.subscription.created` often lands first with the same or a later timestamp. So a stale
+  checkout event skips the write and still sends the mail.
+- **What it says.** Plain text, from the same words as D6's reminder, shared in one function so the two
+  cannot drift:
+  - "Your Knowlu free trial has started" (trialing, with a trial end) or "Your Knowlu subscription has
+    started", and "Keep this message: it is your confirmation.";
+  - the plan words and the amount from the catalog entry the price id matches, or D6's fallbacks for an id
+    the catalog lacks, then the catalog's tax phrase;
+  - the date of the first charge, "when your free trial ends", or of the next charge, in UTC−10 as in D6.
+    With no such date on the subscription there is no date line; no date is guessed;
+  - a line saying a promotion code applies, only when the subscription carries a discount;
+  - "It renews automatically until you cancel.", and for a yearly entry the catalog's money-back sentence;
+  - how to cancel: D6's two lines without "before then".
+
+  No id, no link and no "14 days" (the date carries it).
+- **If the email fails.** The entitlement is already written. The webhook answers 502 and records nothing,
+  so Stripe retries; on the retry the write is stale and skipped, and the mail goes. The log names the
+  account id only. After a send nothing answers 5xx: a record that fails is logged and dropped, as for D6.
+- **If the subscription cannot be read** (added 2026-11-28, fix round 1). Only Stripe's 404 means "no such
+  subscription", answered 200 `ignored` as before, and logged in one line naming the event type only (fix
+  round 2: Stripe keeps cancelled subscriptions readable, so such a 404 usually means a key of the wrong mode
+  or account). Any other failure of the read (another status, the network, a 2xx body whose `object` is not
+  `subscription`) answers 502 and records nothing, so Stripe redelivers the event; the log names the event
+  type and the status, or "network", only. This holds for `invoice.payment_failed` too, the other event that
+  reads the subscription.
+
+*Reasons:* the terms promise it. `webhook_events` removes duplicates, so no migration is needed.
+
+*Known limits* (widened 2026-11-28, fix round 1):
+- One event can be mailed twice in three ways, for D6 as well: two deliveries processed at the same instant;
+  the email provider accepts the mail but its answer is lost, so the send counts as failed and Stripe's retry
+  mails again; and a record that fails after a send, followed by a redelivery of the event. These are known
+  limits, not a promise to close them.
+- A subscription that is not yet `trialing` or `active` when its checkout completes is not mailed later:
+  only `checkout.session.completed` sends the confirmation. Card checkouts complete as one or the other.
+
 **D7. Managed Payments in checkout (legal spec C5), starting from what the record already says.**
 - **In live mode it is already on.** On 2026-09-14 Quinn "kept Managed Payments on (P3)" (`HANDOFF.md:80,
   629`), and the amendment repeats it (`:1131, :1157` there).
@@ -432,8 +479,9 @@ the yearly line's guarantee sentence) and in the terms.
 
 *What the text is made of.* It starts from the legal spec's interim terms (§4, "Interim terms with bump A",
 U10). Their *The subscription*, *How to cancel* and *Refunds* sections are replaced by §4's full text. These
-paragraphs are left out, because this release builds none of their code:
-- the confirmation email (C8);
+paragraphs are left out, because this release builds none of their code (*changed 2026-11-27:* except C8,
+which D6b now builds):
+- the confirmation email (C8). *Changed 2026-11-27:* it is now built (D6b);
 - the yearly renewal notice (C10's yearly half; D14 builds its price-change half);
 - "a disputed charge is not a paid period" (C12);
 - the "We" and shutdown paragraphs (C13);
@@ -1016,6 +1064,14 @@ the environment).
   - a failed email gives 502, nothing is recorded, and the log names the account id only;
   - a duplicate event sends nothing;
   - no entitlement is written.
+- The subscribe confirmation (D6b, added 2026-11-27): the four texts whole (trialing and active, each plan),
+  the catalog's own words, an unknown id's fallback, the discount line, no date line without a date; sent
+  once on `checkout.session.completed`, also when the write is stale, and never for another status, no
+  address, a `payment` session or another event; a failed send is 502 after the write, records nothing and
+  sends once on the retry; a failed record after a send is 200; no id in the mail; the reminder's text
+  pinned whole. (Fix round 1, 2026-11-28:) a 404 on the subscription read is ignored as before; a 500, a
+  429 or a network error on either reading event is 502 with nothing written, sent or recorded, and the
+  redelivery writes, mails once and records; `subscription_read_test.ts` tests the strict read itself.
 
 **`billing-jobs/handler_test.ts`:**
 - The pause and resume tests go with the code (D10). No subscriber is ever sent a `pause_collection` call.
@@ -1120,7 +1176,7 @@ These stay in the v0.5.0 billing lane or later:
 - **C2**, emailing every account on a material policy change.
 - **C7's record**: the consent record keeping the plan and the text shown. `price_cents` already tells the
   two plans apart.
-- **C8**, the confirmation email.
+- **C8**, the confirmation email. *Changed 2026-11-27:* built in this lane (D6b).
 - **C10's yearly half**, the yearly renewal notice. It must land before the first yearly renewal, which
   comes no sooner than a year and 14 days after the first yearly checkout. (Its price-change half is D14.)
 - **C12**, refunds and disputes in the webhook.

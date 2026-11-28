@@ -175,7 +175,9 @@ Order, per project:
 - **`stripe-webhook`** handles six event types: `checkout.session.completed`,
   `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`,
   `customer.subscription.trial_will_end` and `invoice.payment_failed`. Every other type is answered 200
-  and dropped.
+  and dropped. It sends two emails of its own: the subscribe confirmation on `checkout.session.completed`
+  (note D6b) and the reminder before a trial's first charge on `trial_will_end` (D6). When it reads a
+  subscription, only Stripe's 404 means none; any other failed read answers 502, so Stripe redelivers.
 - **The move** (note D14 in the same design note). `billing-jobs`, run daily, emails a subscriber on a `KEPT` entry whose rule is
   `move` `noticeDays` (7 to 24) before a renewal, marks the subscription, then moves it to the key's
   selling price for that renewal with no proration. A failed notice changes nothing. A `trialing`
