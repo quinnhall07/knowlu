@@ -7,7 +7,6 @@ import {
   OPEN_PAGE_SIZE,
   OPEN_ROUND_BOUND,
   openCheckoutsPath,
-  renewalTerms,
   unloggedRefusals,
 } from "./handler.ts";
 import { stripePostFrom } from "../_shared/stripe.ts";
@@ -431,7 +430,6 @@ Deno.test("the_form_keeps_every_load_bearing_key", () => {
       successUrl: "https://knowlu.com/subscribed.html",
       cancelUrl: "https://knowlu.com/index.html",
       trial,
-      customText: "the renewal terms",
     });
   for (const trial of [true, false]) {
     const f = form(trial);
@@ -450,8 +448,6 @@ Deno.test("the_form_keeps_every_load_bearing_key", () => {
     // §8 of the legal note: express informed consent to the auto-renewal terms, its own checkbox,
     // which the consent row presumes.
     assertEquals(f["consent_collection[terms_of_service]"], "required");
-    // D8, P9: Stripe's page states the renewal terms.
-    assertEquals(f["custom_text[submit][message]"], "the renewal terms");
     // D5: 14 days, on a first subscription only.
     if (trial) assertEquals(f["subscription_data[trial_period_days]"], "14");
     else assert(!("subscription_data[trial_period_days]" in f));
@@ -464,7 +460,9 @@ Deno.test("the_form_keeps_every_load_bearing_key", () => {
     assertEquals(f["cancel_url"], "https://knowlu.com/index.html");
   }
   // The keys v0.4.0's form carried (`handler.ts:51-72` on main at 8c78e1f8). The ones that left are
-  // exactly checkpoint A's list, the two Stripe documents refusing under Managed Payments.
+  // exactly checkpoint A's list, the two Stripe documents refusing under Managed Payments. The one that
+  // came is Managed Payments itself: `custom_text`, which Stripe also refuses beside it (T1c,
+  // 2026-11-27), never joins.
   const before = [
     "mode",
     "line_items[0][price]",
@@ -487,53 +485,44 @@ Deno.test("the_form_keeps_every_load_bearing_key", () => {
     "automatic_tax[enabled]",
     "customer_update[address]",
   ]);
-  assertEquals(now.filter((k) => !before.includes(k)).sort(), [
-    "custom_text[submit][message]",
-    "managed_payments[enabled]",
-  ]);
+  assertEquals(now.filter((k) => !before.includes(k)).sort(), ["managed_payments[enabled]"]);
   // And no API version rides on the form: the pin in `_shared/stripe.ts` serves the session call.
   assert(!now.some((k) => /version/i.test(k)));
 });
 
-Deno.test("stripes_page_states_the_renewal_terms", async () => {
-  assertEquals(
-    renewalTerms("four_weekly", true, WORDS),
-    "Billed every 4 weeks after 14 days free, plus tax where it applies, until you cancel. " +
-      "Cancel any time in Knowlu: Settings, Membership, Manage subscription.",
-  );
-  assertEquals(
-    renewalTerms("four_weekly", false, WORDS),
-    "Billed every 4 weeks, plus tax where it applies, until you cancel. " +
-      "Cancel any time in Knowlu: Settings, Membership, Manage subscription.",
-  );
-  assertEquals(
-    renewalTerms("yearly", true, WORDS),
-    "Billed once a year after 14 days free, plus tax where it applies, until you cancel. " +
-      "30-day money-back guarantee on each yearly charge (knowlu.com/terms).",
-  );
-  assertEquals(
-    renewalTerms("yearly", false, WORDS),
-    "Billed once a year, plus tax where it applies, until you cancel. " +
-      "30-day money-back guarantee on each yearly charge (knowlu.com/terms).",
-  );
-  // (r5: m2) The tax phrase and the money-back line are the catalog's words, not `handler.ts`'s.
-  const words = { tax: "plus invented tax words", moneyBack: "an invented money-back promise" };
-  assert(renewalTerms("four_weekly", true, words).includes("plus invented tax words, until you cancel."));
-  assertEquals(
-    renewalTerms("yearly", false, words),
-    "Billed once a year, plus invented tax words, until you cancel. an invented money-back promise (knowlu.com/terms).",
-  );
-  // And the session carries it, with the trial as the account's state decides.
-  const invented = catalogOf({ ...TABLE, words });
-  for (
-    const [plan, row] of [["yearly", null], ["four_weekly", {
-      stripe_subscription_id: "sub_old",
-      status: "canceled",
-    }]] as const
-  ) {
-    const { deps, seen } = fakes({ catalog: invented, subscriptionState: () => Promise.resolve(row) });
-    assertEquals((await run(buy(plan), deps)).status, 200);
-    assertEquals(seen.forms[0]["custom_text[submit][message]"], renewalTerms(plan, row === null, words));
+// T1c (found 2026-11-27 on staging): beside `managed_payments[enabled]`, Stripe refuses the session with
+// "You cannot use custom_text with Managed Payments." in every slot (`submit`,
+// `terms_of_service_acceptance`, `after_submit`), so no key of the form may start with `custom_text`.
+Deno.test("the_form_sets_no_custom_text_under_managed_payments", async () => {
+  const noCustomText = (form: Record<string, string>, what: string) => {
+    assertEquals(form["managed_payments[enabled]"], "true", what);
+    assertEquals(Object.keys(form).filter((k) => k.startsWith("custom_text")), [], what);
+  };
+  // The form itself, with and without the trial.
+  for (const trial of [true, false]) {
+    noCustomText(
+      checkoutForm({
+        price: "price_test_yearly",
+        customer: "cus_1",
+        accountId: "acc-1",
+        successUrl: "https://knowlu.com/subscribed.html",
+        cancelUrl: "https://knowlu.com/index.html",
+        trial,
+      }),
+      `the form, trial ${trial}`,
+    );
+  }
+  // And the session the handler sends, for both plans, on a first subscription and after one.
+  for (const plan of ["yearly", "four_weekly"]) {
+    for (
+      const row of [null, { stripe_subscription_id: "sub_old", status: "canceled" }]
+    ) {
+      const { deps, seen } = fakes({ subscriptionState: () => Promise.resolve(row) });
+      assertEquals((await run(buy(plan), deps)).status, 200, plan);
+      assertEquals(seen.forms.length, 1);
+      assertEquals("subscription_data[trial_period_days]" in seen.forms[0], row === null, plan);
+      noCustomText(seen.forms[0], `${plan}, trial ${row === null}`);
+    }
   }
 });
 
@@ -815,7 +804,6 @@ Deno.test("open_checkout_pages_are_expired_before_a_new_one", async () => {
       successUrl: "https://knowlu.com/subscribed.html",
       cancelUrl: "https://knowlu.com/index.html",
       trial: true,
-      customText: renewalTerms(plan, true, WORDS),
     })]);
     assertEquals(seen.consents.length, 1);
     assertEquals(seen.consents[0].price_cents, OFFERED[plan]);

@@ -20,13 +20,11 @@ import { requireUser, VerifyToken } from "../_shared/auth.ts";
 import { fail, json, methodNotAllowed, readJson } from "../_shared/http.ts";
 import { StripePost } from "../_shared/stripe.ts";
 import {
-  cadenceWords,
   offer,
   type PlanKey,
   type ResolvedCatalog,
   type ResolvedEntry,
   sellingFor,
-  type Words,
 } from "../_shared/price_catalog.ts";
 
 /** The plans sold (D1): keys that outlive their prices. */
@@ -196,19 +194,6 @@ export interface Deps {
   cancelUrl: string;
 }
 
-/**
- * D8, P9: the sentence Stripe's page shows by the button. The cadence words are the key's, which never
- * change; the tax phrase and the money-back line are the catalog's words, so they cannot drift from
- * the app's lines.
- */
-export function renewalTerms(plan: Plan, trial: boolean, words: Words): string {
-  const free = trial ? ` after ${TRIAL_DAYS} days free` : "";
-  const head = `Billed ${cadenceWords(plan)}${free}, ${words.tax}, until you cancel.`;
-  return plan === "yearly"
-    ? `${head} ${words.moneyBack} (knowlu.com/terms).`
-    : `${head} Cancel any time in Knowlu: Settings, Membership, Manage subscription.`;
-}
-
 export function checkoutForm(a: {
   price: string;
   customer: string;
@@ -216,7 +201,6 @@ export function checkoutForm(a: {
   successUrl: string;
   cancelUrl: string;
   trial: boolean;
-  customText: string;
 }): Record<string, string> {
   const form: Record<string, string> = {
     "mode": "subscription",
@@ -233,10 +217,10 @@ export function checkoutForm(a: {
     "billing_address_collection": "required",
     // The auto-renewal terms get their own checkbox, not a line buried in the ToS.
     "consent_collection[terms_of_service]": "required",
-    // D8: the renewal terms, on Stripe's page, before the card is entered.
-    "custom_text[submit][message]": a.customText,
-    // D7, checkpoint A: Managed Payments, with Link as seller of record. Stripe refuses
-    // `automatic_tax[enabled]` and `customer_update[address]` beside it, so those two left the form.
+    // D7, checkpoint A: Managed Payments, with Link as seller of record. Stripe refuses three things
+    // beside it, so they left the form: `automatic_tax[enabled]`, `customer_update[address]`, and
+    // `custom_text` in every slot ("You cannot use custom_text with Managed Payments.", found on
+    // staging 2026-11-27; D8's note under it says what Stripe's page states without it).
     "managed_payments[enabled]": "true",
     "success_url": a.successUrl,
     "cancel_url": a.cancelUrl,
@@ -379,7 +363,6 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
       successUrl: deps.successUrl,
       cancelUrl: deps.cancelUrl,
       trial,
-      customText: renewalTerms(plan, trial, deps.catalog.words),
     }),
   );
   const url = session.url;

@@ -86,7 +86,9 @@ so on *when* billing moves, this note wins.
   - the plan's price;
   - 14 days free, on the account's first subscription;
   - tax added on top;
-  - one renewal sentence, which on the yearly plan names the money-back guarantee (D8).
+  - one renewal sentence, which on the yearly plan names the money-back guarantee (D8). *Changed
+    2026-11-27:* Stripe refuses that sentence under Managed Payments, so the page shows Stripe's own
+    renewal lines instead (the paragraph under D8).
 
   Under Managed Payments it also says "Sold through Link".
 - **Before the first charge**, Knowlu emails the student the plan, the amount, the date and how to cancel.
@@ -291,7 +293,8 @@ refusing them under Managed Payments:
   `account/handler.ts:88-94`);
 - `subscription_data[metadata][account_id]` and `client_reference_id`, by which the webhook finds the account
   (`stripe-webhook/handler.ts:92-94`);
-- `custom_text` (D8, P9).
+- `custom_text` (D8, P9). *Changed 2026-11-27:* Stripe refuses it in every slot under Managed Payments,
+  so the session no longer sends it; the change waits for the founder's yes (the paragraph under D8).
 
 If Managed Payments refuses any of these, that is a checkpoint B failure for Quinn, with the fallback below.
 
@@ -329,6 +332,16 @@ function of the plan and of whether a trial applies:
 
 The cadence words are the key's, which never change. The tax phrase and the money-back sentence come from
 the catalog's words (D13), so the two cannot drift from the app's lines (r5: m2).
+
+**Refused by Stripe under Managed Payments (found 2026-11-27 on staging; the change waits for the founder's yes).**
+Stripe answers "You cannot use custom_text with Managed Payments." for every `custom_text` slot, so the session no
+longer sets one. What Stripe's own page states without it, as read on the sandbox: "14 days free" on a first
+subscription; "Then $12.99 every 4 weeks starting" or "Then $84.37 per year starting" with the first charge's date;
+the tax line; "Total due today $0.00"; a required checkbox agreeing to the seller's Terms of Service and Privacy
+Policy; and "By subscribing, you agree to Link's Terms and Privacy Policy and authorize Link to charge you for the
+described subscription until you cancel." What it does not state: how to cancel inside Knowlu, and the yearly plan's
+money-back guarantee. Both are on the app's Subscribe step before the page opens ("Cancel any time in Settings." and
+the yearly line's guarantee sentence) and in the terms.
 
 **D9. The app's subscribe step and labels: the app shows what the server sends** (revised r4).
 - **The offer, from the server.** `GET /billing-checkout`, with the session, answers the catalog's selling
@@ -474,9 +487,11 @@ address and the email address. The page's list of companies is closed ("Nobody e
 `billing-checkout`, `stripe-webhook`, `billing-jobs` and `billing-portal` folders, and the catalog itself)
 where a price amount, the name of a price variable, or the terms version that states the prices is
 written. What it does not cover, and why that is safe:
-- **Cadence words without a figure** ("every 4 weeks", "once a year") also appear in D8's `custom_text` and
-  in Settings' plan words. A key's cadence is fixed forever (below), so they never change with a price.
-  D8 takes its tax line and money-back line from the catalog's words.
+- **Cadence words without a figure** ("every 4 weeks", "once a year") also appear in Settings' plan words.
+  A key's cadence is fixed forever (below), so they never change with a price. *Changed 2026-11-27:* they
+  no longer appear in D8's `custom_text`, which the session stopped sending (Stripe refuses it under
+  Managed Payments; the paragraph under D8); until then D8 took its tax line and money-back line from the
+  catalog's words.
 - **Other `$` figures under `functions/`** are model costs in comments (`_shared/judge_caps.ts:37-125`), not
   prices. Two of those comments still name "$9.99 subscription" (`:45, 97`) as a yardstick; D16 lists them
   among the documents to check, and nothing reads them.
@@ -813,7 +828,8 @@ fails if one in the billing code or the terms is missed, and step 2's list cover
       with D3's "changed" sentence.
     - **The live pages.** `yearly` and `four_weekly` checkouts each open a live page. A headless read shows:
       - $84.37, then $12.99 every 4 weeks;
-      - 14 days free, the tax line and D8's sentence;
+      - 14 days free, the tax line and D8's sentence (*changed 2026-11-27:* Stripe's own renewal lines
+        instead, as listed under D8);
       - "Sold through Link" if Managed Payments is in effect, and its absence if item 10 took the
         switch-off fallback.
 
@@ -978,8 +994,9 @@ the environment).
   variable is the seventh case. Each answers 500 before the consent row.
 - D7: every load-bearing key is present (the trial key on a first subscription only, D5), and the dropped
   keys are exactly those checkpoint A allowed.
-- D8: `custom_text` for each plan and trial combination; with an invented catalog whose tax or money-back
-  words differ, the text carries the invented words (r5: m2).
+- D8, *changed 2026-11-27*: for each plan and trial combination, no key of the form starts with
+  `custom_text`, because Stripe refuses it under Managed Payments (the paragraph under D8). Until then:
+  `custom_text` for each combination, carrying an invented catalog's tax and money-back words (r5: m2).
 - The 18+ and tester tests are unchanged (their request bodies gain the offer's two fields).
 - A text-read of `index.ts` (`handler_test.ts:331-343`) checks that it hands the handler the catalog
   resolved from the environment, and that `isTester` is unchanged.
