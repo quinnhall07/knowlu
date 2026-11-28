@@ -3,7 +3,8 @@
 One codebase, two projects: **`knowlu-staging`** and **`knowlu-prod`** (spec §11 R6). Nothing here names a
 project; `supabase link` decides.
 
-**Migrations are applied to STAGING from a developer machine, and to PROD by Quinn or by CI.** That rule is
+**Migrations are applied to STAGING from a developer machine, and to PROD only on Quinn's word, one push at a
+time (no workflow pushes to a hosted project).** That rule is
 the whole of this file:
 
 ```powershell
