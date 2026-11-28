@@ -12,11 +12,15 @@
  * The order inside `DELETE` is the whole of its correctness: Stripe first (a cancelled card is
  * better than a deleted account still being billed), then the rows, then the tombstone, and the
  * login **last** — deleting the auth user first would invalidate the very token the rest of this
- * request is authenticated by.
+ * request is authenticated by. Stripe's step is a read of the stored subscription, then, whenever the
+ * account has a Stripe customer, a list of that customer's subscriptions; every one that can still
+ * charge is set to cancel, once (T1d). A step whose answer is unknown stops the delete before any row
+ * goes.
  */
 import { requireUser, VerifyToken } from "../_shared/auth.ts";
 import { fail, json, methodNotAllowed, readJson, subPath } from "../_shared/http.ts";
 import { StripePost } from "../_shared/stripe.ts";
+import { CUSTOMER_ID, type ListedSubscription, SUBSCRIPTION_ID } from "./stripe_delete.ts";
 
 export interface SourceRow {
   kind: string;
@@ -51,6 +55,15 @@ export interface Deps {
   requireEntitled: (req: Request) => Promise<{ account_id: string }>;
   getAccount: (accountId: string) => Promise<{ email: string; stripe_customer_id: string | null } | null>;
   getSubscriptionId: (accountId: string) => Promise<string | null>;
+  /** T1d: the subscription's Stripe `status`, read live (`subscriptionStatusFrom`); `null` when Stripe
+   * answers that it does not exist (404 `resource_missing`); throws the 502 for anything else. */
+  getSubscriptionStatus: (subscriptionId: string) => Promise<string | null>;
+  /** T1d fix rounds 1 and 2: the customer's subscriptions at Stripe, the default list
+   * (`customerSubscriptionsFrom`); `null` when Stripe answers that it does not know the customer (400
+   * or 404 `resource_missing` on `customer`); throws the 502 for anything else, a list that says
+   * `has_more` or is not the exact shape included. */
+  listSubscriptions: (customerId: string) => Promise<ListedSubscription[] | null>;
+  /** The updates (`cancelPostFrom`): throws the 502 on any refusal, and never logs the path. */
   stripe: StripePost;
   /** Every table the account's data lives in (the list in `index.ts`), accounts last; consents nulled. */
   purge: (accountId: string) => Promise<void>;
@@ -71,6 +84,51 @@ export interface Deps {
   now: () => Date;
 }
 
+/** The two statuses after which a subscription can never charge again (Stripe's terminal states). */
+const ENDED = new Set(["canceled", "incomplete_expired"]);
+
+const REFUSED = "the payment provider refused the request";
+
+/** At period end, not immediately: the student paid for this period and deleting is not a refund.
+ * The Stripe *customer* object itself is not deleted — it stays under Stripe's own billing-record
+ * retention, and removing it is not part of this right. */
+async function cancelAtPeriodEnd(deps: Deps, subscriptionId: string): Promise<void> {
+  await deps.stripe(`/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+    cancel_at_period_end: "true",
+  });
+}
+
+/**
+ * T1d fix rounds 1 and 2: the stored record can lag Stripe, its id as well as its status. A former
+ * subscriber who subscribes again before the new subscription's webhook lands still holds the old,
+ * ended id; an account can hold a second live subscription the stored id does not name. Either one
+ * would go on charging after the purge. So whenever the account has a Stripe customer, Stripe's own
+ * list for it decides: each subscription listed that can still charge, is not already cancelling at
+ * period end, and is not one this request already set (`done`), is set to. A list that cannot be read
+ * whole, or any update that fails, throws the 502 before the purge.
+ */
+async function cancelCustomersSubscriptions(
+  deps: Deps,
+  customerId: string,
+  done: Set<string>,
+): Promise<void> {
+  // The same rule as the subscription id's: a customer id goes into a query only when shaped like one.
+  if (!CUSTOMER_ID.test(customerId)) {
+    console.error("account delete: the stored customer id is not shaped like one; nothing was deleted");
+    throw fail(502, REFUSED);
+  }
+  const listed = await deps.listSubscriptions(customerId);
+  if (listed === null) {
+    console.warn("account delete: the payment provider does not know the stored customer; nothing to cancel");
+    return;
+  }
+  for (const s of listed) {
+    if (ENDED.has(s.status) || s.cancel_at_period_end || done.has(s.id)) continue;
+    await cancelAtPeriodEnd(deps, s.id);
+    done.add(s.id);
+  }
+}
+
 async function deleteAccount(req: Request, deps: Deps): Promise<Response> {
   const user = await requireUser(req, deps.verify);
   const account = await deps.getAccount(user.id);
@@ -86,12 +144,38 @@ async function deleteAccount(req: Request, deps: Deps): Promise<Response> {
   }
 
   const sub = await deps.getSubscriptionId(user.id);
+  // Every subscription this request has set to cancel, so the list never updates one twice (Stripe's
+  // list can trail the update just made, and still show it as not cancelling).
+  const done = new Set<string>();
   if (sub) {
-    // At period end, not immediately: the student paid for this month and deleting is not a refund.
-    // The Stripe *customer* object itself is not deleted here — it stays under Stripe's own
-    // billing-record retention, and removing it is not part of this right.
-    await deps.stripe(`/v1/subscriptions/${sub}`, { cancel_at_period_end: "true" });
+    // Review M5's rule (billing-checkout): an id goes into a Stripe path only when it is shaped like
+    // one. `.` and `..` survive `encodeURIComponent`, and the URL parser resolves them as segments.
+    // An id of another shape is a state nobody can read, so it stops the delete like a failed read.
+    if (!SUBSCRIPTION_ID.test(sub)) {
+      console.error("account delete: the stored subscription id is not shaped like one; nothing was deleted");
+      throw fail(502, REFUSED);
+    }
+    // T1d: ask Stripe first, never `entitlements.status` (the row can lag; Stripe is the authority on
+    // whether a charge can still happen). A subscription that has ended cannot be set to cancel —
+    // Stripe refuses the update, and every former subscriber's delete stopped there — so an ended
+    // one, or an id Stripe does not know, has nothing to cancel here. Any other status, one this code
+    // has never seen included, is set to cancel. A failed read or update throws the 502 here, before
+    // the purge: nothing is deleted while the state is unknown.
+    const status = await deps.getSubscriptionStatus(sub);
+    if (status === null) {
+      console.warn("account delete: the payment provider does not know the stored subscription");
+    } else if (!ENDED.has(status)) {
+      await cancelAtPeriodEnd(deps, sub);
+      done.add(sub);
+    }
   }
+  // Fix round 2 (ruled): with a Stripe customer, the customer's list always runs, whatever the stored
+  // subscription was. An account with no stored customer has none to ask: a stored id alone keeps the
+  // one read and update above, and neither id means no Stripe call at all.
+  if (account.stripe_customer_id) {
+    await cancelCustomersSubscriptions(deps, account.stripe_customer_id, done);
+  }
+
   await deps.purge(user.id);
   await deps.tombstone(await deps.hashEmail(account.email), deps.now().toISOString());
   await deps.deleteAuthUser(user.id);

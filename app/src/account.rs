@@ -1286,10 +1286,58 @@ fn post_for_url(api_base: &str, path: &str, token: &str, body: &Value) -> Result
     v.get("url").and_then(|x| x.as_str()).map(str::to_string).ok_or_else(|| "no link came back".to_string())
 }
 
+/// The answer when a 2xx from `GET /billing-checkout` is not a JSON object: there is no offer in it
+/// to show, and an empty one must never read as "no plans".
+const OFFER_UNREADABLE: &str = "the offer reply could not be read";
+
+/// `GET /billing-checkout` with the session's bearer: the offer the server sells today, answered
+/// **unchanged** (v0.4.1 note D9). The body is the catalog's `terms_version`, its `plans` in selling
+/// order (each a `plan` key, its `amount_cents` and its lines), and its `note`. The app holds no price:
+/// the page shows what this returns, and [`checkout_url_at`] sends back what the page showed. Only the
+/// bearer is sent and the reply is bounded, as [`consent_status_at`] does both. A refusal is the
+/// server's own sentence ([`provider_error`]). A transport failure starts with [`UNREACHABLE`], the
+/// clause the page reads to tell no network from a refusal, and so does a reply cut short while its
+/// body is read (the connection dropped, or the timeout fired). A 2xx that is not a JSON object is
+/// [`OFFER_UNREADABLE`]. No token and no reply body reaches an error.
+pub fn checkout_offer_at(api_base: &str, token: &str) -> Result<Value, String> {
+    check_api_base(api_base)?;
+    let mut res = agent()
+        .get(&format!("{}/billing-checkout", api_base.trim_end_matches('/')))
+        .header("authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(|e| format!("{UNREACHABLE} ({e})"))?;
+    let status = res.status().as_u16();
+    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| format!("{UNREACHABLE} ({e})"))?;
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        return Err(provider_error(status, &v));
+    }
+    if v.is_object() { Ok(v) } else { Err(OFFER_UNREADABLE.to_string()) }
+}
+
+/// `{ok, error, terms_version, plans, note}`, what [`checkout_offer`] hands the page. On `Ok` the
+/// server's three fields pass through as they came (one the server left out is `null`); on `Err` the
+/// sentence, and the three are `null`. Pure, so the five keys the subscribe step reads are a test.
+pub fn checkout_offer_answer(out: Result<Value, String>) -> Value {
+    match out {
+        Ok(v) => {
+            let field = |k: &str| v.get(k).cloned().unwrap_or(Value::Null);
+            json!({ "ok": true, "error": Value::Null, "terms_version": field("terms_version"), "plans": field("plans"), "note": field("note") })
+        }
+        Err(e) => json!({ "ok": false, "error": e, "terms_version": Value::Null, "plans": Value::Null, "note": Value::Null }),
+    }
+}
+
 /// The checkout link, with the consent retry in front of it (review I4). Split from the command so
 /// the order — consent, then Stripe — is a test rather than a claim; the command is what opens the
 /// browser.
-pub fn checkout_url_at(api_base: &str, token: &str, plan: &str) -> Result<String, String> {
+///
+/// **The body is the offer the student was shown** (v0.4.1 notes D3, D9, D15): exactly `plan`,
+/// `amount_cents` and `terms_version`, the last two copied from [`checkout_offer_at`]'s answer by the
+/// page. The server sells only when both equal its catalog's, and answers 409 with a sentence when
+/// they do not, so the consent it records is the amount and terms version the page showed. The
+/// compiled-in [`TOS_VERSION`] is sign-up's: it rides the consent retry and nothing else here.
+pub fn checkout_url_at(api_base: &str, token: &str, plan: &str, amount_cents: i64, terms_version: &str) -> Result<String, String> {
     // Free when the first call worked (the route writes only where the account has none), and the
     // difference between a student who can subscribe and one whose only advice is "sign in again"
     // when it did not. A retry that fails again is logged, never fatal: `billing-checkout`'s 403 is
@@ -1297,7 +1345,8 @@ pub fn checkout_url_at(api_base: &str, token: &str, plan: &str) -> Result<String
     if let Err(e) = record_consent_at(api_base, token, TOS_VERSION, PRIVACY_VERSION) {
         eprintln!("Knowlu: the consent retry before checkout did not land ({e})");
     }
-    post_for_url(api_base, "/billing-checkout", token, &json!({ "plan": plan, "terms_version": TOS_VERSION }))
+    let body = json!({ "plan": plan, "amount_cents": amount_cents, "terms_version": terms_version });
+    post_for_url(api_base, "/billing-checkout", token, &body)
 }
 
 // ---- L4: the recorded privacy version, its cache, the gate and Accept (plan §4.4) ----
@@ -1607,13 +1656,30 @@ pub fn google_sign_in(age_attested: bool) -> Value {
     }
 }
 
+/// The subscribe step's offer (v0.4.1 note D9): [`checkout_offer_at`] with the PENDING session, read
+/// as [`entitlement_now`] reads it (the wizard has no vault yet, and the upgrade sheet signs in before
+/// it attaches), answered as [`checkout_offer_answer`]. Nothing is cached: each entry to the step asks.
 #[tauri::command(async)]
-pub fn open_checkout(plan: String) -> Value {
+pub fn checkout_offer() -> Value {
+    let base = api_base();
+    let out = (|| -> Result<Value, String> {
+        let auth = auth_base(&base)?;
+        let token = valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, now_unix())?;
+        checkout_offer_at(&base, &token)
+    })();
+    checkout_offer_answer(out)
+}
+
+/// The chosen plan, its `amount_cents` and the offer's `terms_version`, from the offer the page
+/// showed ([`checkout_offer`]), passed through to [`checkout_url_at`] unchanged. The page sends them
+/// as `{ plan, amountCents, termsVersion }`, Tauri's camelCase for the two multi-word names.
+#[tauri::command(async)]
+pub fn open_checkout(plan: String, amount_cents: i64, terms_version: String) -> Value {
     let base = api_base();
     let out = (|| -> Result<String, String> {
         let auth = auth_base(&base)?;
         let token = valid_access_token_at(&auth, &anon_key(), PENDING_TARGET, now_unix())?;
-        let url = checkout_url_at(&base, &token, &plan)?;
+        let url = checkout_url_at(&base, &token, &plan, amount_cents, &terms_version)?;
         open_in_browser(&url)?;
         Ok(url)
     })();

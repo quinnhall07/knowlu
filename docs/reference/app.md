@@ -4,17 +4,17 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-10-03 (email forwarding: ten `mail::` commands; the 2026-10-01 recount gave 60 / 29 / 79; the 2026-09-30 recount, M2 editing after Gmail connect and M1 grades merged in, gave 59 / 29 / 78; the
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-11-21 by the same script (v0.4.1 added `account::checkout_offer` to both lists, one command in two windows: 72 / 30 / 91; the 2026-10-21 count was 71 / 29 / 90); earlier, 2026-10-03 (email forwarding: ten `mail::` commands; the 2026-10-01 recount gave 60 / 29 / 79; the 2026-09-30 recount, M2 editing after Gmail connect and M1 grades merged in, gave 59 / 29 / 78; the
   merge-time recount gave 54 / 29 / 73, the 2026-09-29 one 47 / 29 / 66)** (by script,
   over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **71** (recounted 2026-10-21 by the same script when L7, carrying L4, merged into p3-registrar: L4 added `account::privacy_status` and `account::accept_privacy` to the console list, where the L4 branch alone counted 68 / 29 / 87; on 2026-10-20 main's runtime removal took out the four `inference` commands and the UA registrar added three `registrar::` ones, `open_registrar_window`, `capture_registrar` and `close_registrar_window`; the earlier build-up: email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
+  the console window registers **72** (the 2026-10-21 recount, **71**, was by the same script when L7, carrying L4, merged into p3-registrar: L4 added `account::privacy_status` and `account::accept_privacy` to the console list, where the L4 branch alone counted 68 / 29 / 87; on 2026-10-20 main's runtime removal took out the four `inference` commands and the UA registrar added three `registrar::` ones, `open_registrar_window`, `capture_registrar` and `close_registrar_window`; the earlier build-up: email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
   `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
   `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
   `account::google_connect` and `account::google_disconnect`; M2 added `set_body`, `profile`, `set_preferences`, `set_interests` and
-  `dropped_events`; events added `remove_lane_date`), the vault-less picker/wizard window **29**
+  `dropped_events`; events added `remove_lane_date`), the vault-less picker/wizard window **30**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **90** distinct (2026-10-21). Commands live
+  password and added `account::google_sign_in` to both lists) — **91** distinct (2026-11-21; the two lists share 11 names). Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
   `report.rs`, `lms_link.rs`, `mail.rs`, `registrar.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
@@ -273,6 +273,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 - There is no password on a Knowlu account: sign-in is `account::google_sign_in` (a loopback PKCE
   round trip on `127.0.0.1:0`, one listener per sign-in) or the emailed one-time code;
   `/auth/v1/signup` and `grant_type=password` are called by nothing.
+- The subscribe step's two commands, both in `app/src/account.rs` and in both windows' lists: `checkout_offer` (v0.4.1, note D9 in `docs/specs/2026-11-19-v041-pricing-design.md`) asks `GET /billing-checkout` with the pending session and hands the page the server's offer, `{ok, error, terms_version, plans, note}`, caching nothing, so each entry to the step shows today's figures; `open_checkout` takes `{ plan, amountCents, termsVersion }` from that offer, passes them back to the server unchanged and opens the Stripe page in the browser. The app holds no amount.
 - The identifier is **`com.knowlu.desktop`**, permanent: uninstall key, autostart entry and window state are keyed by it.
 - The updater is configured: `tauri-plugin-updater`, `plugins.updater` (endpoint + minisign public
   key) and `bundle.createUpdaterArtifacts: true` are one decision — a static test pins flag ⇔ plugin.
@@ -298,6 +299,18 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   registered** — a self-hosted runner on a public repository runs any fork's pull request on the
   runner's machine, so the switch stays off for as long as the repository is public. Workflow runs
   from outside contributors need a maintainer's approval (`all_external_contributors`).
+- **`site.yml`: publishing knowlu.com without a release** (v0.4.1, note D15 in `docs/specs/2026-11-19-v041-pricing-design.md`). A workflow started by hand
+  from `main` (`workflow_dispatch`, one input `deploy_branch`: `main` is knowlu.com, `preview` is the Pages
+  preview alias). It reads the latest Release's tag once, refuses a newer `v*` tag or an unfinished
+  `release.yml` run, refuses if `site/privacy.html` differs from that tag's, restores the Release's
+  installer, `Knowlu-setup.exe` and `latest.json` into `site/releases/`, then deploys as `release.yml`
+  does. **A hand `wrangler pages deploy site` takes the installer and `latest.json` off knowlu.com**:
+  `release.yml`'s deploy replaces the whole site, and in git `site/releases/` holds only `.gitkeep`.
+  Recovery is `site.yml`, or a hand restore from the latest Release's assets into a `main` checkout's
+  `site/releases/`, with `site/privacy.html` taken from that Release's tag (the restore stops if `main`'s
+  copy differs), then the same deploy, each on Quinn's word. **Never re-run a tag's `publish` job**: it
+  puts that tag's `site/` live again (its terms page is old after a price change), and its artifact lasts
+  7 days (`release.yml:262`). The price-change steps are in `docs/reference/price-change.md`.
 - Desktop safety: a live shared desktop — never synthetic keyboard/mouse input; screenshots by
   window handle (`PrintWindow`) only, never a full-screen grab. Develop and demo against scratch
   vaults (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
@@ -307,12 +320,16 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 
 - The authority is `docs/specs/2026-09-09-knowlu-cloud-design.md`: its §1 decisions D1–D12 are
   Quinn's and signed; §11's recommendations are ruled (R3: the academic-year price and the June–August
-  pause both stay). Where an older spec or note disagrees with it, the cloud design wins.
+  pause both stay; **superseded** by Amendments 2026-11-10 and 2026-11-17: no academic-year plan, no
+  summer pause). Where an older spec or note disagrees with it, the cloud design wins.
 - In one line: **accounts + $9.99/month, no free tier; every judgment runs in our cloud (Supabase +
   Cloudflare + Stripe, an open-weights model per kind through OpenRouter, pinned to a zero-retention
   host); CI builds and signs every release; the vault stays plain text on the student's machine and
   is created by the app; portal credentials never leave the device — fetch on device, think in the
   cloud.**
+  *(Note, 2026-11-27: the price in that line was amended 2026-11-10 and 2026-11-17 to $12.99 every 4 weeks or
+  $84.37 a year, with 14 days free and no free tier; `CLAUDE.md`'s Direction line was amended to those
+  prices on 2026-11-27.)*
 - The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
   telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
   llama.cpp runtime. C4 is no longer a phase: the Pilot's runtime-removal lane (L6; Amendment

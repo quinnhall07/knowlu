@@ -150,10 +150,11 @@ other calendars or anyone else's events; changing those stays a proposal.
 - **A Windows desktop app**, Rust + Tauri, OS-native webview. No web app and no mobile app, and
   nothing builds toward either. A phone may follow once the desktop product is proven; that takes a new signed amendment. The account carries a student between desktops. Base app under 50 MB,
   ideally under 20.
-- **One edition: $9.99 a month, an account required**, no free tier, a 7-day trial. A 6-month term
-  at $39.99 is the other option; Pell Grant recipients pay 75% less ($2.49 a month or $9.99 a term).
-  Monthly billing pauses June to August. *(amended 2026-10-16, the cloud design's Amendment
-  2026-10-16, signed by Quinn)*
+- **One edition: $12.99 every 4 weeks, an account required**, no free tier, 14 days free with the card
+  taken first. The yearly plan is $84.37 once a year ($6.49 every 4 weeks), with a 30-day money-back
+  guarantee on each yearly charge. Sales tax is added at checkout where it applies. No summer pause, and
+  no Pell price for now. *(amended 2026-11-27, the cloud design's Amendments 2026-11-10 and 2026-11-17,
+  signed by Quinn)*
 - **Onboarding creates the vault** under `%USERPROFILE%\Knowlu\` and asks for sign-ins; it then
   looks for each course's syllabus in the LMS and, where it finds none, offers the school's syllabus
   system or the student's own file. It is judged by one thing: a new student reaches "it already knows what's next" in their first session.
@@ -231,10 +232,10 @@ rather than the founder's name (the full gate: the cloud design's ruling 10, as 
 rewords it). For friends that page is an interim one that no lawyer has read (privacy bump #1, the
 cloud design's Amendment 2026-10-19); a lawyer reads it before the first pilot student, and the
 version the lawyer read asks every tester to accept it again. *(amended 2026-10-20, the cloud
-design's Amendment 2026-10-18, signed by Quinn's delegated go)* Until Knowlu has 20 paying users, the kept Blackboard sign-in and the saved mail sign-in are offered at every school without waiting for that school's policy to be read; at the 20th paying user the founder rules on the reads again (the cloud design's Amendment 2026-09-30, A13). *(amended 2026-09-30, email spec A13, signed by Quinn)* The pilot's students do not pay; from its start, students outside it may buy Knowlu at a discounted price without an announcement, ahead of the official launch in fall 2027. *(amended 2026-10-16, the cloud design's Amendment 2026-10-16b, signed by Quinn)*
+design's Amendment 2026-10-18, signed by Quinn's delegated go)* Until Knowlu has 20 paying users, the kept Blackboard sign-in and the saved mail sign-in are offered at every school without waiting for that school's policy to be read; at the 20th paying user the founder rules on the reads again (the cloud design's Amendment 2026-09-30, A13). *(amended 2026-09-30, email spec A13, signed by Quinn)* The pilot's students do not pay; from its start, students outside it may buy Knowlu at the regular prices without an announcement, ahead of the official launch in fall 2027. *(amended 2026-10-16, the cloud design's Amendment 2026-10-16b; "the regular prices" amended 2026-11-27, its Amendment 2026-11-17; signed by Quinn)*
 
-**Launch** is any US undergraduate paying $9.99, on every desktop they use: the relay fetch and
-two-desktop sync ship before it.
+**Launch** is any US undergraduate paying for Knowlu, on every desktop they use: the relay fetch and
+two-desktop sync ship before it. *(amended 2026-11-27: the line names no figure; signed by Quinn)*
 
 **Beyond, in phases**, each through spec, plan and review: the main page (domain strip, free time,
 all clear, today's schedule); GPA and exam prep; quick

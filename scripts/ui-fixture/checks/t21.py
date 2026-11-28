@@ -13,9 +13,13 @@ For 820 x 600 and 1280 x 800, light and dark, default and larger text:
     logins step stores one coursework login, discovers, shows the mapping and stays once for its blank row);
     "step N of 10" follows; Back is hidden on the first panel; Finish sends create_vault with the plan and then
     finish_onboarding; the password fields are empty once stored;
-  - t21-subscribe: an account with no subscription sees "Monthly" and "Academic year" and no "$", "trial" or
-    trial length anywhere in the wizard; each button sends open_checkout with today's plan name; a tester account
-    then reads "You're all set" and "Nothing to pay" with both buttons hidden;
+  - t21-subscribe: an account with no subscription is offered the prices checkout_offer answers (v0.4.1 note D9).
+    With each failing answer in envelopes/checkout-offer-failures.json (the service unreachable, a refusal, an offer
+    missing four_weekly) both plan buttons are disabled beside Try again and the step says that failure's
+    sentence; Try again asks again; with envelopes/checkout-offer.json the buttons read "Yearly" then "Every 4
+    weeks", each with exactly the envelope's lines, the note below both, and no "trial" or trial length anywhere
+    in the wizard; each button sends open_checkout with its plan, that plan's amount_cents and the offer's
+    terms_version; a tester account then reads "You're all set" and "Nothing to pay" with both buttons hidden;
   - t21-picker: two profiles listed, each with Open; Open sends open_profile with that profile's id; the
     restore door's sentence is visible text;
 
@@ -45,6 +49,38 @@ CONSOLE_ONLY = ["state", "ui_event", "mark_seen", "grades_status", "mail_status"
 
 PARENT = "C:\\Users\\student\\Knowlu"
 OK = {"ok": True, "error": None}
+
+# checkout_offer's answers (v0.4.1 note D9): an invented offer, and the three ways there is none. Staged on the page
+# by stage(), not in a set: the sets here are run_shell's answers, and t20.py stages the same offer on the console.
+OFFER = json.loads((ENV / "checkout-offer.json").read_text(encoding="utf-8"))
+OFFER_FAILS = json.loads((ENV / "checkout-offer-failures.json").read_text(encoding="utf-8"))
+# What the step says for each failure: the connection sentence, the server's own sentence, the update sentence.
+FAIL_SAYS = [("unreachable", "Prices could not be loaded. Check your connection, then try again."),
+             ("refused", OFFER_FAILS["refused"]["error"]),
+             ("no-four-weekly", "Prices could not be loaded. Update Knowlu, then try again.")]
+STAGE = """([cmd, answer]) => {
+  const F = window.__fixture;
+  F.staged = F.staged || {};
+  F.staged[cmd] = answer;
+  if (F.stageOn) { return; }
+  F.stageOn = true;
+  const real = window.__TAURI__.core.invoke;
+  window.__TAURI__.core.invoke = function (c, args) {
+    if (!Object.prototype.hasOwnProperty.call(F.staged, c)) { return real(c, args); }
+    F.calls.push({ cmd: c, args: JSON.parse(JSON.stringify(args || {})) });
+    return Promise.resolve(JSON.parse(JSON.stringify(F.staged[c])));
+  };
+}"""
+
+
+def stage(page, cmd, answer):
+    """From now on `cmd` answers `answer` on this page, recorded in window.__fixture.calls like every call."""
+    page.evaluate(STAGE, [cmd, answer])
+
+
+def lines_of(offer, plan):
+    """A plan's lines as the page shows them: one text, the sentences joined by a space."""
+    return " ".join(next(p["lines"] for p in offer["plans"] if p["plan"] == plan))
 
 
 def launch(mode, profiles=None):
@@ -225,6 +261,7 @@ def check_wizard(browser, base, size, theme, text):
         if name == "subscribe":
             need("Your subscription is active." in page.inner_text("#wiz-sub-note"), "the paid note")
             need(not page.is_visible("#wiz-sub-month") and not page.is_visible("#wiz-sub-year"), "an entitled account sees the plan buttons")
+            need(not calls_of(page, "checkout_offer"), "an entitled account is not offered prices")
         if name == "finish":
             need("Knowlu" in page.inner_text("#wiz-summary"), "the summary names the folder")
             shots.append(shot(page, "t21-wizard-finish-%s.png" % tag))
@@ -254,23 +291,57 @@ def check_subscribe(browser, base, size, theme, text):
     need = lambda ok, what: None if ok else fails.append(what)
     tag = "%dx%d-%s-%s" % (size[0], size[1], theme, text)
     ctx, page, errors = open_page(browser, base, "t21-subscribe", size, theme, text)
+    stage(page, "checkout_offer", OFFER_FAILS[FAIL_SAYS[0][0]])
     page.click("#wiz-next")
     wait_panel(page, "account")
     sign_in(page)
     wait_panel(page, "subscribe")
     page.wait_for_function("() => !document.getElementById('wiz-sub-month').hidden", timeout=5000)
+    # No offer: each failure leaves both buttons disabled beside Try again, with that failure's sentence.
+    shot_wait = None
+    for i, (name, says) in enumerate(FAIL_SAYS):
+        if i:
+            stage(page, "checkout_offer", OFFER_FAILS[name])
+            page.click("#wiz-sub-retry")
+        page.wait_for_function("(n) => window.__fixture.calls.filter(c => c.cmd === 'checkout_offer').length === n", arg=i + 1, timeout=5000)
+        page.wait_for_function("(s) => document.getElementById('wiz-sub-why').textContent === s", arg=says, timeout=5000)
+        need(page.is_disabled("#wiz-sub-year") and page.is_disabled("#wiz-sub-month"), "%s: the plan buttons wait" % name)
+        need(page.is_visible("#wiz-sub-retry"), "%s: Try again is offered" % name)
+        need(page.inner_text("#wiz-sub-why").strip() == says, "%s: the step says %r" % (name, page.inner_text("#wiz-sub-why")))
+        need("$" not in page.evaluate("() => document.getElementById('wizard').textContent"), "%s: a price shows with no offer" % name)
+        if i == 0:
+            shot_wait = shot(page, "t21-subscribe-wait-%s.png" % tag)
+        p = page.evaluate(PROBE)
+        common(p, text, need)
+    # The offer: the two plans, Yearly first, each with exactly the envelope's lines, and the note below both.
+    stage(page, "checkout_offer", OFFER)
+    page.click("#wiz-sub-retry")
+    page.wait_for_function("() => !document.getElementById('wiz-sub-year').disabled && !document.getElementById('wiz-sub-month').disabled", timeout=5000)
     p = page.evaluate(PROBE)
     common(p, text, need)
-    need(page.inner_text("#wiz-sub-month").strip() == "Monthly" and page.inner_text("#wiz-sub-year").strip() == "Academic year", "the plan buttons read %r / %r" % (page.inner_text("#wiz-sub-month"), page.inner_text("#wiz-sub-year")))
-    words = page.evaluate("() => document.getElementById('wizard').textContent").lower()
-    for bad in ["$", "trial", "7-day", "seven day", "per month", "/month"]:
-        need(bad not in words, "the wizard shows %r" % bad)
+    need(page.inner_text("#wiz-sub-year").strip() == "Yearly" and page.inner_text("#wiz-sub-month").strip() == "Every 4 weeks", "the plan buttons read %r / %r" % (page.inner_text("#wiz-sub-year"), page.inner_text("#wiz-sub-month")))
+    first = page.evaluate("() => !!(document.getElementById('wiz-sub-year').compareDocumentPosition(document.getElementById('wiz-sub-month')) & Node.DOCUMENT_POSITION_FOLLOWING)")
+    need(first, "Yearly comes before Every 4 weeks")
+    need(page.inner_text("#wiz-sub-year-lines").strip() == lines_of(OFFER, "yearly"), "the Yearly lines read %r" % page.inner_text("#wiz-sub-year-lines"))
+    need(page.inner_text("#wiz-sub-month-lines").strip() == lines_of(OFFER, "four_weekly"), "the Every 4 weeks lines read %r" % page.inner_text("#wiz-sub-month-lines"))
+    need(page.inner_text("#wiz-sub-offer-note").strip() == OFFER["note"], "the note reads %r" % page.inner_text("#wiz-sub-offer-note"))
+    need(not page.is_visible("#wiz-sub-retry") and not page.inner_text("#wiz-sub-why").strip(), "Try again and its sentence go once the offer is held")
+    words = page.evaluate("() => document.getElementById('wizard').textContent")
+    rest = words
+    for line in [lines_of(OFFER, "yearly"), lines_of(OFFER, "four_weekly")]:
+        rest = rest.replace(line, "")
+    need("$" not in rest, "a price the offer did not send")
+    for bad in ["trial", "7-day", "seven day", "14-day", "14 days", "per month", "/month"]:
+        need(bad not in words.lower(), "the wizard shows %r" % bad)
     shot_path = shot(page, "t21-subscribe-%s.png" % tag)
-    page.click("#wiz-sub-month")
-    page.wait_for_function("() => window.__fixture.calls.some(c => c.cmd === 'open_checkout')", timeout=5000)
     page.click("#wiz-sub-year")
+    page.wait_for_function("() => window.__fixture.calls.some(c => c.cmd === 'open_checkout')", timeout=5000)
+    page.click("#wiz-sub-month")
     page.wait_for_function("() => window.__fixture.calls.filter(c => c.cmd === 'open_checkout').length === 2", timeout=5000)
-    need(calls_of(page, "open_checkout") == [{"plan": "monthly"}, {"plan": "academic_year"}], "open_checkout sent %s" % calls_of(page, "open_checkout"))
+    cents = {p["plan"]: p["amount_cents"] for p in OFFER["plans"]}
+    want = [{"plan": "yearly", "amountCents": cents["yearly"], "termsVersion": OFFER["terms_version"]},
+            {"plan": "four_weekly", "amountCents": cents["four_weekly"], "termsVersion": OFFER["terms_version"]}]
+    need(calls_of(page, "open_checkout") == want, "open_checkout sent %s" % calls_of(page, "open_checkout"))
     need("Waiting for the payment page" in page.inner_text("#wiz-sub-note"), "the waiting note")
     # The tester account: the poll's next tick reads the comped plan and moves on; Back shows the nothing-to-pay form.
     page.evaluate("""() => {
@@ -286,10 +357,11 @@ def check_subscribe(browser, base, size, theme, text):
     need(page.inner_text("#wiz-subscribe h2").strip() == "You're all set", "the tester heading %r" % page.inner_text("#wiz-subscribe h2"))
     need(page.inner_text("#wiz-sub-note").strip() == "Your account is already set up. Nothing to pay.", "the tester note %r" % page.inner_text("#wiz-sub-note"))
     need(not page.is_visible("#wiz-sub-month") and not page.is_visible("#wiz-sub-year") and not page.is_visible("#wiz-subscribe .lede"), "a tester sees the plan buttons or the lede")
+    need("$" not in page.inner_text("#wiz-subscribe") and not page.is_visible("#wiz-sub-retry"), "a tester sees a price or Try again")
     p = page.evaluate(PROBE)
     common(p, text, need)
     ctx.close()
-    return fails + errors, [shot_path]
+    return fails + errors, [x for x in (shot_wait, shot_path) if x]
 
 
 def check_picker(browser, base, size, theme, text):

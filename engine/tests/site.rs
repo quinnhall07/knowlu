@@ -826,3 +826,99 @@ fn the_terms_promise_no_gift_year_yet() {
     let terms = fs::read_to_string(site("terms.html")).expect("site/terms.html");
     assert!(!terms.contains("A year for someone else"), "terms.html promises a gift year the app cannot sell yet");
 }
+
+// ---- v0.4.1 pricing, T5b: the subscribed page and the terms' prices ----------------------------------
+// The terms were published at 2026-11-21 with the signed prices; these pins hold them to what the server
+// sells (`docs/specs/2026-11-19-v041-pricing-design.md` §6). Present strings are read as a reader sees
+// the page (`plain`); absent strings are refused in the raw HTML and in the reader's text both, and in any
+// case, so neither an attribute, a tag split nor a capital letter hides one (review M2).
+
+fn terms_html() -> String { fs::read_to_string(site("terms.html")).expect("site/terms.html") }
+
+/// Every string in `banned` that `html` carries, raw or as a reader sees it, in any case.
+fn carried<'a>(html: &str, banned: &[&'a str]) -> Vec<&'a str> {
+    let (raw, text) = (html.to_lowercase(), plain(html).to_lowercase());
+    banned.iter().copied().filter(|b| { let b = b.to_lowercase(); raw.contains(&b) || text.contains(&b) }).collect()
+}
+
+/// The page a student lands on after paying: v0.4.1's trial is 14 days and comes once, with an account's
+/// first subscription; a later subscription starts its plan at once and is told so (review C1); cancelling
+/// lives in Settings, under Membership (no gear any more, review M1); and every checkout lands here, from
+/// the wizard or from the upgrade sheet, so the page names no wizard (review C2).
+#[test]
+fn the_subscribed_page_names_fourteen_days() {
+    let html = fs::read_to_string(site("subscribed.html")).expect("site/subscribed.html");
+    let gone = missing(&plain(&html), &["14 days", "first subscription", "Otherwise your plan has started, charged as checkout showed", "Settings", "Membership"]);
+    assert!(gone.is_empty(), "subscribed.html lacks: {gone:?}");
+    let old = carried(&html, &["seven-day", "seven day", "7-day", "gear", "wizard"]);
+    assert!(old.is_empty(), "subscribed.html still says: {old:?}");
+}
+
+/// Pricing design §6 (r4): the signed figures and clauses, none of the old prices or plans, no
+/// old-subscriber paragraph, and "summer pause" only in the sentence that says there is none, in the text a
+/// reader sees and in the raw page both, so a meta or share description cannot say it (review M3).
+#[test]
+fn the_terms_state_the_signed_prices() {
+    let html = terms_html();
+    let text = plain(&html);
+    let gone = missing(&text, &["$12.99", "$84.37", "$6.49", "every 4 weeks", "14 days free", "There is no summer pause."]);
+    assert!(gone.is_empty(), "terms.html lacks: {gone:?}");
+    let old = carried(&html, &["a month", "per month", "/mo", "$9.99", "$69.99", "Pell", "Alabama", "If you subscribed before"]);
+    assert!(old.is_empty(), "terms.html still says: {old:?}");
+    for (what, body) in [("the text", text.as_str()), ("the raw page", html.as_str())] {
+        let pauses = body.to_lowercase().matches("summer pause").count();
+        let none = body.matches("There is no summer pause.").count();
+        assert_eq!(pauses, none, "\"summer pause\" appears {pauses} time(s) in {what}, only {none} of them in \"There is no summer pause.\"");
+    }
+}
+
+/// Pricing design r4 (the legal spec's price-change paragraph): the notice window and the promise that a
+/// paid period is never repriced.
+#[test]
+fn the_terms_carry_the_price_change_paragraph() {
+    let gone = missing(&plain(&terms_html()), &["between 7 and 30 days ahead", "never applies to a period you have already paid for"]);
+    assert!(gone.is_empty(), "terms.html lacks: {gone:?}");
+}
+
+/// Managed Payments is in effect: Link is the seller of record, and the terms say so in the words checkout
+/// shows. If that reading is ever reversed, this test and `the_privacy_page_names_link` flip together
+/// (pricing design §6: then neither page names Link); review M4.
+#[test]
+fn the_terms_name_link_as_the_seller() {
+    assert!(plain(&terms_html()).contains("Sold through Link"), "terms.html does not say \"Sold through Link\"");
+}
+
+/// Managed Payments is in effect: the privacy page lists Link among the companies that touch your data.
+#[test]
+fn the_privacy_page_names_link() {
+    let who = section_text(&privacy_html(), "Who else touches it");
+    assert!(
+        who.contains("Link — Stripe's checkout service, and the seller of record for your subscription"),
+        "Who else touches it does not name Link as the seller of record"
+    );
+}
+
+/// The published terms' standing clauses (legal-pages rewrite §7 items 9 and 15a, and item 8's strings the
+/// full terms share): the entity, Kentucky law, the Jefferson County venue with its small-claims option, sales
+/// tax at checkout, the yearly money-back guarantee, and the warranty and liability carve-outs for the
+/// promises the terms make; no "small claims court where you live". Item 8's "no Alabama" is pinned in
+/// `the_terms_state_the_signed_prices`; item 9's version tie is `app/tests/ui_wizard.rs`'s. Item 8's
+/// interim-only strings ("shown at checkout", "The summer pause, on the monthly plan", and the ban on "had
+/// not sent you the reminder") describe the interim terms, not these, and are not pinned (review M5).
+#[test]
+fn the_terms_carry_their_standing_clauses() {
+    let html = terms_html();
+    let gone = missing(&plain(&html), &[
+        "KNOWLU LLC",
+        "Commonwealth of Kentucky",
+        "Jefferson County, Kentucky",
+        "small claims division",
+        "Sales tax is added at checkout where it applies",
+        "30-day money-back guarantee on the yearly plan",
+        "Other than the promises these terms make",
+        "does not reduce a refund these terms promise",
+    ]);
+    assert!(gone.is_empty(), "terms.html lacks: {gone:?}");
+    let old = carried(&html, &["small claims court where you live"]);
+    assert!(old.is_empty(), "terms.html still says: {old:?}");
+}

@@ -296,8 +296,8 @@ fn normalise(path: &str) -> String {
 fn commands_split_by_shell_and_console() {
     let shell = shell_commands();
     let console = console_commands();
-    assert_eq!(shell.len(), 29, "run_shell keeps its 29 commands (note §6)");
-    assert_eq!(console.len(), 71, "run_console keeps its 71 commands (plan §1)");
+    assert_eq!(shell.len(), 30, "run_shell keeps its 30 commands (note §6; v0.4.1 D9 adds checkout_offer)");
+    assert_eq!(console.len(), 72, "run_console keeps its 72 commands (plan §1; v0.4.1 D9 adds checkout_offer)");
     let mut sent = 0usize;
     for (f, text) in scripts() {
         let wizardish = f == "js/wizard.js" || f == "js/picker.js";

@@ -92,7 +92,8 @@ fn a_refused_link_is_said_out_loud_and_escape_closes_the_topmost_panel() {
     let polls = sub.find("setTimeout(tick").expect("the entitlement poll");
     assert!(refused < polls && sub[refused..polls].contains("return"), "a refusal returns before the poll");
     assert!(sub.matches("if (!UP.root) { return; }").count() >= 2, "a closed sheet stops the poll, before and after each answer");
-    assert!(sub.contains("Still not subscribed. When the payment page is done, press Subscribe again."), "the poll's end says so");
+    assert!(sub.contains("Still not subscribed. When the payment page is done, choose a plan again."), "the poll's end says so, and names what is on the sheet: the two plans, no Subscribe button");
+    assert!(!sub.contains("press Subscribe"), "no sentence names a button the sheet no longer has");
     assert!(!sub.contains("$") && !fn_body(&js, "function upgradeHtml(").contains("$"), "no price in the app (A2)");
 }
 

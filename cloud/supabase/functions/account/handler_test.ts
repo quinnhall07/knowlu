@@ -9,6 +9,12 @@ function deps(over: Partial<Deps> = {}): Deps {
     requireEntitled: () => Promise.resolve({ account_id: "acc-1" }),
     getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: "cus_1" }),
     getSubscriptionId: () => Promise.resolve("sub_1"),
+    // T1d: Stripe's own word on the stored subscription, read before it is changed. `active` by
+    // default, so every older delete test still reaches the update it always made.
+    getSubscriptionStatus: () => Promise.resolve("active"),
+    // T1d fix round 2: the customer's subscriptions at Stripe, listed whenever the account has a Stripe
+    // customer. Empty by default; a test that must not list says so with a stub that throws.
+    listSubscriptions: () => Promise.resolve([]),
     stripe: () => Promise.resolve({}),
     purge: () => Promise.resolve(),
     deleteAuthUser: () => Promise.resolve(),
@@ -85,7 +91,15 @@ Deno.test("DELETE /account on an account that never subscribed still deletes eve
   const res = await handle(
     req("DELETE", ""),
     deps({
+      // No Stripe customer and no stored subscription: no Stripe call at all.
+      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: null }),
       getSubscriptionId: () => Promise.resolve(null),
+      getSubscriptionStatus: () => {
+        throw new Error("Stripe must not be read when there is no subscription");
+      },
+      listSubscriptions: () => {
+        throw new Error("Stripe must not be listed when there is no customer");
+      },
       stripe: () => {
         throw new Error("Stripe must not be called when there is no subscription");
       },
@@ -114,6 +128,12 @@ Deno.test("DELETE /account when the accounts row is already gone still tombstone
     req("DELETE", ""),
     deps({
       getAccount: () => Promise.resolve(null),
+      getSubscriptionStatus: () => {
+        throw new Error("Stripe must not be read once the accounts row is gone");
+      },
+      listSubscriptions: () => {
+        throw new Error("Stripe must not be listed once the accounts row is gone");
+      },
       stripe: () => {
         throw new Error("Stripe must not be called once the accounts row is gone");
       },
@@ -133,6 +153,419 @@ Deno.test("DELETE /account when the accounts row is already gone still tombstone
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { deleted: true });
   assertEquals(order, ["tombstone hash(a@example.invalid)", "deleteAuthUser"]);
+});
+
+// T1d (staging proof, 2026-11-27): a subscription that has ended cannot be set to cancel, and Stripe
+// refuses the update, so every former subscriber's delete stopped at a 502. The delete now asks Stripe
+// first and changes only a subscription that can still charge. `entitlements.status` is not read: the
+// row can lag Stripe, and Stripe is the authority on whether a charge can still happen.
+const REFUSED = () =>
+  Promise.reject(
+    new Response(JSON.stringify({ error: "the payment provider refused the request" }), {
+      status: 502,
+    }),
+  );
+
+function orderedDeps(order: string[], over: Partial<Deps> = {}): Deps {
+  return deps({
+    getSubscriptionStatus: (id) => {
+      order.push(`read ${id}`);
+      return Promise.resolve("active");
+    },
+    listSubscriptions: (customer) => {
+      order.push(`list ${customer}`);
+      return Promise.resolve([]);
+    },
+    stripe: (path, form) => {
+      order.push(`stripe ${path} ${JSON.stringify(form)}`);
+      return Promise.resolve({});
+    },
+    purge: () => {
+      order.push("purge");
+      return Promise.resolve();
+    },
+    tombstone: (h) => {
+      order.push(`tombstone ${h}`);
+      return Promise.resolve();
+    },
+    deleteAuthUser: () => {
+      order.push("deleteAuthUser");
+      return Promise.resolve();
+    },
+    ...over,
+  });
+}
+
+const PURGED = ["purge", "tombstone hash(a@example.invalid)", "deleteAuthUser"];
+const CANCEL = 'stripe /v1/subscriptions/sub_1 {"cancel_at_period_end":"true"}';
+
+/** Every `console` line written while `run` runs, joined; the console is restored afterwards. */
+async function captureLogs(run: () => Promise<unknown>): Promise<string[]> {
+  const lines: string[] = [];
+  const saved = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+  const keep = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+  console.log =
+    console.warn =
+    console.error =
+    console.info =
+      keep;
+  try {
+    await run();
+  } finally {
+    Object.assign(console, saved);
+  }
+  return lines;
+}
+
+Deno.test("DELETE /account of a subscription that has ended skips the update and deletes everything", async () => {
+  for (const status of ["canceled", "incomplete_expired"]) {
+    const order: string[] = [];
+    const res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, {
+        getSubscriptionStatus: (id) => {
+          order.push(`read ${id}`);
+          return Promise.resolve(status);
+        },
+        stripe: () => {
+          throw new Error("an ended subscription has nothing to cancel; Stripe refuses the update");
+        },
+      }),
+    );
+    assertEquals(res.status, 200, status);
+    assertEquals(await res.json(), { deleted: true }, status);
+    assertEquals(order, ["read sub_1", "list cus_1", ...PURGED], status);
+  }
+});
+
+Deno.test("DELETE /account of a subscription Stripe does not know goes on, and logs one line without the id", async () => {
+  const order: string[] = [];
+  let res: Response | null = null;
+  const lines = await captureLogs(async () => {
+    res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, {
+        getSubscriptionStatus: (id) => {
+          order.push(`read ${id}`);
+          return Promise.resolve(null);
+        },
+        stripe: () => {
+          throw new Error("a subscription Stripe does not know has nothing to cancel");
+        },
+      }),
+    );
+  });
+  assertEquals(res!.status, 200);
+  assertEquals(await res!.json(), { deleted: true });
+  assertEquals(order, ["read sub_1", "list cus_1", ...PURGED]);
+  assertEquals(lines.length, 1, `one line, got ${JSON.stringify(lines)}`);
+  assert(!lines[0].includes("sub_1"), `the line carries the subscription id: ${lines[0]}`);
+  assert(!lines[0].includes("cus_1"), `the line carries the customer id: ${lines[0]}`);
+});
+
+Deno.test("DELETE /account of a subscription that can still charge sets it to cancel at period end, read first", async () => {
+  for (const status of ["trialing", "active", "past_due", "unpaid", "paused", "incomplete"]) {
+    const order: string[] = [];
+    const res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, {
+        getSubscriptionStatus: (id) => {
+          order.push(`read ${id}`);
+          return Promise.resolve(status);
+        },
+      }),
+    );
+    assertEquals(res.status, 200, status);
+    assertEquals(order, ["read sub_1", CANCEL, "list cus_1", ...PURGED], status);
+  }
+});
+
+Deno.test("DELETE /account of a status this code has never seen still sets the cancel (only an ended one is skipped)", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getSubscriptionStatus: (id) => {
+        order.push(`read ${id}`);
+        return Promise.resolve("some_future_status");
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(order, ["read sub_1", CANCEL, "list cus_1", ...PURGED]);
+});
+
+Deno.test("DELETE /account stops at a 502 and deletes nothing when the read fails", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getSubscriptionStatus: (id) => {
+        order.push(`read ${id}`);
+        return REFUSED();
+      },
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 502);
+  assertEquals(await res.json(), { error: "the payment provider refused the request" });
+  assertEquals(order, ["read sub_1"], "no update, purge, tombstone or login delete after a failed read");
+});
+
+Deno.test("DELETE /account stops at a 502 and deletes nothing when the update fails", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      stripe: (path, form) => {
+        order.push(`stripe ${path} ${JSON.stringify(form)}`);
+        return REFUSED();
+      },
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 502);
+  assertEquals(order, ["read sub_1", CANCEL], "no purge, tombstone or login delete after a failed update");
+});
+
+Deno.test("DELETE /account never puts a stored id that is not shaped like a subscription's into a Stripe path", async () => {
+  // `.` and `..` survive `encodeURIComponent`, and the URL parser resolves them as path segments.
+  for (const id of ["..", ".", "sub_1/../../v1/customers", "sub_1?expand[]=customer", "cus_1", ""]) {
+    const order: string[] = [];
+    const res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, { getSubscriptionId: () => Promise.resolve(id) }),
+    ).catch((e) => e as Response);
+    if (id === "") {
+      // An empty column is no subscription, as it always was.
+      assertEquals(res.status, 200, "empty");
+      assertEquals(order, ["list cus_1", ...PURGED], "empty");
+      continue;
+    }
+    assertEquals(res.status, 502, id);
+    assertEquals(order, [], `${id}: nothing read, changed or deleted`);
+  }
+});
+
+// T1d fix round 1 (review finding 2): the stored id can lag Stripe exactly as the status can. A former
+// subscriber who subscribes again before the new subscription's webhook lands still holds the old,
+// ended id. So when the stored id is ended, unknown or absent, Stripe's list for the customer decides.
+type Listed = { id: string; status: string; cancel_at_period_end: boolean };
+const live = (id: string, status = "active", cancelling = false): Listed => ({
+  id,
+  status,
+  cancel_at_period_end: cancelling,
+});
+const cancelOf = (id: string) => `stripe /v1/subscriptions/${id} {"cancel_at_period_end":"true"}`;
+
+function listing(order: string[], listed: Listed[] | null): Partial<Deps> {
+  return {
+    listSubscriptions: (customer) => {
+      order.push(`list ${customer}`);
+      return Promise.resolve(listed);
+    },
+  };
+}
+
+Deno.test("DELETE /account of a former subscriber who subscribed again cancels the new subscription before the purge", async () => {
+  // The scenario end to end: the stored id is the old one and reads canceled; the new subscription's
+  // webhook has not landed. The list finds it, it is set to cancel, and only then is the account purged.
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getSubscriptionStatus: (id) => {
+        order.push(`read ${id}`);
+        return Promise.resolve("canceled");
+      },
+      ...listing(order, [live("sub_2")]),
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { deleted: true });
+  assertEquals(order, ["read sub_1", "list cus_1", cancelOf("sub_2"), ...PURGED]);
+});
+
+Deno.test("DELETE /account lists the customer when the stored subscription is ended or unknown to Stripe", async () => {
+  for (const stored of ["canceled", "incomplete_expired", null]) {
+    const order: string[] = [];
+    const lines = await captureLogs(async () => {
+      const res = await handle(
+        req("DELETE", ""),
+        orderedDeps(order, {
+          getSubscriptionStatus: (id) => {
+            order.push(`read ${id}`);
+            return Promise.resolve(stored);
+          },
+          ...listing(order, [live("sub_2", "past_due")]),
+        }),
+      );
+      assertEquals(res.status, 200, String(stored));
+    });
+    assertEquals(order, ["read sub_1", "list cus_1", cancelOf("sub_2"), ...PURGED], String(stored));
+    for (const l of lines) assert(!/sub_|cus_/.test(l), `a log line carries an id: ${l}`);
+  }
+});
+
+Deno.test("DELETE /account with no stored subscription but a Stripe customer lists it and cancels what can still charge", async () => {
+  // Only what can still charge and is not already cancelling is changed, each once, in the list's order.
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getSubscriptionId: () => Promise.resolve(null),
+      getSubscriptionStatus: () => {
+        throw new Error("there is no stored subscription to read");
+      },
+      ...listing(order, [
+        live("sub_2", "trialing"),
+        live("sub_3", "canceled"),
+        live("sub_4", "active", true),
+        live("sub_5", "incomplete_expired"),
+        live("sub_6", "unpaid"),
+      ]),
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(order, ["list cus_1", cancelOf("sub_2"), cancelOf("sub_6"), ...PURGED]);
+});
+
+Deno.test("DELETE /account of a customer Stripe does not know goes on, and logs one line without the id", async () => {
+  const order: string[] = [];
+  let status = 0;
+  const lines = await captureLogs(async () => {
+    const res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, { getSubscriptionId: () => Promise.resolve(null), ...listing(order, null) }),
+    );
+    status = res.status;
+  });
+  assertEquals(status, 200);
+  assertEquals(order, ["list cus_1", ...PURGED]);
+  assertEquals(lines.length, 1, `one line, got ${JSON.stringify(lines)}`);
+  assert(!/cus_1|sub_1/.test(lines[0]), `the line carries an id: ${lines[0]}`);
+});
+
+// T1d fix round 2 (re-review residual gap 1, ruled: adopt): the stored record can lag, so an account can
+// hold a second live subscription the stored id does not name. With a Stripe customer, the list always
+// runs, the stored one included, and no subscription is updated twice.
+Deno.test("DELETE /account with a live stored subscription and a customer also cancels a second live one", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      // The list may still show the stored one as not cancelling (Stripe's list can trail the update),
+      // and names the second one twice here: each is updated once.
+      ...listing(order, [live("sub_1"), live("sub_2"), live("sub_2")]),
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(order, ["read sub_1", CANCEL, "list cus_1", cancelOf("sub_2"), ...PURGED]);
+});
+
+Deno.test("DELETE /account with a live stored subscription and no customer keeps the one read and the one update", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: null }),
+      listSubscriptions: () => {
+        throw new Error("there is no customer to list");
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(order, ["read sub_1", CANCEL, ...PURGED]);
+});
+
+Deno.test("DELETE /account stops at a 502 and deletes nothing when the list fails after a live stored update", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      listSubscriptions: (customer) => {
+        order.push(`list ${customer}`);
+        return REFUSED();
+      },
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 502);
+  assertEquals(order, ["read sub_1", CANCEL, "list cus_1"], "no purge, tombstone or login delete");
+});
+
+Deno.test("DELETE /account stops at a 502 and deletes nothing when the customer's list fails", async () => {
+  for (const stored of ["sub_1", null]) {
+    const order: string[] = [];
+    const res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, {
+        getSubscriptionId: () => Promise.resolve(stored),
+        getSubscriptionStatus: (id) => {
+          order.push(`read ${id}`);
+          return Promise.resolve("canceled");
+        },
+        listSubscriptions: (customer) => {
+          order.push(`list ${customer}`);
+          return REFUSED();
+        },
+      }),
+    ).catch((e) => e as Response);
+    assertEquals(res.status, 502, String(stored));
+    const expected = stored ? ["read sub_1", "list cus_1"] : ["list cus_1"];
+    assertEquals(order, expected, `${stored}: no purge, tombstone or login delete after a failed list`);
+  }
+});
+
+Deno.test("DELETE /account stops at a 502 and deletes nothing when a listed subscription's update fails", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getSubscriptionId: () => Promise.resolve(null),
+      ...listing(order, [live("sub_2"), live("sub_3")]),
+      stripe: (path, form) => {
+        order.push(`stripe ${path} ${JSON.stringify(form)}`);
+        return REFUSED();
+      },
+    }),
+  ).catch((e) => e as Response);
+  assertEquals(res.status, 502);
+  assertEquals(order, ["list cus_1", cancelOf("sub_2")], "the first refusal stops it; nothing is deleted");
+});
+
+Deno.test("DELETE /account never puts a stored customer id that is not shaped like one into a Stripe query", async () => {
+  for (const customer of ["..", "cus_1&limit=1", "cus_1/x", "sub_1", ""]) {
+    const order: string[] = [];
+    const res = await handle(
+      req("DELETE", ""),
+      orderedDeps(order, {
+        getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: customer }),
+        getSubscriptionId: () => Promise.resolve(null),
+      }),
+    ).catch((e) => e as Response);
+    if (customer === "") {
+      // An empty column is no customer: no Stripe call, as with no customer at all.
+      assertEquals(res.status, 200, "empty");
+      assertEquals(order, PURGED, "empty");
+      continue;
+    }
+    assertEquals(res.status, 502, customer);
+    assertEquals(order, [], `${customer}: nothing listed, changed or deleted`);
+  }
+});
+
+Deno.test("DELETE /account with an ended stored subscription and no Stripe customer goes on without a list", async () => {
+  const order: string[] = [];
+  const res = await handle(
+    req("DELETE", ""),
+    orderedDeps(order, {
+      getAccount: () => Promise.resolve({ email: "a@example.invalid", stripe_customer_id: null }),
+      getSubscriptionStatus: (id) => {
+        order.push(`read ${id}`);
+        return Promise.resolve("canceled");
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(order, ["read sub_1", ...PURGED]);
 });
 
 Deno.test("GET /account/export hands back every table, keyed and complete", async () => {
@@ -752,5 +1185,27 @@ Deno.test("the purge names route_daily, and leaves comp_grants and comp_audit to
   assert(
     /cascade from\s+`accounts`/.test(block),
     "the same comment says the cascade from accounts deletes them",
+  );
+});
+
+// T1d: `index.ts` is never loaded by `deno test`, so its two Stripe deps are pinned by their text: the
+// read and the update both go through `stripe_delete.ts`, whose tests drive them with a fake `fetch`.
+Deno.test("the delete reads and updates the subscription through stripe_delete.ts, never the bare helpers", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(
+    text.includes("getSubscriptionStatus: subscriptionStatusFrom(stripeKey, globalThis.fetch),"),
+    "getSubscriptionStatus must be subscriptionStatusFrom over the platform fetch",
+  );
+  assert(
+    text.includes("listSubscriptions: customerSubscriptionsFrom(stripeKey, globalThis.fetch),"),
+    "listSubscriptions must be customerSubscriptionsFrom over the platform fetch",
+  );
+  assert(
+    text.includes("stripe: cancelPostFrom(stripeKey, globalThis.fetch),"),
+    "the update must go through cancelPostFrom, which keeps the id off the log",
+  );
+  assert(
+    !/stripe(Post|Get)From\(/.test(text),
+    "index.ts must not call stripePostFrom or stripeGetFrom directly",
   );
 });

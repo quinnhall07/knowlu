@@ -3,7 +3,8 @@
 One codebase, two projects: **`knowlu-staging`** and **`knowlu-prod`** (spec §11 R6). Nothing here names a
 project; `supabase link` decides.
 
-**Migrations are applied to STAGING from a developer machine, and to PROD by Quinn or by CI.** That rule is
+**Migrations are applied to STAGING from a developer machine, and to PROD only on Quinn's word, one push at a
+time (no workflow pushes to a hosted project).** That rule is
 the whole of this file:
 
 ```powershell
@@ -141,6 +142,48 @@ Order, per project:
 4. Point the topic's HTTPS subscription at `mail-inbound` and confirm it.
 5. Smoke by a staging session (at most two one-time codes an hour): a canary round trip, one synthetic
    forward and a count-only query. Production gets its own domain, bucket, topic and rule set.
+
+## Billing (`billing-checkout`, `stripe-webhook`, `billing-jobs`)
+
+- **Plan keys.** `four_weekly` (every 4 weeks) and `yearly` (once a year). A key outlives its price: a
+  price change is a new catalog entry under the same key, and adding or dropping a key needs an app
+  release (the app's buttons are per key).
+- **The catalog** (`functions/_shared/price_catalog.ts`, note D13 in `docs/specs/2026-11-19-v041-pricing-design.md`) is the one place an amount, a price
+  variable name or the terms version is written: `SELLING`, `KEPT` (each with its `stay` or `move` rule),
+  `TERMS_VERSION`. Each entry's Stripe price id is read from a variable the catalog derives,
+  `STRIPE_PRICE_<KEY>_<CENTS>` (today `STRIPE_PRICE_FOUR_WEEKLY_1299` and `STRIPE_PRICE_YEARLY_8437`),
+  set as a function secret. A variable names one price forever.
+- **The offer.** `GET /billing-checkout` answers `{ terms_version, plans, note }` from `SELLING`, with
+  each plan's `amount_cents` and the lines the app shows; it needs a signed-in user and reads no account row. The app renders it as is
+  (`checkout_offer`) and sends `{ plan, amount_cents, terms_version }` back on `POST /billing-checkout`.
+- **The 409s** on `POST /billing-checkout`: a plan name from a build older than v0.4.1 (`monthly`,
+  `academic_year`): "Update Knowlu"; an amount or terms version that differs from the catalog's: prices
+  or terms have changed, look again; an account that already has a live subscription (`active`,
+  `trialing`, `past_due`, `unpaid`); and a free tester account.
+- **One open page.** Before it creates a session, `POST /billing-checkout` expires every Checkout Session
+  that customer still has open, so two pages opened before either is paid cannot both be paid. A failure
+  there answers 502 and writes nothing: no consent row, no session. It does not cover two requests in the
+  same instant, or a page paid seconds before the webhook records it (design note D5).
+- **Deleting an account.** `DELETE /account` asks Stripe before it deletes anything. It reads the stored subscription and
+  lists the customer's subscriptions, sets every one that can still charge to cancel at its period's end, and treats a
+  subscription that has ended, or one Stripe does not know, as nothing to cancel. Any other answer from Stripe stops the
+  delete with a 502 and nothing is deleted: nobody is charged after their account is gone. A checkout page still open at
+  that moment is not expired.
+- **The price check.** Before a session is created, checkout reads the selling entry's Stripe Price and
+  requires it active, USD, the catalog's amount, the key's interval and count, and tax behaviour
+  `exclusive` (`priceProblems`); anything else is a 500 and a log line, never a charge at the wrong price.
+- **`stripe-webhook`** handles six event types: `checkout.session.completed`,
+  `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`,
+  `customer.subscription.trial_will_end` and `invoice.payment_failed`. Every other type is answered 200
+  and dropped. It sends two emails of its own: the subscribe confirmation on `checkout.session.completed`
+  (note D6b) and the reminder before a trial's first charge on `trial_will_end` (D6). When it reads a
+  subscription, only Stripe's 404 means none; any other failed read answers 502, so Stripe redelivers.
+- **The move** (note D14 in the same design note). `billing-jobs`, run daily, emails a subscriber on a `KEPT` entry whose rule is
+  `move` `noticeDays` (7 to 24) before a renewal, marks the subscription, then moves it to the key's
+  selling price for that renewal with no proration. A failed notice changes nothing. A `trialing`
+  subscription is not moved to a dearer price until it is active; a cut moves it.
+- **Deploy all three together.** `billing-jobs` imports `chargeDate` from `stripe-webhook/handler.ts`.
+- **Changing a price** is the written procedure in `docs/reference/price-change.md`.
 
 ## Testing
 

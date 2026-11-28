@@ -86,7 +86,9 @@ so on *when* billing moves, this note wins.
   - the plan's price;
   - 14 days free, on the account's first subscription;
   - tax added on top;
-  - one renewal sentence, which on the yearly plan names the money-back guarantee (D8).
+  - one renewal sentence, which on the yearly plan names the money-back guarantee (D8). *Changed
+    2026-11-27:* Stripe refuses that sentence under Managed Payments, so the page shows Stripe's own
+    renewal lines instead (the paragraph under D8).
 
   Under Managed Payments it also says "Sold through Link".
 - **Before the first charge**, Knowlu emails the student the plan, the amount, the date and how to cancel.
@@ -202,6 +204,13 @@ the old price's id. A selling variable that is unset answers the same 500. The c
 - **No row with a subscription id:** the session asks for `subscription_data[trial_period_days]` = 14.
 - **Any other row with a subscription id** (`canceled`, `incomplete_expired`, and so on): no trial.
 
+**Open pages are expired first (added 2026-11-27, on the founder's yes).** The row above is written only
+when a checkout completes, so two pages opened before either is paid would both pass these checks. Once the
+customer is known, and before the consent row, the checkout lists that customer's open Checkout Sessions and
+expires each one. A list shorter than 100 ends it; a full list is read again, skipping ids already expired;
+five rounds, or a full round with nothing new, is a refusal. Any failure answers 502, writes no consent row
+and creates no session. A customer created in this request has no pages and is not listed.
+
 `payment_method_collection: always` stays (`handler.ts:60`), for the reason its test gives
 (`handler_test.ts:22-25`).
 
@@ -211,7 +220,10 @@ the old price's id. A selling variable that is unset answers the same 500. The c
   only the one stored id to cancel at period end (`account/handler.ts:88-94`), so the second would bill a
   deleted account. The app asks before opening checkout; this is the server's backstop.
 
-*Known limit:* a deleted account's address can trial again on a new account.
+*Known limits:* a deleted account's address can trial again on a new account. Two requests in the same
+instant, or a second checkout opened in the seconds between paying and the webhook's write, can still give
+two subscriptions; closing that needs a guard in the webhook, which is not built. A checkout page still open when an account is deleted is
+not expired by the delete; a payment completed on it afterwards needs a refund by hand (added 2026-11-27).
 
 **D6. The reminder is Knowlu's own email, sent by the webhook** on Stripe's
 `customer.subscription.trial_will_end` event. Stripe sends that event three days before a trial ends
@@ -247,6 +259,53 @@ the old price's id. A selling variable that is unset answers the same 500. The c
 
 If Link or Stripe also sends a notice (S1 records it), Knowlu's still goes.
 
+**D6b. The subscribe confirmation is Knowlu's own email too (added 2026-11-27 on the founder's word).** The webhook
+sends it on `checkout.session.completed`.
+- **Why.** The published terms promise, under *Emails about your subscription*: "When you subscribe: a
+  confirmation you can keep, with the plan, the price, how often it renews and how to cancel." No code sent
+  one, and the staging proof of 2026-11-27 saw none from Stripe's sandbox either. And since D8's sentence is
+  not on Stripe's page, how to cancel is otherwise stated only on the app's Subscribe step.
+- **When it is sent.** Once per event, when the session is a subscription checkout (`mode` is
+  `subscription`, or absent with a subscription id on the session), the subscription the webhook fetches is
+  `trialing` or `active`, and the account still exists and has an address. Never on the
+  `customer.subscription.*` events, `invoice.payment_failed` or `trial_will_end`.
+- **It does not wait behind the stale guard.** The guard exists for the entitlement write only, and
+  `customer.subscription.created` often lands first with the same or a later timestamp. So a stale
+  checkout event skips the write and still sends the mail.
+- **What it says.** Plain text, from the same words as D6's reminder, shared in one function so the two
+  cannot drift:
+  - "Your Knowlu free trial has started" (trialing, with a trial end) or "Your Knowlu subscription has
+    started", and "Keep this message: it is your confirmation.";
+  - the plan words and the amount from the catalog entry the price id matches, or D6's fallbacks for an id
+    the catalog lacks, then the catalog's tax phrase;
+  - the date of the first charge, "when your free trial ends", or of the next charge, in UTC−10 as in D6.
+    With no such date on the subscription there is no date line; no date is guessed;
+  - a line saying a promotion code applies, only when the subscription carries a discount;
+  - "It renews automatically until you cancel.", and for a yearly entry the catalog's money-back sentence;
+  - how to cancel: D6's two lines without "before then".
+
+  No id, no link and no "14 days" (the date carries it).
+- **If the email fails.** The entitlement is already written. The webhook answers 502 and records nothing,
+  so Stripe retries; on the retry the write is stale and skipped, and the mail goes. The log names the
+  account id only. After a send nothing answers 5xx: a record that fails is logged and dropped, as for D6.
+- **If the subscription cannot be read** (added 2026-11-28, fix round 1). Only Stripe's 404 means "no such
+  subscription", answered 200 `ignored` as before, and logged in one line naming the event type only (fix
+  round 2: Stripe keeps cancelled subscriptions readable, so such a 404 usually means a key of the wrong mode
+  or account). Any other failure of the read (another status, the network, a 2xx body whose `object` is not
+  `subscription`) answers 502 and records nothing, so Stripe redelivers the event; the log names the event
+  type and the status, or "network", only. This holds for `invoice.payment_failed` too, the other event that
+  reads the subscription.
+
+*Reasons:* the terms promise it. `webhook_events` removes duplicates, so no migration is needed.
+
+*Known limits* (widened 2026-11-28, fix round 1):
+- One event can be mailed twice in three ways, for D6 as well: two deliveries processed at the same instant;
+  the email provider accepts the mail but its answer is lost, so the send counts as failed and Stripe's retry
+  mails again; and a record that fails after a send, followed by a redelivery of the event. These are known
+  limits, not a promise to close them.
+- A subscription that is not yet `trialing` or `active` when its checkout completes is not mailed later:
+  only `checkout.session.completed` sends the confirmation. Card checkouts complete as one or the other.
+
 **D7. Managed Payments in checkout (legal spec C5), starting from what the record already says.**
 - **In live mode it is already on.** On 2026-09-14 Quinn "kept Managed Payments on (P3)" (`HANDOFF.md:80,
   629`), and the amendment repeats it (`:1131, :1157` there).
@@ -281,7 +340,8 @@ refusing them under Managed Payments:
   `account/handler.ts:88-94`);
 - `subscription_data[metadata][account_id]` and `client_reference_id`, by which the webhook finds the account
   (`stripe-webhook/handler.ts:92-94`);
-- `custom_text` (D8, P9).
+- `custom_text` (D8, P9). *Changed 2026-11-27:* Stripe refuses it in every slot under Managed Payments,
+  so the session no longer sends it; the founder ruled so the same day (the paragraph under D8).
 
 If Managed Payments refuses any of these, that is a checkpoint B failure for Quinn, with the fallback below.
 
@@ -319,6 +379,17 @@ function of the plan and of whether a trial applies:
 
 The cadence words are the key's, which never change. The tax phrase and the money-back sentence come from
 the catalog's words (D13), so the two cannot drift from the app's lines (r5: m2).
+
+**Refused by Stripe under Managed Payments (found 2026-11-27 on staging; ruled by the founder the same day: Managed
+Payments stays, and the sentence is not sent).**
+Stripe answers "You cannot use custom_text with Managed Payments." for every `custom_text` slot, so the session no
+longer sets one. What Stripe's own page states without it, as read on the sandbox: "14 days free" on a first
+subscription; "Then $12.99 every 4 weeks starting" or "Then $84.37 per year starting" with the first charge's date;
+the tax line; "Total due today $0.00"; a required checkbox agreeing to the seller's Terms of Service and Privacy
+Policy; and "By subscribing, you agree to Link's Terms and Privacy Policy and authorize Link to charge you for the
+described subscription until you cancel." What it does not state: how to cancel inside Knowlu, and the yearly plan's
+money-back guarantee. Both are on the app's Subscribe step before the page opens ("Cancel any time in Settings." and
+the yearly line's guarantee sentence) and in the terms.
 
 **D9. The app's subscribe step and labels: the app shows what the server sends** (revised r4).
 - **The offer, from the server.** `GET /billing-checkout`, with the session, answers the catalog's selling
@@ -408,8 +479,9 @@ the catalog's words (D13), so the two cannot drift from the app's lines (r5: m2)
 
 *What the text is made of.* It starts from the legal spec's interim terms (§4, "Interim terms with bump A",
 U10). Their *The subscription*, *How to cancel* and *Refunds* sections are replaced by §4's full text. These
-paragraphs are left out, because this release builds none of their code:
-- the confirmation email (C8);
+paragraphs are left out, because this release builds none of their code (*changed 2026-11-27:* except C8,
+which D6b now builds):
+- the confirmation email (C8). *Changed 2026-11-27:* it is now built (D6b);
 - the yearly renewal notice (C10's yearly half; D14 builds its price-change half);
 - "a disputed charge is not a paid period" (C12);
 - the "We" and shutdown paragraphs (C13);
@@ -464,9 +536,11 @@ address and the email address. The page's list of companies is closed ("Nobody e
 `billing-checkout`, `stripe-webhook`, `billing-jobs` and `billing-portal` folders, and the catalog itself)
 where a price amount, the name of a price variable, or the terms version that states the prices is
 written. What it does not cover, and why that is safe:
-- **Cadence words without a figure** ("every 4 weeks", "once a year") also appear in D8's `custom_text` and
-  in Settings' plan words. A key's cadence is fixed forever (below), so they never change with a price.
-  D8 takes its tax line and money-back line from the catalog's words.
+- **Cadence words without a figure** ("every 4 weeks", "once a year") also appear in Settings' plan words.
+  A key's cadence is fixed forever (below), so they never change with a price. *Changed 2026-11-27:* they
+  no longer appear in D8's `custom_text`, which the session stopped sending (Stripe refuses it under
+  Managed Payments; the paragraph under D8); until then D8 took its tax line and money-back line from the
+  catalog's words.
 - **Other `$` figures under `functions/`** are model costs in comments (`_shared/judge_caps.ts:37-125`), not
   prices. Two of those comments still name "$9.99 subscription" (`:45, 97`) as a yardstick; D16 lists them
   among the documents to check, and nothing reads them.
@@ -678,7 +752,11 @@ buttons are per key, and a build whose offer lacks one of its keys can sell noth
    the offer, both buttons and Stripe's test page show the new figure, and an offer from before the change
    is refused with D3's sentence. For `move`, rehearse one notice and one change on a test subscription
    (as S2 did).
-4. **Live mode:** Quinn creates the live Price; the main session sets the production variable.
+4. **Live mode:** Quinn creates the live Price; the main session sets the production variable. **The reuse
+   rule of step 1 holds in live mode too** (r6, found by the runbook's review, 2026-11-21): if the key has
+   been sold at this amount before, Quinn unarchives that live Price and its variable keeps the same id.
+   Never a second live Price at the same key and cents: subscribers kept on the first would stop being
+   recognised (`stripe-webhook/handler.ts` writes `plan: null` for a price id the catalog does not resolve).
 5. **Merge, then go live back to back:** publish the page with `site.yml`, then deploy the three billing
    functions from the merge SHA. Page first: in the minutes between, a checkout records the old version with
    the old price, a matched pair, and never a version that is not yet published.
@@ -799,7 +877,8 @@ fails if one in the billing code or the terms is missed, and step 2's list cover
       with D3's "changed" sentence.
     - **The live pages.** `yearly` and `four_weekly` checkouts each open a live page. A headless read shows:
       - $84.37, then $12.99 every 4 weeks;
-      - 14 days free, the tax line and D8's sentence;
+      - 14 days free, the tax line and D8's sentence (*changed 2026-11-27:* Stripe's own renewal lines
+        instead, as listed under D8);
       - "Sold through Link" if Managed Payments is in effect, and its absence if item 10 took the
         switch-off fallback.
 
@@ -964,8 +1043,9 @@ the environment).
   variable is the seventh case. Each answers 500 before the consent row.
 - D7: every load-bearing key is present (the trial key on a first subscription only, D5), and the dropped
   keys are exactly those checkpoint A allowed.
-- D8: `custom_text` for each plan and trial combination; with an invented catalog whose tax or money-back
-  words differ, the text carries the invented words (r5: m2).
+- D8, *changed 2026-11-27*: for each plan and trial combination, no key of the form starts with
+  `custom_text`, because Stripe refuses it under Managed Payments (the paragraph under D8). Until then:
+  `custom_text` for each combination, carrying an invented catalog's tax and money-back words (r5: m2).
 - The 18+ and tester tests are unchanged (their request bodies gain the offer's two fields).
 - A text-read of `index.ts` (`handler_test.ts:331-343`) checks that it hands the handler the catalog
   resolved from the environment, and that `isTester` is unchanged.
@@ -984,6 +1064,14 @@ the environment).
   - a failed email gives 502, nothing is recorded, and the log names the account id only;
   - a duplicate event sends nothing;
   - no entitlement is written.
+- The subscribe confirmation (D6b, added 2026-11-27): the four texts whole (trialing and active, each plan),
+  the catalog's own words, an unknown id's fallback, the discount line, no date line without a date; sent
+  once on `checkout.session.completed`, also when the write is stale, and never for another status, no
+  address, a `payment` session or another event; a failed send is 502 after the write, records nothing and
+  sends once on the retry; a failed record after a send is 200; no id in the mail; the reminder's text
+  pinned whole. (Fix round 1, 2026-11-28:) a 404 on the subscription read is ignored as before; a 500, a
+  429 or a network error on either reading event is 502 with nothing written, sent or recorded, and the
+  redelivery writes, mails once and records; `subscription_read_test.ts` tests the strict read itself.
 
 **`billing-jobs/handler_test.ts`:**
 - The pause and resume tests go with the code (D10). No subscriber is ever sent a `pause_collection` call.
@@ -1088,7 +1176,7 @@ These stay in the v0.5.0 billing lane or later:
 - **C2**, emailing every account on a material policy change.
 - **C7's record**: the consent record keeping the plan and the text shown. `price_cents` already tells the
   two plans apart.
-- **C8**, the confirmation email.
+- **C8**, the confirmation email. *Changed 2026-11-27:* built in this lane (D6b).
 - **C10's yearly half**, the yearly renewal notice. It must land before the first yearly renewal, which
   comes no sooner than a year and 14 days after the first yearly checkout. (Its price-change half is D14.)
 - **C12**, refunds and disputes in the webhook.
@@ -1153,8 +1241,9 @@ and answered the same day.
 12. **Accept 10b's leftover production records:** consent rows carrying the not-yet-published versions, the
     live Stripe customer, and any record Link keeps. They go in the ledger as counts. Blocks step 10b.
     *Recommend:* accept them.
-13. **VISION's "One edition" line and CLAUDE.md's Direction line, in your words.** Blocks the tag.
-    *Recommend:* yes.
+13. **Answered 2026-11-27: yes, as drafted.** The question was: **VISION's "One edition" line and CLAUDE.md's
+    Direction line, in your words.** Quinn approved both, with VISION's quiet-release sentence ("the regular
+    prices") and its Launch line (no figure); they are amended in this lane.
 14. **Answered 2026-11-21: yes to all three.** The question was: **the price-change design (new in r4).** The amendment's *Reading (7)* leaves to this lane whether a
     change needs an app or a terms release (`:1400-1402`); this is the lane's answer, for you to confirm
     before T5. Three parts, one answer:

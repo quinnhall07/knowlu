@@ -1,7 +1,7 @@
 # `app/` — the Knowlu desktop shell
 
-**Status: Knowlu plan 4a, Tasks 1–11 (2026-09-06) — the shell now installs, onboards, configures
-and updates itself.** It stopped being a window that needs a `--vault` on the command line: a first
+**Status: v0.4.x (version 0.4.1 in `tauri.conf.json`); where the work stands is `HANDOFF.md`.** The shell
+installs, onboards, configures and updates itself (plan 4a, 2026-09-06, built that). It stopped being a window that needs a `--vault` on the command line: a first
 launch runs a wizard, a machine with several vaults gets a picker, and settings are a panel rather
 than a file to hand-edit. (Plan 1 Tasks 7–15 made it the way the system is *operated* rather than
 viewed; that half is unchanged.) The product is called **Knowlu** wherever a user sees it (window title, tray tooltip,
@@ -16,31 +16,30 @@ after a friend has installed orphans all three. It changed from `app.knowlu.desk
 9, before the first installer existed; the one visible cost was that the next launch re-registered
 autostart and reset the window position once. `tauri.conf.json` has no comment syntax, hence this note.
 
-The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Eighty-eight**
-distinct `#[tauri::command]`s are registered (recounted 2026-10-20, merge of main's lane L6 into
-close-out P3, by script: every name in the two `generate_handler!` lists of `src/main.rs`, split on
+The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Ninety-one**
+distinct `#[tauri::command]`s are registered (recounted 2026-11-21, v0.4.1's `checkout_offer` added, by script: every name in the two `generate_handler!` lists of `src/main.rs`, split on
 the commas, counted per list and as a union, and checked against the `#[tauri::command]` attributes
-in each module) — **twenty-nine from `src/commands.rs`, seventeen from `src/account.rs`, fourteen
+in each module) — **twenty-nine from `src/commands.rs`, twenty from `src/account.rs`, fourteen
 from `src/onboarding.rs`, ten from `src/mail.rs`, five from `src/lms_link.rs`, four each from
 `src/week.rs` and `src/grades.rs`, three from `src/registrar.rs` and two from `src/report.rs`**.
 Commands live beside the module they serve, never all in one file. Count them in `src/main.rs`'s
 two `generate_handler!` lists if this drifts, and note that the two lists are different windows,
 not one:
 
-- **The console window** registers 69 — all 29 of `commands.rs`; all four of `week.rs` and of
+- **The console window** registers 72 — all 29 of `commands.rs`; all four of `week.rs` and of
   `grades.rs`; all three of `registrar.rs`; all ten of `mail.rs`; `launch_state`, `pick_folder` and
-  `pick_file` from `onboarding.rs`; fourteen of `account.rs`'s seventeen (the seven sign-in
+  `pick_file` from `onboarding.rs`; seventeen of `account.rs`'s twenty (the eight sign-in and checkout
   commands included, because an install that predates the account is upgraded in place, inside
   this window, over its own vault; the three it lacks are the picker-only Google ones below); and
   both of `report.rs`.
-- **The vault-less shell** (picker or wizard) registers 29 — the 14 of `onboarding.rs`, ten of
+- **The vault-less shell** (picker or wizard) registers 30 — the 14 of `onboarding.rs`, eleven of
   `account.rs` (`google_sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`,
-  `entitlement_now`, `open_checkout`, `open_policy`, plus `google_connect_url`, `google_connected`
+  `entitlement_now`, `open_checkout`, `checkout_offer` (the subscribe step's offer from the server, v0.4.1 note D9 in `docs/specs/2026-11-19-v041-pricing-design.md`: `open_checkout` sends its plan, amount and terms version back unchanged), `open_policy`, plus `google_connect_url`, `google_connected`
   and `open_external` — C2's hand-off H9 phase (a), the wizard's Google button) and all five of
   `lms_link.rs`: there is no `ConsoleState` yet, so no command that needs one can be called.
 
-69 + 29 is 98; the ten names both lists register (`launch_state`, `pick_folder`, `pick_file` and
-the seven sign-in commands) are counted once in the 88.
+72 + 30 is 102; the eleven names both lists register (`launch_state`, `pick_folder`, `pick_file` and
+the eight sign-in and checkout commands) are counted once in the 91.
 
 In `commands.rs`: `state`, `note`, `mark_seen`, `ui_event` (read-only with respect to the vault's
 notes); `set_fields`, `create_task`, `delete_note`, `decide`, `answer_card`, `close_info`, `open_issue`,

@@ -11,9 +11,9 @@ import {
 import { encryptString, importAesKey, sha256Hex } from "../_shared/crypto.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
-import { stripePostFrom } from "../_shared/stripe.ts";
 import { serviceDb } from "../_shared/judge_db.ts";
 import { handle } from "./handler.ts";
+import { cancelPostFrom, customerSubscriptionsFrom, subscriptionStatusFrom } from "./stripe_delete.ts";
 import { liveGoogleDeleteDeps, revokeGoogleGrantOnDelete } from "./google_delete.ts";
 import {
   exportMail,
@@ -95,7 +95,12 @@ Deno.serve(async (req) => {
         );
         return rows[0]?.stripe_subscription_id ?? null;
       },
-      stripe: stripePostFrom(stripeKey, globalThis.fetch),
+      // T1d: the read, the customer's list and the updates, through `stripe_delete.ts`: all keep the id
+      // off the log, and only a 404 `resource_missing` on a read is anything but the 502 that stops the
+      // delete.
+      getSubscriptionStatus: subscriptionStatusFrom(stripeKey, globalThis.fetch),
+      listSubscriptions: customerSubscriptionsFrom(stripeKey, globalThis.fetch),
+      stripe: cancelPostFrom(stripeKey, globalThis.fetch),
       purge: async (id) => {
         // F-5: the account's Google grant, FIRST — `google_accounts` cascades with the `accounts`
         // row below, but a cascade only ever removes the ROW. The refresh token Google is still

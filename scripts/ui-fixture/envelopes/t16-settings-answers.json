@@ -7,7 +7,7 @@
   "error": null,
   "needs_account": false,
   "ok": true,
-  "plan": "monthly",
+  "plan": "four_weekly",
   "status": "active"
  },
  "delete_my_data": {

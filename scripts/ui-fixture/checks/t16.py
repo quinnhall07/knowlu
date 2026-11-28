@@ -63,7 +63,7 @@ def write_set(name, answers):
 
 
 ACCOUNT_MEMBER = {"ok": True, "error": None, "needs_account": False, "account_id": "acct_f1x7ure01", "email": "student@example.edu",
-                  "status": "active", "plan": "monthly", "current_period_end": "2026-09-24T00:00:00Z", "checked_at": "2026-08-28T08:00:00Z"}
+                  "status": "active", "plan": "four_weekly", "current_period_end": "2026-09-24T00:00:00Z", "checked_at": "2026-08-28T08:00:00Z"}
 ACCOUNT_LOCAL = {"ok": True, "error": None, "needs_account": True, "account_id": None, "email": "", "status": None, "plan": None,
                  "current_period_end": None, "checked_at": None}
 SETTINGS = {"ok": True, "error": None, "settings": {"profile_id": "profile_1111111111", "backup_dir": "D:\\Knowlu backups", "autostart": True, "quit_at": None}}
@@ -246,7 +246,7 @@ def check_settings(page, full, need):
     need(a["account_status"]["email"] in (text_of(page, "#set-account") or ""), "the account's email")
     need(shown(page, "#set-portal") and text_of(page, "#set-portal") == "Manage subscription", "Manage subscription")
     member = text_of(page, "#set-member") or ""
-    need("Active" in member and "Through " in member and "Sep 24" in member, "the entitlement and its period's end: %r" % member)
+    need("Active, Every 4 weeks" in member and "Through " in member and "Sep 24" in member, "the entitlement, its plan word and its period's end: %r" % member)
     need("renew" not in member.lower(), "no date is called a renewal: %r" % member)
     need((text_of(page, "#set-bdir") or "") == a["get_settings"]["settings"]["backup_dir"], "the backup folder")
     need(page.get_attribute("#set-grades-hide-in", "aria-checked") == "false", "Hide grades shows grades_status's hidden")
